@@ -1,7 +1,9 @@
+import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
+import requests
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -13,6 +15,9 @@ from .seed import seed_data
 
 _db_ready = False
 
+OSRM_BASE_URL = os.getenv("OSRM_BASE_URL", "https://router.project-osrm.org")
+_route_cache: Dict[int, List[List[float]]] = {}
+
 
 def ensure_db_ready() -> None:
     global _db_ready
@@ -22,56 +27,31 @@ def ensure_db_ready() -> None:
         _db_ready = True
 
 
+def fetch_road_route(start: List[float], end: List[float]) -> Optional[List[List[float]]]:
+    url = f"{OSRM_BASE_URL}/route/v1/driving/{start[1]},{start[0]};{end[1]},{end[0]}"
+    try:
+        response = requests.get(url, params={"overview": "full", "geometries": "geojson"}, timeout=5)
+        response.raise_for_status()
+        coordinates = response.json()["routes"][0]["geometry"]["coordinates"]
+        return [[lat, lon] for lon, lat in coordinates]
+    except (requests.RequestException, KeyError, IndexError, ValueError):
+        return None
+
+
 def build_route_points(job: Job) -> List[List[float]]:
+    if job.id in _route_cache:
+        return _route_cache[job.id]
+
     start = [job.pickup_lat, job.pickup_lon]
     end = [job.dropoff_lat, job.dropoff_lon]
 
-    if job.pickup_city == "Minneapolis" and job.dropoff_city == "Rochester":
-        return [
-            start,
-            [44.9700, -93.2550],
-            [44.9580, -93.2320],
-            [44.9400, -93.2050],
-            [44.9100, -93.1700],
-            [44.8850, -93.1200],
-            [44.8500, -93.0600],
-            [44.8150, -93.0000],
-            [44.7800, -92.9400],
-            [44.7400, -92.8800],
-            [44.7000, -92.8200],
-            [44.6500, -92.7600],
-            [44.5900, -92.7000],
-            [44.5200, -92.6400],
-            [44.4500, -92.5900],
-            [44.3600, -92.5500],
-            [44.2500, -92.5200],
-            end,
-        ]
-
-    if job.pickup_city == "Chicago" and job.dropoff_city == "St. Louis":
-        return [
-            start,
-            [41.8650, -87.9900],
-            [41.8300, -88.0600],
-            [41.7700, -88.1800],
-            [41.7000, -88.3200],
-            [41.6200, -88.5000],
-            [41.5000, -88.7000],
-            [41.3200, -88.9000],
-            [41.0500, -89.1000],
-            [40.7800, -89.3100],
-            [40.4200, -89.5200],
-            [39.9800, -89.7600],
-            [39.6000, -89.9200],
-            [39.1000, -90.0500],
-            end,
-        ]
-
-    return [
+    route = fetch_road_route(start, end) or [
         start,
         [(start[0] + end[0]) / 2, (start[1] + end[1]) / 2],
         end,
     ]
+    _route_cache[job.id] = route
+    return route
 
 
 def interpolate_along_route(route: List[List[float]], progress: float) -> Tuple[float, float]:
