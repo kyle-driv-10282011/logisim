@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Northstar Freight Simulator</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""
+    />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <h1>Northstar Freight</h1>
+        <section class="card">
+          <h2>Company</h2>
+          <div id="company-summary"></div>
+        </section>
+        <section class="card">
+          <h2>Fleet</h2>
+          <div id="vehicle-list"></div>
+        </section>
+        <section class="card">
+          <h2>Available Jobs</h2>
+          <div id="job-list"></div>
+        </section>
+        <section class="card">
+          <h2>Dispatch</h2>
+          <div id="dispatch-panel"></div>
+        </section>
+      </aside>
+
+      <main class="main-panel">
+        <header class="topbar">
+          <h2>Dispatch Board</h2>
+          <div id="simulation-time"></div>
+        </header>
+        <div id="map"></div>
+        <section class="card footer-card">
+          <h3>Delivery Activity</h3>
+          <div id="delivery-list"></div>
+        </section>
+      </main>
+    </div>
+
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+    ></script>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
