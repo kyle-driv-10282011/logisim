@@ -60,7 +60,7 @@ services:
       - backend
 
     ports:
-      - "8080:80"
+      - "8700:80"
 
     networks:
       - simulator-net
