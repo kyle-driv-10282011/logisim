@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import psycopg2
 import json
@@ -6,6 +7,17 @@ import json
 
 app = FastAPI()
 
+
+# Allow frontend container/browser to call backend API
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:8080"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 def db():
 
