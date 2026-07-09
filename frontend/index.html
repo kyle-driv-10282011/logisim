@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Vehicle Simulator</title>
+
+    <link 
+      href="https://unpkg.com/maplibre-gl/dist/maplibre-gl.css" 
+      rel="stylesheet" />
+
+    <style>
+        body {
+            margin:0;
+            font-family: Arial;
+        }
+
+        #controls {
+            padding:10px;
+        }
+
+        #map {
+            height:90vh;
+        }
+
+        input {
+            width:300px;
+        }
+    </style>
+</head>
+
+<body>
+
+<div id="controls">
+
+    Origin:
+    <input id="origin" value="Minneapolis">
+
+    Destination:
+    <input id="destination" value="Chicago">
+
+    <button onclick="start()">GO</button>
+
+</div>
+
+
+<div id="map"></div>
+
+
+<script src="https://unpkg.com/maplibre-gl/dist/maplibre-gl.js"></script>
+<script src="app.js"></script>
+
+</body>
+</html>
