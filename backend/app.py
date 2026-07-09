@@ -84,11 +84,12 @@ def start(req:StartRequest):
 
     return {
 
-        "id":vehicle_id,
+        "id": vehicle_id,
 
-        "position":route[0]
+        "position": route[0],
+
+        "route": route
     }
-
 
 
 
