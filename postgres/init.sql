@@ -8,11 +8,11 @@ CREATE TABLE vehicles (
 
     route JSONB NOT NULL,
 
-    current_index INTEGER DEFAULT 0,
+    durations JSONB NOT NULL,
+
+    duration_seconds DOUBLE PRECISION NOT NULL,
 
     status VARCHAR(20) DEFAULT 'READY',
 
-    created TIMESTAMP DEFAULT NOW(),
-
-    updated TIMESTAMP DEFAULT NOW()
+    created TIMESTAMP DEFAULT NOW()
 );

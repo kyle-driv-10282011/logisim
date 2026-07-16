@@ -19,6 +19,21 @@ L.tileLayer(
 ).addTo(map);
 
 
+function formatHMS(totalSeconds) {
+
+    totalSeconds = Math.max(0, Math.round(totalSeconds));
+
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+
+    const mm = String(minutes).padStart(2, "0");
+    const ss = String(seconds).padStart(2, "0");
+
+    return hours > 0 ? `${hours}:${mm}:${ss}` : `${minutes}:${ss}`;
+}
+
+
 async function start() {
 
     const response = await fetch(API + "/api/start", {
@@ -66,9 +81,16 @@ async function start() {
     }).addTo(map);
 
     //
-    // Create truck marker
+    // Create truck marker, labeled with the real drive time and how
+    // fast it will play out (compressed by 60x)
     //
     marker = L.marker(data.position).addTo(map);
+
+    marker.bindTooltip(
+        `Drive time: ${formatHMS(data.duration_seconds)}` +
+        ` (playing in ${formatHMS(data.sim_duration_seconds)})`,
+        { permanent: true, direction: "top", offset: [0, -10] }
+    ).openTooltip();
 
     //
     // Zoom to route
@@ -82,7 +104,7 @@ async function start() {
         clearInterval(updateTimer);
     }
 
-    updateTimer = setInterval(updateVehicle, 10000);
+    updateTimer = setInterval(updateVehicle, 1000);
 
 }
 
@@ -102,9 +124,17 @@ async function updateVehicle() {
 
     if (data.status === "ARRIVED") {
 
+        marker.setTooltipContent("Arrived");
+
         clearInterval(updateTimer);
 
         alert("Vehicle arrived");
+
+    } else {
+
+        marker.setTooltipContent(
+            `Arriving in ${formatHMS(data.remaining_sim_seconds)}`
+        );
 
     }
 
