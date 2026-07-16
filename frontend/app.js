@@ -3,147 +3,106 @@ const API = "http://localhost:5000";
 let map;
 let marker;
 let vehicleId;
+let routeLine;
+let updateTimer;
+
+// Create the map
+map = L.map("map").setView([44.977, -93.265], 6);
+
+// Add OpenStreetMap tiles
+L.tileLayer(
+    "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+    {
+        maxZoom: 19,
+        attribution: "&copy; OpenStreetMap contributors"
+    }
+).addTo(map);
 
 
-map = new maplibregl.Map({
+async function start() {
 
-    container: "map",
+    const response = await fetch(API + "/api/start", {
 
-    style:
-    "https://demotiles.maplibre.org/style.json",
+        method: "POST",
 
-    center:[
-        -93.265,
-        44.977
-    ],
+        headers: {
+            "Content-Type": "application/json"
+        },
 
-    zoom:6
+        body: JSON.stringify({
 
-});
+            origin: document.getElementById("origin").value,
 
+            destination: document.getElementById("destination").value
 
-async function start(){
+        })
 
-    const response =
-        await fetch(API + "/api/start",
-        {
-            method:"POST",
-
-            headers:{
-                "Content-Type":"application/json"
-            },
-
-            body:JSON.stringify({
-
-                origin:
-                document.getElementById("origin").value,
-
-                destination:
-                document.getElementById("destination").value
-
-            })
-        });
-
+    });
 
     const data = await response.json();
 
-    vehicleId=data.id;
+    vehicleId = data.id;
 
+    //
+    // Remove previous route if one exists
+    //
+    if (routeLine) {
+        map.removeLayer(routeLine);
+    }
+
+    if (marker) {
+        map.removeLayer(marker);
+    }
 
     //
     // Draw route
     //
-    map.addSource("route", {
+    routeLine = L.polyline(data.route, {
 
-        type:"geojson",
+        color: "blue",
 
-        data:{
-            type:"Feature",
+        weight: 5
 
-            geometry:{
-                type:"LineString",
-
-                coordinates:data.route
-            }
-        }
-
-    });
-
-
-    map.addLayer({
-
-        id:"route",
-
-        type:"line",
-
-        source:"route",
-
-        paint:{
-
-            "line-width":5
-
-        }
-
-    });
-
-
+    }).addTo(map);
 
     //
-    // Add truck marker
+    // Create truck marker
     //
-    marker =
-        new maplibregl.Marker()
-        .setLngLat(data.position)
-        .addTo(map);
-
+    marker = L.marker(data.position).addTo(map);
 
     //
     // Zoom to route
     //
-    const bounds =
-        new maplibregl.LngLatBounds();
+    map.fitBounds(routeLine.getBounds());
 
+    //
+    // Prevent multiple timers
+    //
+    if (updateTimer) {
+        clearInterval(updateTimer);
+    }
 
-    data.route.forEach(point =>
-        bounds.extend(point)
-    );
-
-
-    map.fitBounds(bounds,{
-        padding:50
-    });
-
-
-    setInterval(updateVehicle,10000);
+    updateTimer = setInterval(updateVehicle, 10000);
 
 }
 
 
 
-async function updateVehicle(){
+async function updateVehicle() {
 
     const response =
-        await fetch(
-        API + "/api/vehicle/"+vehicleId);
-
+        await fetch(API + "/api/vehicle/" + vehicleId);
 
     const data =
         await response.json();
 
+    marker.setLatLng(data.position);
 
-    marker.setLngLat(
-        data.position
-    );
+    map.panTo(data.position);
 
+    if (data.status === "ARRIVED") {
 
-    map.easeTo({
-
-        center:data.position
-
-    });
-
-
-    if(data.status==="ARRIVED"){
+        clearInterval(updateTimer);
 
         alert("Vehicle arrived");
 

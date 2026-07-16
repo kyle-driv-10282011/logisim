@@ -8,7 +8,7 @@ import json
 app = FastAPI()
 
 
-# Allow frontend container/browser to call backend API
+# Allow frontend browser to call backend API
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -18,6 +18,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 def db():
 
@@ -32,55 +33,69 @@ def db():
 
 class StartRequest(BaseModel):
 
-    origin:str
-    destination:str
+    origin: str
+    destination: str
 
 
 
 @app.post("/api/start")
-def start(req:StartRequest):
+def start(req: StartRequest):
 
-
+    #
     # Fake route for now
-    # Minneapolis -> Chicago
+    #
+    # Leaflet uses:
+    # [latitude, longitude]
+    #
 
-    route=[
-        [-93.265,44.977],
-        [-92.5,44.8],
-        [-91.5,44.4],
-        [-90.2,43.8],
-        [-88.0,41.9]
+    route = [
+
+        [44.977, -93.265],   # Minneapolis
+
+        [44.800, -92.500],
+
+        [44.400, -91.500],
+
+        [43.800, -90.200],
+
+        [41.900, -88.000]    # Chicago
+
     ]
 
 
-    conn=db()
-    cur=conn.cursor()
+    conn = db()
+    cur = conn.cursor()
 
 
     cur.execute(
-    """
-    INSERT INTO vehicles
-    (
-    origin,
-    destination,
-    route
+        """
+        INSERT INTO vehicles
+        (
+            origin,
+            destination,
+            route
+        )
+
+        VALUES
+        (%s,%s,%s)
+
+        RETURNING id
+        """,
+        (
+            req.origin,
+            req.destination,
+            json.dumps(route)
+        )
     )
 
-    VALUES
-    (%s,%s,%s)
 
-    RETURNING id
-    """,
-    (
-        req.origin,
-        req.destination,
-        json.dumps(route)
-    ))
-
-
-    vehicle_id=cur.fetchone()[0]
+    vehicle_id = cur.fetchone()[0]
 
     conn.commit()
+
+    cur.close()
+    conn.close()
+
 
     return {
 
@@ -93,60 +108,68 @@ def start(req:StartRequest):
 
 
 
+
+
 @app.get("/api/vehicle/{id}")
 def vehicle(id:int):
 
 
-    conn=db()
-    cur=conn.cursor()
+    conn = db()
+    cur = conn.cursor()
 
 
     cur.execute(
-    """
-    SELECT route,current_index
-    FROM vehicles
-    WHERE id=%s
-    """,
-    (id,)
+        """
+        SELECT route,current_index
+        FROM vehicles
+        WHERE id=%s
+        """,
+        (id,)
     )
 
 
-    route,index=cur.fetchone()
+    route,index = cur.fetchone()
 
-    route=json.loads(route)
+
+    route = json.loads(route)
 
 
     if index < len(route)-1:
 
-        index+=1
+        index += 1
 
 
         cur.execute(
-        """
-        UPDATE vehicles
+            """
+            UPDATE vehicles
 
-        SET current_index=%s
+            SET current_index=%s,
+                updated=NOW()
 
-        WHERE id=%s
-        """,
-        (index,id)
+            WHERE id=%s
+            """,
+            (index,id)
         )
 
         conn.commit()
 
+        status = "DRIVING"
 
-        status="DRIVING"
 
     else:
 
-        status="ARRIVED"
+        status = "ARRIVED"
 
+
+
+    cur.close()
+    conn.close()
 
 
     return {
 
-        "position":route[index],
+        "position": route[index],
 
-        "status":status
+        "status": status
+
     }
-
