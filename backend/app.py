@@ -1,8 +1,63 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from geopy.geocoders import Nominatim
 import psycopg2
+import requests
 import json
+
+
+geolocator = Nominatim(user_agent="logisim-vehicle-sim")
+
+
+def geocode(place):
+
+    location = geolocator.geocode(place)
+
+    if location is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not geocode location: {place}"
+        )
+
+    return (location.latitude, location.longitude)
+
+
+def road_route(origin_coords, destination_coords):
+
+    #
+    # OSRM expects "lon,lat" ordering
+    #
+    coords = (
+        f"{origin_coords[1]},{origin_coords[0]};"
+        f"{destination_coords[1]},{destination_coords[0]}"
+    )
+
+    response = requests.get(
+        f"http://router.project-osrm.org/route/v1/driving/{coords}",
+        params={
+            "overview": "full",
+            "geometries": "geojson"
+        },
+        timeout=10
+    )
+
+    response.raise_for_status()
+    data = response.json()
+
+    if data.get("code") != "Ok":
+        raise HTTPException(
+            status_code=400,
+            detail="Could not find a driving route between those locations"
+        )
+
+    #
+    # GeoJSON coordinates are [lon, lat]; Leaflet wants [lat, lon]
+    #
+    return [
+        [lat, lon]
+        for lon, lat in data["routes"][0]["geometry"]["coordinates"]
+    ]
 
 
 app = FastAPI()
@@ -41,26 +96,10 @@ class StartRequest(BaseModel):
 @app.post("/api/start")
 def start(req: StartRequest):
 
-    #
-    # Fake route for now
-    #
-    # Leaflet uses:
-    # [latitude, longitude]
-    #
+    origin_coords = geocode(req.origin)
+    destination_coords = geocode(req.destination)
 
-    route = [
-
-        [44.977, -93.265],   # Minneapolis
-
-        [44.800, -92.500],
-
-        [44.400, -91.500],
-
-        [43.800, -90.200],
-
-        [41.900, -88.000]    # Chicago
-
-    ]
+    route = road_route(origin_coords, destination_coords)
 
 
     conn = db()
