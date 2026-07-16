@@ -131,9 +131,6 @@ def vehicle(id:int):
     route,index = cur.fetchone()
 
 
-    route = json.loads(route)
-
-
     if index < len(route)-1:
 
         index += 1
