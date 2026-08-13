@@ -2,6 +2,20 @@ CREATE TABLE vehicles (
 
     id SERIAL PRIMARY KEY,
 
+    name TEXT NOT NULL,
+
+    vehicle_type TEXT NOT NULL DEFAULT 'truck',
+
+    created TIMESTAMP DEFAULT NOW()
+);
+
+
+CREATE TABLE paths (
+
+    id SERIAL PRIMARY KEY,
+
+    name TEXT NOT NULL,
+
     origin TEXT NOT NULL,
 
     destination TEXT NOT NULL,
@@ -12,7 +26,17 @@ CREATE TABLE vehicles (
 
     duration_seconds DOUBLE PRECISION NOT NULL,
 
-    status VARCHAR(20) DEFAULT 'READY',
-
     created TIMESTAMP DEFAULT NOW()
+);
+
+
+CREATE TABLE trips (
+
+    id SERIAL PRIMARY KEY,
+
+    vehicle_id INTEGER NOT NULL REFERENCES vehicles(id) ON DELETE CASCADE,
+
+    path_id INTEGER NOT NULL REFERENCES paths(id) ON DELETE CASCADE,
+
+    started_at TIMESTAMP DEFAULT NOW()
 );

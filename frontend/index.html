@@ -3,8 +3,8 @@
 <head>
     <title>Vehicle Simulator</title>
 
-    <link 
-      href="https://unpkg.com/maplibre-gl/dist/maplibre-gl.css" 
+    <link
+      href="https://unpkg.com/maplibre-gl/dist/maplibre-gl.css"
       rel="stylesheet" />
 
     <style>
@@ -15,14 +15,23 @@
 
         #controls {
             padding:10px;
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
         }
 
         #map {
-            height:90vh;
+            height:88vh;
         }
 
         input {
-            width:300px;
+            width:160px;
+        }
+
+        fieldset {
+            display: flex;
+            align-items: center;
+            gap: 6px;
         }
     </style>
 </head>
@@ -31,13 +40,32 @@
 
 <div id="controls">
 
-    Origin:
-    <input id="origin" value="Minneapolis">
+    <fieldset>
+        <legend>Vehicles</legend>
 
-    Destination:
-    <input id="destination" value="Chicago">
+        <input id="vehicle-name" placeholder="Name" value="Truck 1">
+        <input id="vehicle-type" placeholder="Type" value="truck">
+        <button onclick="addVehicle()">Add Vehicle</button>
 
-    <button onclick="start()">GO</button>
+        <select id="vehicle-select"></select>
+    </fieldset>
+
+    <fieldset>
+        <legend>Paths</legend>
+
+        <input id="path-name" placeholder="Path name" value="Minneapolis to Chicago">
+        Origin: <input id="origin" value="Minneapolis">
+        Destination: <input id="destination" value="Chicago">
+        <button onclick="createPath()">Create Path</button>
+
+        <select id="path-select"></select>
+    </fieldset>
+
+    <fieldset>
+        <legend>Trip</legend>
+
+        <button onclick="startTrip()">Start Trip</button>
+    </fieldset>
 
 </div>
 
