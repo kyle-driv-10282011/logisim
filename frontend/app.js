@@ -1,11 +1,19 @@
-const API = "http://localhost:5000";
+//
+// Same host the page was loaded from (works whether that's localhost, a
+// hostname, or an IP) - just a different port for the backend container.
+//
+const API = `http://${window.location.hostname}:5000`;
 
 let map;
 let pathPreviewLine;
 
 const tripLayers = new Map();      // vehicle_id -> { marker, routeLine }
 let pathsById = new Map();         // path_id -> path (from GET /api/paths)
+let vehiclesById = new Map();      // vehicle_id -> vehicle (from GET /api/vehicles)
+let activeTripsById = new Map();   // vehicle_id -> trip (from the last poll)
 let activeVehicleIds = new Set();  // vehicle ids seen on the last poll
+let selectedVehicleId = null;      // vehicle id followed in the In Route tab
+let selectedTripVehicleId = null;  // vehicle id chosen (in the Vehicles tab) to start a trip
 
 // Create the map
 map = L.map("map").setView([44.977, -93.265], 6);
@@ -35,28 +43,219 @@ function formatHMS(totalSeconds) {
 }
 
 
+function showTab(tab) {
+
+    for (const name of ["vehicles", "paths", "inroute"]) {
+
+        document.getElementById(`tab-${name}`).classList.toggle("active", name === tab);
+        document.getElementById(`tab-button-${name}`).classList.toggle("active", name === tab);
+    }
+}
+
+
 async function loadVehicles() {
 
     const response = await fetch(API + "/api/vehicles");
     const vehicles = await response.json();
 
-    const select = document.getElementById("vehicle-select");
-    const previousValue = select.value;
+    vehiclesById = new Map(vehicles.map((vehicle) => [vehicle.id, vehicle]));
 
-    select.innerHTML = "";
+    //
+    // The vehicle chosen for a trip might have been sold, or started driving
+    // via another tab/tab session - drop the selection if it's no longer a
+    // valid READY vehicle.
+    //
+    const selected = vehiclesById.get(selectedTripVehicleId);
 
-    for (const vehicle of vehicles) {
-
-        const option = document.createElement("option");
-
-        option.value = vehicle.id;
-        option.textContent = `${vehicle.name} (${vehicle.vehicle_type}) - ${vehicle.status}`;
-        option.disabled = vehicle.status !== "READY";
-
-        select.appendChild(option);
+    if (!selected || selected.status !== "READY") {
+        selectedTripVehicleId = null;
     }
 
-    select.value = previousValue;
+    renderVehicleList();
+    updateStartTripVisibility();
+}
+
+
+function renderVehicleList() {
+
+    const list = document.getElementById("vehicle-list");
+
+    list.innerHTML = "";
+
+    for (const vehicle of vehiclesById.values()) {
+
+        const item = document.createElement("div");
+
+        const driving = vehicle.status === "DRIVING";
+        const ready = vehicle.status === "READY";
+
+        item.className = "vehicle-item list-row vehicle-row" +
+            (driving || ready ? " clickable" : "") +
+            (driving && vehicle.id === selectedVehicleId ? " selected" : "") +
+            (ready && vehicle.id === selectedTripVehicleId ? " selected" : "");
+
+        if (driving) {
+            item.onclick = () => selectVehicle(vehicle.id);
+        } else if (ready) {
+            item.onclick = () => selectTripVehicle(vehicle.id);
+        }
+
+        item.innerHTML =
+            `<span>${vehicle.name} (${vehicle.vehicle_type}) ` +
+            `<span class="status-badge status-${vehicle.status}">${vehicle.status}</span></span>` +
+            (vehicle.status === "READY"
+                ? `<button class="sell-button" data-id="${vehicle.id}">Sell</button>`
+                : "");
+
+        list.appendChild(item);
+    }
+
+    for (const button of list.querySelectorAll(".sell-button")) {
+
+        button.onclick = (event) => {
+            event.stopPropagation();
+            sellVehicle(Number(button.dataset.id));
+        };
+    }
+}
+
+
+async function sellVehicle(vehicleId) {
+
+    const vehicle = vehiclesById.get(vehicleId);
+
+    if (!confirm(`Sell ${vehicle ? vehicle.name : "this vehicle"}?`)) {
+        return;
+    }
+
+    await fetch(API + "/api/vehicles/" + vehicleId, { method: "DELETE" });
+
+    loadVehicles();
+}
+
+
+function selectTripVehicle(vehicleId) {
+
+    selectedTripVehicleId = selectedTripVehicleId === vehicleId ? null : vehicleId;
+
+    renderVehicleList();
+    updateStartTripVisibility();
+}
+
+
+function updateStartTripVisibility() {
+
+    const pathId = document.getElementById("path-select").value;
+
+    document.getElementById("start-trip-button").style.display =
+        selectedTripVehicleId !== null && pathId !== "" ? "" : "none";
+}
+
+
+function selectVehicle(vehicleId) {
+
+    selectedVehicleId = selectedVehicleId === vehicleId ? null : vehicleId;
+
+    //
+    // Jump to the vehicle right away on selection; afterwards pollActiveTrips()
+    // keeps following it every tick without touching zoom.
+    //
+    const trip = activeTripsById.get(selectedVehicleId);
+
+    if (trip) {
+        map.panTo(trip.position);
+    }
+
+    currentCity = null;
+
+    if (selectedVehicleId !== null) {
+        showTab("inroute");
+        fetchCurrentCity();
+    }
+
+    renderInRouteList();
+    renderVehicleList();
+}
+
+
+//
+// Reverse-geocoding is rate-limited on the backend, so this is only fetched
+// for the one selected vehicle, on its own slow timer - not every 1s poll tick.
+//
+let currentCity = null; // { vehicleId, city }
+
+async function fetchCurrentCity() {
+
+    const vehicleId = selectedVehicleId;
+
+    if (vehicleId === null) {
+        return;
+    }
+
+    const response = await fetch(API + "/api/vehicles/" + vehicleId + "/city");
+
+    if (!response.ok) {
+        return;
+    }
+
+    const data = await response.json();
+
+    //
+    // Ignore a stale response if the selection changed while this was in flight.
+    //
+    if (selectedVehicleId === vehicleId) {
+        currentCity = { vehicleId, city: data.city };
+        renderInRouteList();
+    }
+}
+
+
+function renderInRouteList() {
+
+    const list = document.getElementById("inroute-list");
+
+    list.innerHTML = "";
+
+    for (const trip of activeTripsById.values()) {
+
+        const vehicle = vehiclesById.get(trip.vehicle_id);
+
+        const item = document.createElement("div");
+
+        item.className = "vehicle-item" + (trip.vehicle_id === selectedVehicleId ? " selected" : "");
+        item.onclick = () => selectVehicle(trip.vehicle_id);
+
+        item.innerHTML =
+            `${vehicle ? vehicle.name : trip.vehicle_name} ` +
+            `<span class="status-badge status-${trip.status}">${trip.status}</span>`;
+
+        list.appendChild(item);
+    }
+
+    const details = document.getElementById("vehicle-details");
+    const trip = activeTripsById.get(selectedVehicleId);
+
+    if (!trip) {
+        details.textContent = "Select a vehicle to see details.";
+        return;
+    }
+
+    const vehicle = vehiclesById.get(selectedVehicleId);
+
+    const cityLine = currentCity && currentCity.vehicleId === selectedVehicleId
+        ? `Near: ${currentCity.city || "unknown"}<br>`
+        : "Near: (looking up...)<br>";
+
+    details.innerHTML =
+        `<b>${vehicle ? vehicle.name : trip.vehicle_name}</b><br>` +
+        (vehicle ? `Type: ${vehicle.vehicle_type}<br>` : "") +
+        `Status: ${trip.status}<br>` +
+        cityLine +
+        `Position: ${trip.position[0].toFixed(4)}, ${trip.position[1].toFixed(4)}<br>` +
+        (trip.status === "ARRIVED"
+            ? "Arrived"
+            : `Speed: ${Math.round(trip.speed_mph)} mph<br>` +
+              `Arriving in: ${formatHMS(trip.remaining_sim_seconds)}`);
 }
 
 
@@ -84,6 +283,12 @@ async function addVehicle() {
 }
 
 
+function pathLabel(path) {
+
+    return `${path.origin}-${path.destination}`;
+}
+
+
 async function loadPaths() {
 
     const response = await fetch(API + "/api/paths");
@@ -94,45 +299,70 @@ async function loadPaths() {
     const select = document.getElementById("path-select");
     const previousValue = select.value;
 
-    select.innerHTML = "";
+    select.innerHTML = '<option value="">Select a path...</option>';
 
     for (const path of paths) {
 
         const option = document.createElement("option");
 
         option.value = path.id;
-        option.textContent = path.name;
+        option.textContent = pathLabel(path);
 
         select.appendChild(option);
     }
 
     select.value = previousValue;
+
+    renderPathList();
+    updateStartTripVisibility();
 }
 
 
-async function createPath() {
+function renderPathList() {
 
-    const response = await fetch(API + "/api/paths", {
+    const list = document.getElementById("path-list");
 
-        method: "POST",
+    list.innerHTML = "";
 
-        headers: {
-            "Content-Type": "application/json"
-        },
+    for (const path of pathsById.values()) {
 
-        body: JSON.stringify({
+        const item = document.createElement("div");
 
-            name: document.getElementById("path-name").value,
+        item.className = "vehicle-item list-row";
+        item.onclick = () => previewPath(path);
 
-            origin: document.getElementById("origin").value,
+        item.innerHTML =
+            `<span>${pathLabel(path)}</span>` +
+            `<button class="remove-path-button" data-id="${path.id}">Remove</button>`;
 
-            destination: document.getElementById("destination").value
+        list.appendChild(item);
+    }
 
-        })
+    for (const button of list.querySelectorAll(".remove-path-button")) {
 
-    });
+        button.onclick = (event) => {
+            event.stopPropagation();
+            removePath(Number(button.dataset.id));
+        };
+    }
+}
 
-    const path = await response.json();
+
+async function removePath(pathId) {
+
+    const path = pathsById.get(pathId);
+
+    if (!confirm(`Remove path "${path ? pathLabel(path) : pathId}"?`)) {
+        return;
+    }
+
+    await fetch(API + "/api/paths/" + pathId, { method: "DELETE" });
+
+    loadPaths();
+}
+
+
+function previewPath(path) {
 
     if (pathPreviewLine) {
         map.removeLayer(pathPreviewLine);
@@ -149,16 +379,43 @@ async function createPath() {
     }).addTo(map);
 
     map.fitBounds(pathPreviewLine.getBounds());
+}
+
+
+async function createPath() {
+
+    const response = await fetch(API + "/api/paths", {
+
+        method: "POST",
+
+        headers: {
+            "Content-Type": "application/json"
+        },
+
+        body: JSON.stringify({
+
+            origin: document.getElementById("origin").value,
+
+            destination: document.getElementById("destination").value
+
+        })
+
+    });
+
+    const path = await response.json();
+
+    previewPath(path);
 
     await loadPaths();
 
     document.getElementById("path-select").value = path.id;
+    updateStartTripVisibility();
 }
 
 
 async function startTrip() {
 
-    const vehicleId = document.getElementById("vehicle-select").value;
+    const vehicleId = selectedTripVehicleId;
     const pathId = document.getElementById("path-select").value;
 
     const response = await fetch(API + "/api/trips", {
@@ -212,9 +469,15 @@ async function startTrip() {
         { permanent: true, direction: "top", offset: [0, -10] }
     ).openTooltip();
 
+    marker.on("click", () => selectVehicle(data.vehicle_id));
+
     tripLayers.set(data.vehicle_id, { marker, routeLine });
 
     map.fitBounds(routeLine.getBounds());
+
+    selectedTripVehicleId = null;
+    document.getElementById("path-select").value = "";
+    updateStartTripVisibility();
 
     loadVehicles();
 }
@@ -226,6 +489,8 @@ async function pollActiveTrips() {
     const data = await response.json();
 
     const seen = new Set();
+
+    activeTripsById = new Map(data.trips.map((trip) => [trip.vehicle_id, trip]));
 
     for (const trip of data.trips) {
 
@@ -249,6 +514,8 @@ async function pollActiveTrips() {
                 "", { permanent: true, direction: "top", offset: [0, -10] }
             ).openTooltip();
 
+            marker.on("click", () => selectVehicle(trip.vehicle_id));
+
             layer = { marker, routeLine };
 
             tripLayers.set(trip.vehicle_id, layer);
@@ -261,6 +528,14 @@ async function pollActiveTrips() {
                 ? `${trip.vehicle_name}: Arrived`
                 : `${trip.vehicle_name}: arriving in ${formatHMS(trip.remaining_sim_seconds)}`
         );
+
+        //
+        // Keep the map centered on the selected vehicle as it moves, without
+        // touching zoom (a full fitBounds/setView would fight the user's view).
+        //
+        if (trip.vehicle_id === selectedVehicleId) {
+            map.panTo(trip.position);
+        }
     }
 
     //
@@ -277,6 +552,8 @@ async function pollActiveTrips() {
             tripLayers.delete(vehicleId);
         }
     }
+
+    renderInRouteList();
 
     if (!setsEqual(seen, activeVehicleIds)) {
 
@@ -307,3 +584,11 @@ loadVehicles();
 loadPaths();
 
 setInterval(pollActiveTrips, 1000);
+
+setInterval(() => {
+
+    if (selectedVehicleId !== null) {
+        fetchCurrentCity();
+    }
+
+}, 7000);

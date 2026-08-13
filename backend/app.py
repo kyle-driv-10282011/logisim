@@ -3,11 +3,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from geopy.geocoders import Nominatim
+from geopy.extra.rate_limiter import RateLimiter
 import psycopg2
 import requests
 import json
 import bisect
 import logging
+import math
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -28,6 +30,14 @@ ARRIVAL_GRACE_SECONDS = 30
 
 
 geolocator = Nominatim(user_agent="logisim-vehicle-sim")
+
+#
+# Nominatim's public instance allows at most 1 request/second. This is only
+# used for reverse-geocoding a vehicle's current city, which the frontend
+# polls on its own slow timer (not from the 1s /api/trips/active poll), but
+# the rate limiter is a hard backstop in case of multiple concurrent users.
+#
+reverse_geocode_limited = RateLimiter(geolocator.reverse, min_delay_seconds=1)
 
 
 def geocode(place):
@@ -114,6 +124,22 @@ def road_route(origin_coords, destination_coords):
     return route, cumulative_durations, duration_seconds
 
 
+def haversine_miles(lat1, lon1, lat2, lon2):
+
+    EARTH_RADIUS_MILES = 3958.8
+
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+
+    a = (
+        math.sin(dphi / 2) ** 2
+        + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    )
+
+    return 2 * EARTH_RADIUS_MILES * math.asin(math.sqrt(a))
+
+
 def derive_position(route, durations, duration_seconds, elapsed_real_seconds):
 
     elapsed_seconds = elapsed_real_seconds * TIME_COMPRESSION
@@ -126,7 +152,9 @@ def derive_position(route, durations, duration_seconds, elapsed_real_seconds):
 
             "status": "ARRIVED",
 
-            "remaining_sim_seconds": 0
+            "remaining_sim_seconds": 0,
+
+            "speed_mph": 0
         }
 
     #
@@ -151,14 +179,47 @@ def derive_position(route, durations, duration_seconds, elapsed_real_seconds):
         lon1 + (lon2 - lon1) * fraction
     ]
 
+    #
+    # Real-world speed for this road segment (from OSRM's own segment
+    # duration), not scaled by TIME_COMPRESSION - the vehicle's speed on the
+    # actual road, not however fast it appears to move in sim time.
+    #
+    segment_seconds = segment_end - segment_start
+
+    speed_mph = (
+        haversine_miles(lat1, lon1, lat2, lon2) / segment_seconds * 3600
+        if segment_seconds > 0 else 0
+    )
+
     return {
 
         "position": position,
 
         "status": "DRIVING",
 
-        "remaining_sim_seconds": (duration_seconds - elapsed_seconds) / TIME_COMPRESSION
+        "remaining_sim_seconds": (duration_seconds - elapsed_seconds) / TIME_COMPRESSION,
+
+        "speed_mph": round(speed_mph, 1)
     }
+
+
+def reverse_geocode(position):
+
+    location = reverse_geocode_limited((position[0], position[1]), zoom=10, language="en")
+
+    if location is None:
+        return None
+
+    address = location.raw.get("address", {})
+
+    return (
+        address.get("city")
+        or address.get("town")
+        or address.get("village")
+        or address.get("hamlet")
+        or address.get("county")
+        or location.address
+    )
 
 
 app = FastAPI()
@@ -190,13 +251,15 @@ async def catch_unhandled_exceptions(request: Request, call_next):
         )
 
 
-# Allow frontend browser to call backend API
+#
+# Allow the frontend to call this API from any host (not just localhost) -
+# there's no auth/cookies here, so a wildcard origin is fine. Note
+# allow_credentials must be False for "*" to be a legal CORS response.
+#
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:8700"
-    ],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -222,7 +285,6 @@ class CreateVehicleRequest(BaseModel):
 
 class CreatePathRequest(BaseModel):
 
-    name: str
     origin: str
     destination: str
 
@@ -341,8 +403,85 @@ def delete_vehicle(id: int):
 
 
 
+@app.get("/api/vehicles/{id}/city")
+def vehicle_city(id: int):
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT
+            p.route,
+            p.durations,
+            p.duration_seconds,
+            EXTRACT(EPOCH FROM (NOW() - t.started_at))
+        FROM trips t
+        JOIN paths p ON p.id = t.path_id
+        WHERE t.vehicle_id = %s
+        AND EXTRACT(EPOCH FROM (NOW() - t.started_at)) < (p.duration_seconds / %s) + %s
+        ORDER BY t.started_at DESC
+        LIMIT 1
+        """,
+        (id, TIME_COMPRESSION, ARRIVAL_GRACE_SECONDS)
+    )
+
+    row = cur.fetchone()
+
+    cur.close()
+    conn.close()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Vehicle is not currently on a trip")
+
+    route, durations, duration_seconds, elapsed_real_seconds = row
+
+    derived = derive_position(route, durations, duration_seconds, float(elapsed_real_seconds))
+
+    return {"city": reverse_geocode(derived["position"])}
+
+
+
 @app.post("/api/paths")
 def create_path(req: CreatePathRequest):
+
+    conn = db()
+    cur = conn.cursor()
+
+    #
+    # Same origin/destination (case-insensitive) is the same path - return
+    # the existing one instead of geocoding/routing and inserting a duplicate.
+    #
+    cur.execute(
+        """
+        SELECT id, origin, destination, route, durations, duration_seconds
+        FROM paths
+        WHERE lower(origin) = lower(%s) AND lower(destination) = lower(%s)
+        """,
+        (req.origin, req.destination)
+    )
+
+    existing = cur.fetchone()
+
+    if existing is not None:
+
+        cur.close()
+        conn.close()
+
+        return {
+
+            "id": existing[0],
+
+            "origin": existing[1],
+
+            "destination": existing[2],
+
+            "route": existing[3],
+
+            "durations": existing[4],
+
+            "duration_seconds": existing[5]
+        }
 
     origin_coords = geocode(req.origin)
     destination_coords = geocode(req.destination)
@@ -351,14 +490,10 @@ def create_path(req: CreatePathRequest):
         origin_coords, destination_coords
     )
 
-    conn = db()
-    cur = conn.cursor()
-
     cur.execute(
         """
         INSERT INTO paths
         (
-            name,
             origin,
             destination,
             route,
@@ -367,12 +502,11 @@ def create_path(req: CreatePathRequest):
         )
 
         VALUES
-        (%s,%s,%s,%s,%s,%s)
+        (%s,%s,%s,%s,%s)
 
         RETURNING id
         """,
         (
-            req.name,
             req.origin,
             req.destination,
             json.dumps(route),
@@ -391,8 +525,6 @@ def create_path(req: CreatePathRequest):
     return {
 
         "id": path_id,
-
-        "name": req.name,
 
         "origin": req.origin,
 
@@ -415,7 +547,7 @@ def list_paths():
 
     cur.execute(
         """
-        SELECT id, name, origin, destination, route, durations, duration_seconds
+        SELECT id, origin, destination, route, durations, duration_seconds
         FROM paths
         ORDER BY id
         """
@@ -431,20 +563,43 @@ def list_paths():
 
             "id": row[0],
 
-            "name": row[1],
+            "origin": row[1],
 
-            "origin": row[2],
+            "destination": row[2],
 
-            "destination": row[3],
+            "route": row[3],
 
-            "route": row[4],
+            "durations": row[4],
 
-            "durations": row[5],
-
-            "duration_seconds": row[6]
+            "duration_seconds": row[5]
         }
         for row in rows
     ]
+
+
+
+@app.delete("/api/paths/{id}")
+def delete_path(id: int):
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute(
+        "DELETE FROM paths WHERE id=%s RETURNING id",
+        (id,)
+    )
+
+    deleted = cur.fetchone()
+
+    conn.commit()
+
+    cur.close()
+    conn.close()
+
+    if deleted is None:
+        raise HTTPException(status_code=404, detail="Path not found")
+
+    return {"deleted": id}
 
 
 

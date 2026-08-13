@@ -13,64 +13,200 @@
             font-family: Arial;
         }
 
-        #controls {
-            padding:10px;
+        #app {
             display: flex;
-            gap: 20px;
-            flex-wrap: wrap;
+            height: 100vh;
+        }
+
+        #main {
+            flex: 1;
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
         }
 
         #map {
-            height:88vh;
+            flex: 1;
         }
 
-        input {
-            width:160px;
+        #vehicle-panel {
+            width: 280px;
+            flex-shrink: 0;
+            box-sizing: border-box;
+            padding: 10px;
+            border-left: 1px solid #ccc;
+            overflow-y: auto;
         }
 
-        fieldset {
+        #vehicle-panel input,
+        #vehicle-panel select {
+            width: 100%;
+            box-sizing: border-box;
+        }
+
+        .tab-bar {
+            display: flex;
+            gap: 4px;
+            margin-bottom: 12px;
+        }
+
+        .tab-button {
+            flex: 1;
+            padding: 6px 4px;
+            font-size: 13px;
+            border: 1px solid #ccc;
+            background: #f0f0f0;
+            cursor: pointer;
+        }
+
+        .tab-button.active {
+            background: #3388ff;
+            border-color: #3388ff;
+            color: white;
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        .panel-form {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            margin-bottom: 12px;
+        }
+
+        .vehicle-item {
+            padding: 8px;
+            margin-bottom: 6px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        .vehicle-item:hover {
+            background: #f5f5f5;
+        }
+
+        .list-row {
             display: flex;
             align-items: center;
-            gap: 6px;
+            justify-content: space-between;
+            gap: 8px;
+        }
+
+        .vehicle-row {
+            cursor: default;
+        }
+
+        .vehicle-row:hover {
+            background: white;
+        }
+
+        .vehicle-row.clickable {
+            cursor: pointer;
+        }
+
+        .vehicle-row.clickable:hover {
+            background: #f5f5f5;
+        }
+
+        .sell-button,
+        .remove-path-button {
+            font-size: 11px;
+            padding: 2px 8px;
+        }
+
+        .vehicle-item.selected {
+            border-color: #3388ff;
+            background: #eaf2ff;
+        }
+
+        .status-badge {
+            font-size: 11px;
+            padding: 2px 6px;
+            border-radius: 10px;
+            color: white;
+        }
+
+        .status-READY {
+            background: #888;
+        }
+
+        .status-DRIVING {
+            background: #2a8f2a;
+        }
+
+        #vehicle-details {
+            margin-top: 16px;
+            padding-top: 10px;
+            border-top: 1px solid #ccc;
+            font-size: 14px;
         }
     </style>
 </head>
 
 <body>
 
-<div id="controls">
+<div id="app">
 
-    <fieldset>
-        <legend>Vehicles</legend>
+<div id="main">
+    <div id="map"></div>
+</div>
 
-        <input id="vehicle-name" placeholder="Name" value="Truck 1">
-        <input id="vehicle-type" placeholder="Type" value="truck">
-        <button onclick="addVehicle()">Add Vehicle</button>
+<div id="vehicle-panel">
 
-        <select id="vehicle-select"></select>
-    </fieldset>
+    <div class="tab-bar">
+        <button class="tab-button active" id="tab-button-vehicles" onclick="showTab('vehicles')">Vehicles</button>
+        <button class="tab-button" id="tab-button-paths" onclick="showTab('paths')">Paths</button>
+        <button class="tab-button" id="tab-button-inroute" onclick="showTab('inroute')">In Route</button>
+    </div>
 
-    <fieldset>
-        <legend>Paths</legend>
+    <div class="tab-content active" id="tab-vehicles">
 
-        <input id="path-name" placeholder="Path name" value="Minneapolis to Chicago">
-        Origin: <input id="origin" value="Minneapolis">
-        Destination: <input id="destination" value="Chicago">
-        <button onclick="createPath()">Create Path</button>
+        <div class="panel-form">
+            <input id="vehicle-name" placeholder="Name" value="Truck 1">
+            <input id="vehicle-type" placeholder="Type" value="truck">
+            <button onclick="addVehicle()">Add Vehicle</button>
+        </div>
 
-        <select id="path-select"></select>
-    </fieldset>
+        <div id="vehicle-list"></div>
 
-    <fieldset>
-        <legend>Trip</legend>
+        <div class="panel-form">
+            <select id="path-select" onchange="updateStartTripVisibility()">
+                <option value="">Select a path...</option>
+            </select>
+            <button id="start-trip-button" onclick="startTrip()" style="display:none">Start Trip</button>
+        </div>
 
-        <button onclick="startTrip()">Start Trip</button>
-    </fieldset>
+    </div>
+
+    <div class="tab-content" id="tab-paths">
+
+        <div class="panel-form">
+            <input id="origin" placeholder="Origin" value="Minneapolis">
+            <input id="destination" placeholder="Destination" value="Chicago">
+            <button onclick="createPath()">Create Path</button>
+        </div>
+
+        <div id="path-list"></div>
+
+    </div>
+
+    <div class="tab-content" id="tab-inroute">
+
+        <div id="inroute-list"></div>
+        <div id="vehicle-details">Select a vehicle to see details.</div>
+
+    </div>
 
 </div>
 
-
-<div id="map"></div>
+</div>
 
 
 <link

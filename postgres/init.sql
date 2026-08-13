@@ -14,8 +14,6 @@ CREATE TABLE paths (
 
     id SERIAL PRIMARY KEY,
 
-    name TEXT NOT NULL,
-
     origin TEXT NOT NULL,
 
     destination TEXT NOT NULL,
