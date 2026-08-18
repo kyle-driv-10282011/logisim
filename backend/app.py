@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import Optional
 import psycopg2
 import requests
@@ -31,6 +32,14 @@ TIME_COMPRESSION = 60
 ARRIVAL_GRACE_SECONDS = 30
 
 #
+# The container's system clock is UTC, but rush-hour congestion needs to
+# be judged against a real local clock - otherwise "rush hour" ends up
+# keyed to whatever the UTC offset happens to be, not when commuters are
+# actually on the road.
+#
+SIMULATION_TIMEZONE = ZoneInfo("America/Chicago")
+
+#
 # OSRM's per-segment speed annotation is distance/duration for that one
 # tiny segment, so a segment with a near-zero reported duration (common
 # right at intersection/ramp nodes) can spike to an unrealistic value.
@@ -48,6 +57,24 @@ MAX_REALISTIC_SPEED_MPH = 85
 #
 INTERSTATE_MIN_MPH = 55
 ARTERIAL_MIN_MPH = 35
+
+#
+# OSRM's public demo profile caps out well below real posted limits for
+# long stretches of highway (observed 0% of drive time above 65 mph on an
+# interstate route that's actually signed 70) - likely untagged maxspeed
+# falling back to a conservative default. Once a segment is classified
+# into a tier, use whichever is higher: OSRM's own number (in case it
+# ever does reflect a real, even higher, tag) or this tier's realistic
+# default - never lower a segment OSRM already reports accurately.
+#
+TIER_DEFAULT_MPH = {
+
+    "interstate": 70,
+
+    "arterial": 50,
+
+    "local": 30
+}
 
 CONGESTION_BASELINE = {
 
@@ -72,6 +99,26 @@ def road_tier(free_flow_mph):
         return "arterial"
 
     return "local"
+
+
+def local_now_naive():
+
+    return datetime.now(SIMULATION_TIMEZONE).replace(tzinfo=None)
+
+
+def to_local_naive(dt):
+
+    #
+    # A naive datetime (no tzinfo) is treated as already being in
+    # SIMULATION_TIMEZONE - e.g. a user-supplied simulated_datetime with
+    # no offset. An aware one gets converted so the stored wall-clock
+    # value is consistently local, regardless of what offset it came in
+    # with.
+    #
+    if dt.tzinfo is not None:
+        return dt.astimezone(SIMULATION_TIMEZONE).replace(tzinfo=None)
+
+    return dt
 
 
 def is_rush_hour(effective_dt):
@@ -264,10 +311,21 @@ def derive_position(
     #
     if segment_index < len(max_speeds):
 
-        free_flow_mph = max(
+        reported_mph = max(
             MIN_REALISTIC_SPEED_MPH,
             min(MAX_REALISTIC_SPEED_MPH, max_speeds[segment_index])
         )
+
+        #
+        # OSRM's reported speed is only used to classify the road's tier
+        # here - the tier's realistic default takes over as the actual
+        # free-flow baseline whenever it's higher than what OSRM reported,
+        # since OSRM's number is frequently an under-tagged fallback
+        # rather than the real posted limit.
+        #
+        tier = road_tier(reported_mph)
+
+        free_flow_mph = max(reported_mph, TIER_DEFAULT_MPH[tier])
 
         #
         # The wall-clock moment this segment is reached, advancing through
@@ -782,7 +840,9 @@ def start_trip(req: StartTripRequest):
         conn.close()
         raise HTTPException(status_code=409, detail="Vehicle already on a trip")
 
-    traffic_base_datetime = req.simulated_datetime or datetime.now()
+    traffic_base_datetime = (
+        to_local_naive(req.simulated_datetime) if req.simulated_datetime else local_now_naive()
+    )
 
     cur.execute(
         """
