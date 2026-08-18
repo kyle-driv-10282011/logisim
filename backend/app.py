@@ -4,11 +4,14 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
+from datetime import datetime, timedelta
+from typing import Optional
 import psycopg2
 import requests
 import json
 import bisect
 import logging
+import random
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -35,6 +38,66 @@ ARRIVAL_GRACE_SECONDS = 30
 #
 MIN_REALISTIC_SPEED_MPH = 5
 MAX_REALISTIC_SPEED_MPH = 85
+
+#
+# Synthetic traffic model. Road "tier" is inferred from a segment's own
+# free-flow speed (OSRM's own speed annotation already reflects road class
+# and any real maxspeed tag), rather than fetching separate classification
+# data. Congestion is heavier on higher-tier roads during weekday rush
+# hours, since that's where commuter volume concentrates.
+#
+INTERSTATE_MIN_MPH = 55
+ARTERIAL_MIN_MPH = 35
+
+CONGESTION_BASELINE = {
+
+    "interstate": {"rush": 0.55, "normal": 0.90},
+
+    "arterial": {"rush": 0.65, "normal": 0.92},
+
+    "local": {"rush": 0.85, "normal": 0.97}
+}
+
+INCIDENT_CHANCE = 0.03
+INCIDENT_FACTOR = 0.4
+JITTER_RANGE = 0.08
+
+
+def road_tier(free_flow_mph):
+
+    if free_flow_mph >= INTERSTATE_MIN_MPH:
+        return "interstate"
+
+    if free_flow_mph >= ARTERIAL_MIN_MPH:
+        return "arterial"
+
+    return "local"
+
+
+def is_rush_hour(effective_dt):
+
+    is_weekday = effective_dt.weekday() < 5
+    hour = effective_dt.hour + effective_dt.minute / 60
+
+    return is_weekday and ((7 <= hour < 9) or (16 <= hour < 18))
+
+
+def congestion_factor(trip_id, segment_index, free_flow_mph, effective_dt, traffic_bias):
+
+    tier = road_tier(free_flow_mph)
+
+    baseline = CONGESTION_BASELINE[tier]["rush" if is_rush_hour(effective_dt) else "normal"]
+
+    #
+    # Seeded per trip+segment so repeated polls of the same trip agree on
+    # the same jitter/incident instead of flickering every second.
+    #
+    rng = random.Random((trip_id, segment_index))
+
+    jitter = rng.uniform(-JITTER_RANGE, JITTER_RANGE)
+    incident = INCIDENT_FACTOR if rng.random() < INCIDENT_CHANCE else 1.0
+
+    return max(0.15, min(1.05, baseline * incident + jitter)) * traffic_bias
 
 
 geolocator = Nominatim(user_agent="logisim-vehicle-sim")
@@ -144,7 +207,16 @@ def road_route(origin_coords, destination_coords):
     return route, cumulative_durations, duration_seconds, max_speeds_mph
 
 
-def derive_position(route, durations, duration_seconds, max_speeds, elapsed_real_seconds):
+def derive_position(
+    trip_id,
+    route,
+    durations,
+    duration_seconds,
+    max_speeds,
+    traffic_base_datetime,
+    traffic_bias,
+    elapsed_real_seconds
+):
 
     elapsed_seconds = elapsed_real_seconds * TIME_COMPRESSION
 
@@ -184,17 +256,32 @@ def derive_position(route, durations, duration_seconds, max_speeds, elapsed_real
     ]
 
     #
-    # Real-world speed for this road segment, from OSRM's own per-segment
-    # speed annotation - not scaled by TIME_COMPRESSION, since this is the
-    # vehicle's speed on the actual road, not however fast it appears to
-    # move in sim time. Paths created before this column existed have an
-    # empty max_speeds array, so fall back to 0 for those.
+    # Real-world free-flow speed for this road segment, from OSRM's own
+    # per-segment speed annotation - not scaled by TIME_COMPRESSION, since
+    # this is the vehicle's speed on the actual road, not however fast it
+    # appears to move in sim time. Paths created before this column
+    # existed have an empty max_speeds array, so fall back to 0 for those.
     #
     if segment_index < len(max_speeds):
 
-        speed_mph = max(
+        free_flow_mph = max(
             MIN_REALISTIC_SPEED_MPH,
             min(MAX_REALISTIC_SPEED_MPH, max_speeds[segment_index])
+        )
+
+        #
+        # The wall-clock moment this segment is reached, advancing through
+        # the trip by real (uncompressed) drive time - so a long trip can
+        # drive into a different rush-hour window partway through, not
+        # just reflect conditions frozen at departure.
+        #
+        effective_dt = traffic_base_datetime + timedelta(seconds=segment_start)
+
+        factor = congestion_factor(trip_id, segment_index, free_flow_mph, effective_dt, traffic_bias)
+
+        speed_mph = max(
+            MIN_REALISTIC_SPEED_MPH,
+            min(MAX_REALISTIC_SPEED_MPH, free_flow_mph * factor)
         )
 
     else:
@@ -304,6 +391,15 @@ class StartTripRequest(BaseModel):
 
     vehicle_id: int
     path_id: int
+
+    #
+    # Optional user-injected traffic variance: pretend the trip departed
+    # at a different moment (to test rush hour on demand), and/or scale
+    # the computed congestion up or down for deliberately demoing a
+    # better/worse traffic day. Both default to "just use real conditions".
+    #
+    simulated_datetime: Optional[datetime] = None
+    traffic_bias: float = 1.0
 
 
 
@@ -422,10 +518,13 @@ def vehicle_city(id: int):
     cur.execute(
         """
         SELECT
+            t.id,
             p.route,
             p.durations,
             p.duration_seconds,
             p.max_speeds_mph,
+            t.traffic_base_datetime,
+            t.traffic_bias,
             EXTRACT(EPOCH FROM (NOW() - t.started_at))
         FROM trips t
         JOIN paths p ON p.id = t.path_id
@@ -445,9 +544,27 @@ def vehicle_city(id: int):
     if row is None:
         raise HTTPException(status_code=404, detail="Vehicle is not currently on a trip")
 
-    route, durations, duration_seconds, max_speeds_mph, elapsed_real_seconds = row
+    (
+        trip_id,
+        route,
+        durations,
+        duration_seconds,
+        max_speeds_mph,
+        traffic_base_datetime,
+        traffic_bias,
+        elapsed_real_seconds
+    ) = row
 
-    derived = derive_position(route, durations, duration_seconds, max_speeds_mph, float(elapsed_real_seconds))
+    derived = derive_position(
+        trip_id,
+        route,
+        durations,
+        duration_seconds,
+        max_speeds_mph,
+        traffic_base_datetime,
+        traffic_bias,
+        float(elapsed_real_seconds)
+    )
 
     return {"city": reverse_geocode(derived["position"])}
 
@@ -665,13 +782,15 @@ def start_trip(req: StartTripRequest):
         conn.close()
         raise HTTPException(status_code=409, detail="Vehicle already on a trip")
 
+    traffic_base_datetime = req.simulated_datetime or datetime.now()
+
     cur.execute(
         """
-        INSERT INTO trips (vehicle_id, path_id)
-        VALUES (%s, %s)
+        INSERT INTO trips (vehicle_id, path_id, traffic_base_datetime, traffic_bias)
+        VALUES (%s, %s, %s, %s)
         RETURNING id
         """,
-        (req.vehicle_id, req.path_id)
+        (req.vehicle_id, req.path_id, traffic_base_datetime, req.traffic_bias)
     )
 
     trip_id = cur.fetchone()[0]
@@ -719,6 +838,8 @@ def active_trips():
             p.durations,
             p.duration_seconds,
             p.max_speeds_mph,
+            t.traffic_base_datetime,
+            t.traffic_bias,
             EXTRACT(EPOCH FROM (NOW() - t.started_at))
         FROM trips t
         JOIN vehicles v ON v.id = t.vehicle_id
@@ -744,11 +865,20 @@ def active_trips():
         durations,
         duration_seconds,
         max_speeds_mph,
+        traffic_base_datetime,
+        traffic_bias,
         elapsed_real_seconds
     ) in rows:
 
         derived = derive_position(
-            route, durations, duration_seconds, max_speeds_mph, float(elapsed_real_seconds)
+            trip_id,
+            route,
+            durations,
+            duration_seconds,
+            max_speeds_mph,
+            traffic_base_datetime,
+            traffic_bias,
+            float(elapsed_real_seconds)
         )
 
         trips.append({

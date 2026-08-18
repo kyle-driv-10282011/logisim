@@ -38,5 +38,9 @@ CREATE TABLE trips (
 
     path_id INTEGER NOT NULL REFERENCES paths(id) ON DELETE CASCADE,
 
-    started_at TIMESTAMP DEFAULT NOW()
+    started_at TIMESTAMP DEFAULT NOW(),
+
+    traffic_base_datetime TIMESTAMP NOT NULL DEFAULT NOW(),
+
+    traffic_bias DOUBLE PRECISION NOT NULL DEFAULT 1.0
 );
