@@ -2,7 +2,12 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-COPY zscaler-root-ca.crt /usr/local/share/ca-certificates/zscaler-root-ca.crt
+#
+# Optional: only present if backend/export-zscaler-cert.ps1 has been run on
+# this machine. The bracket glob keeps this from failing the build when the
+# file doesn't exist - a plain filename would.
+#
+COPY zscaler-root-ca.cr[t] /usr/local/share/ca-certificates/zscaler-root-ca.crt
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
