@@ -68,7 +68,7 @@ def road_route(origin_coords, destination_coords):
         params={
             "overview": "full",
             "geometries": "geojson",
-            "annotations": "duration"
+            "annotations": "duration,maxspeed"
         },
         timeout=10
     )
@@ -121,7 +121,30 @@ def road_route(origin_coords, destination_coords):
             for d in cumulative_durations
         ]
 
-    return route, cumulative_durations, duration_seconds
+    #
+    # Posted speed limit per segment, where OSM has the tag. Segments
+    # without one come back as speed: null and fall back to a derived
+    # estimate in derive_position().
+    #
+    max_speeds_mph = [
+        maxspeed_to_mph(entry)
+        for entry in osrm_route["legs"][0]["annotation"]["maxspeed"]
+    ]
+
+    return route, cumulative_durations, duration_seconds, max_speeds_mph
+
+
+def maxspeed_to_mph(maxspeed_annotation):
+
+    speed = maxspeed_annotation.get("speed")
+
+    if speed is None:
+        return None
+
+    if maxspeed_annotation.get("unit") == "mph":
+        return speed
+
+    return speed * 0.621371
 
 
 def haversine_miles(lat1, lon1, lat2, lon2):
@@ -140,7 +163,7 @@ def haversine_miles(lat1, lon1, lat2, lon2):
     return 2 * EARTH_RADIUS_MILES * math.asin(math.sqrt(a))
 
 
-def derive_position(route, durations, duration_seconds, elapsed_real_seconds):
+def derive_position(route, durations, duration_seconds, max_speeds, elapsed_real_seconds):
 
     elapsed_seconds = elapsed_real_seconds * TIME_COMPRESSION
 
@@ -180,16 +203,25 @@ def derive_position(route, durations, duration_seconds, elapsed_real_seconds):
     ]
 
     #
-    # Real-world speed for this road segment (from OSRM's own segment
-    # duration), not scaled by TIME_COMPRESSION - the vehicle's speed on the
-    # actual road, not however fast it appears to move in sim time.
+    # Prefer the road's actual posted speed limit. Not every segment has
+    # one tagged in OSM, so fall back to a derived real-world speed (not
+    # scaled by TIME_COMPRESSION - the vehicle's speed on the actual road,
+    # not however fast it appears to move in sim time).
     #
-    segment_seconds = segment_end - segment_start
+    maxspeed = max_speeds[segment_index] if segment_index < len(max_speeds) else None
 
-    speed_mph = (
-        haversine_miles(lat1, lon1, lat2, lon2) / segment_seconds * 3600
-        if segment_seconds > 0 else 0
-    )
+    if maxspeed is not None:
+
+        speed_mph = maxspeed
+
+    else:
+
+        segment_seconds = segment_end - segment_start
+
+        speed_mph = (
+            haversine_miles(lat1, lon1, lat2, lon2) / segment_seconds * 3600
+            if segment_seconds > 0 else 0
+        )
 
     return {
 
@@ -415,6 +447,7 @@ def vehicle_city(id: int):
             p.route,
             p.durations,
             p.duration_seconds,
+            p.max_speeds_mph,
             EXTRACT(EPOCH FROM (NOW() - t.started_at))
         FROM trips t
         JOIN paths p ON p.id = t.path_id
@@ -434,9 +467,9 @@ def vehicle_city(id: int):
     if row is None:
         raise HTTPException(status_code=404, detail="Vehicle is not currently on a trip")
 
-    route, durations, duration_seconds, elapsed_real_seconds = row
+    route, durations, duration_seconds, max_speeds_mph, elapsed_real_seconds = row
 
-    derived = derive_position(route, durations, duration_seconds, float(elapsed_real_seconds))
+    derived = derive_position(route, durations, duration_seconds, max_speeds_mph, float(elapsed_real_seconds))
 
     return {"city": reverse_geocode(derived["position"])}
 
@@ -454,7 +487,7 @@ def create_path(req: CreatePathRequest):
     #
     cur.execute(
         """
-        SELECT id, origin, destination, route, durations, duration_seconds
+        SELECT id, origin, destination, route, durations, duration_seconds, max_speeds_mph
         FROM paths
         WHERE lower(origin) = lower(%s) AND lower(destination) = lower(%s)
         """,
@@ -480,13 +513,15 @@ def create_path(req: CreatePathRequest):
 
             "durations": existing[4],
 
-            "duration_seconds": existing[5]
+            "duration_seconds": existing[5],
+
+            "max_speeds_mph": existing[6]
         }
 
     origin_coords = geocode(req.origin)
     destination_coords = geocode(req.destination)
 
-    route, durations, duration_seconds = road_route(
+    route, durations, duration_seconds, max_speeds_mph = road_route(
         origin_coords, destination_coords
     )
 
@@ -498,11 +533,12 @@ def create_path(req: CreatePathRequest):
             destination,
             route,
             durations,
-            duration_seconds
+            duration_seconds,
+            max_speeds_mph
         )
 
         VALUES
-        (%s,%s,%s,%s,%s)
+        (%s,%s,%s,%s,%s,%s)
 
         RETURNING id
         """,
@@ -511,7 +547,8 @@ def create_path(req: CreatePathRequest):
             req.destination,
             json.dumps(route),
             json.dumps(durations),
-            duration_seconds
+            duration_seconds,
+            json.dumps(max_speeds_mph)
         )
     )
 
@@ -534,7 +571,9 @@ def create_path(req: CreatePathRequest):
 
         "durations": durations,
 
-        "duration_seconds": duration_seconds
+        "duration_seconds": duration_seconds,
+
+        "max_speeds_mph": max_speeds_mph
     }
 
 
@@ -547,7 +586,7 @@ def list_paths():
 
     cur.execute(
         """
-        SELECT id, origin, destination, route, durations, duration_seconds
+        SELECT id, origin, destination, route, durations, duration_seconds, max_speeds_mph
         FROM paths
         ORDER BY id
         """
@@ -571,7 +610,9 @@ def list_paths():
 
             "durations": row[4],
 
-            "duration_seconds": row[5]
+            "duration_seconds": row[5],
+
+            "max_speeds_mph": row[6]
         }
         for row in rows
     ]
@@ -699,6 +740,7 @@ def active_trips():
             p.route,
             p.durations,
             p.duration_seconds,
+            p.max_speeds_mph,
             EXTRACT(EPOCH FROM (NOW() - t.started_at))
         FROM trips t
         JOIN vehicles v ON v.id = t.vehicle_id
@@ -723,11 +765,12 @@ def active_trips():
         route,
         durations,
         duration_seconds,
+        max_speeds_mph,
         elapsed_real_seconds
     ) in rows:
 
         derived = derive_position(
-            route, durations, duration_seconds, float(elapsed_real_seconds)
+            route, durations, duration_seconds, max_speeds_mph, float(elapsed_real_seconds)
         )
 
         trips.append({

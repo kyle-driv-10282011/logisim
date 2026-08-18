@@ -24,6 +24,8 @@ CREATE TABLE paths (
 
     duration_seconds DOUBLE PRECISION NOT NULL,
 
+    max_speeds_mph JSONB NOT NULL,
+
     created TIMESTAMP DEFAULT NOW()
 );
 
