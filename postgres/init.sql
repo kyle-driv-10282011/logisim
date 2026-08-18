@@ -26,6 +26,10 @@ CREATE TABLE paths (
 
     max_speeds_mph JSONB NOT NULL,
 
+    road_names JSONB NOT NULL,
+
+    road_name_boundaries JSONB NOT NULL,
+
     created TIMESTAMP DEFAULT NOW()
 );
 

@@ -186,7 +186,8 @@ def road_route(origin_coords, destination_coords):
         params={
             "overview": "full",
             "geometries": "geojson",
-            "annotations": "duration,speed"
+            "annotations": "duration,speed",
+            "steps": "true"
         },
         timeout=10
     )
@@ -251,7 +252,39 @@ def road_route(origin_coords, destination_coords):
         for speed_ms in osrm_route["legs"][0]["annotation"]["speed"]
     ]
 
-    return route, cumulative_durations, duration_seconds, max_speeds_mph
+    #
+    # Road names come from OSRM's turn-by-turn steps, not the fine-grained
+    # per-point annotations above - a step covers a whole named road
+    # between two maneuvers. road_name_boundaries are cumulative real
+    # seconds (same domain as duration_seconds), so the current one can be
+    # looked up the same way as a driving segment.
+    #
+    steps = osrm_route["legs"][0]["steps"]
+
+    road_names = [step_label(step) for step in steps]
+
+    road_name_boundaries = [0]
+
+    for step in steps:
+        road_name_boundaries.append(road_name_boundaries[-1] + step["duration"])
+
+    return route, cumulative_durations, duration_seconds, max_speeds_mph, road_names, road_name_boundaries
+
+
+def step_label(step):
+
+    return step.get("ref") or step.get("name") or "Unnamed road"
+
+
+def current_road_name(road_names, road_name_boundaries, elapsed_seconds):
+
+    if not road_names:
+        return None
+
+    name_index = bisect.bisect_right(road_name_boundaries, elapsed_seconds) - 1
+    name_index = max(0, min(name_index, len(road_names) - 1))
+
+    return road_names[name_index]
 
 
 def derive_position(
@@ -260,12 +293,16 @@ def derive_position(
     durations,
     duration_seconds,
     max_speeds,
+    road_names,
+    road_name_boundaries,
     traffic_base_datetime,
     traffic_bias,
     elapsed_real_seconds
 ):
 
     elapsed_seconds = elapsed_real_seconds * TIME_COMPRESSION
+
+    road_name = current_road_name(road_names, road_name_boundaries, elapsed_seconds)
 
     if elapsed_seconds >= duration_seconds:
 
@@ -277,7 +314,9 @@ def derive_position(
 
             "remaining_sim_seconds": 0,
 
-            "speed_mph": 0
+            "speed_mph": 0,
+
+            "road_name": road_name
         }
 
     #
@@ -354,7 +393,9 @@ def derive_position(
 
         "remaining_sim_seconds": (duration_seconds - elapsed_seconds) / TIME_COMPRESSION,
 
-        "speed_mph": round(speed_mph, 1)
+        "speed_mph": round(speed_mph, 1),
+
+        "road_name": road_name
     }
 
 
@@ -581,6 +622,8 @@ def vehicle_city(id: int):
             p.durations,
             p.duration_seconds,
             p.max_speeds_mph,
+            p.road_names,
+            p.road_name_boundaries,
             t.traffic_base_datetime,
             t.traffic_bias,
             EXTRACT(EPOCH FROM (NOW() - t.started_at))
@@ -608,6 +651,8 @@ def vehicle_city(id: int):
         durations,
         duration_seconds,
         max_speeds_mph,
+        road_names,
+        road_name_boundaries,
         traffic_base_datetime,
         traffic_bias,
         elapsed_real_seconds
@@ -619,6 +664,8 @@ def vehicle_city(id: int):
         durations,
         duration_seconds,
         max_speeds_mph,
+        road_names,
+        road_name_boundaries,
         traffic_base_datetime,
         traffic_bias,
         float(elapsed_real_seconds)
@@ -640,7 +687,8 @@ def create_path(req: CreatePathRequest):
     #
     cur.execute(
         """
-        SELECT id, origin, destination, route, durations, duration_seconds, max_speeds_mph
+        SELECT id, origin, destination, route, durations, duration_seconds,
+            max_speeds_mph, road_names, road_name_boundaries
         FROM paths
         WHERE lower(origin) = lower(%s) AND lower(destination) = lower(%s)
         """,
@@ -668,13 +716,17 @@ def create_path(req: CreatePathRequest):
 
             "duration_seconds": existing[5],
 
-            "max_speeds_mph": existing[6]
+            "max_speeds_mph": existing[6],
+
+            "road_names": existing[7],
+
+            "road_name_boundaries": existing[8]
         }
 
     origin_coords = geocode(req.origin)
     destination_coords = geocode(req.destination)
 
-    route, durations, duration_seconds, max_speeds_mph = road_route(
+    route, durations, duration_seconds, max_speeds_mph, road_names, road_name_boundaries = road_route(
         origin_coords, destination_coords
     )
 
@@ -687,11 +739,13 @@ def create_path(req: CreatePathRequest):
             route,
             durations,
             duration_seconds,
-            max_speeds_mph
+            max_speeds_mph,
+            road_names,
+            road_name_boundaries
         )
 
         VALUES
-        (%s,%s,%s,%s,%s,%s)
+        (%s,%s,%s,%s,%s,%s,%s,%s)
 
         RETURNING id
         """,
@@ -701,7 +755,9 @@ def create_path(req: CreatePathRequest):
             json.dumps(route),
             json.dumps(durations),
             duration_seconds,
-            json.dumps(max_speeds_mph)
+            json.dumps(max_speeds_mph),
+            json.dumps(road_names),
+            json.dumps(road_name_boundaries)
         )
     )
 
@@ -726,7 +782,11 @@ def create_path(req: CreatePathRequest):
 
         "duration_seconds": duration_seconds,
 
-        "max_speeds_mph": max_speeds_mph
+        "max_speeds_mph": max_speeds_mph,
+
+        "road_names": road_names,
+
+        "road_name_boundaries": road_name_boundaries
     }
 
 
@@ -739,7 +799,8 @@ def list_paths():
 
     cur.execute(
         """
-        SELECT id, origin, destination, route, durations, duration_seconds, max_speeds_mph
+        SELECT id, origin, destination, route, durations, duration_seconds,
+            max_speeds_mph, road_names, road_name_boundaries
         FROM paths
         ORDER BY id
         """
@@ -765,7 +826,11 @@ def list_paths():
 
             "duration_seconds": row[5],
 
-            "max_speeds_mph": row[6]
+            "max_speeds_mph": row[6],
+
+            "road_names": row[7],
+
+            "road_name_boundaries": row[8]
         }
         for row in rows
     ]
@@ -898,6 +963,8 @@ def active_trips():
             p.durations,
             p.duration_seconds,
             p.max_speeds_mph,
+            p.road_names,
+            p.road_name_boundaries,
             t.traffic_base_datetime,
             t.traffic_bias,
             EXTRACT(EPOCH FROM (NOW() - t.started_at))
@@ -925,6 +992,8 @@ def active_trips():
         durations,
         duration_seconds,
         max_speeds_mph,
+        road_names,
+        road_name_boundaries,
         traffic_base_datetime,
         traffic_bias,
         elapsed_real_seconds
@@ -936,6 +1005,8 @@ def active_trips():
             durations,
             duration_seconds,
             max_speeds_mph,
+            road_names,
+            road_name_boundaries,
             traffic_base_datetime,
             traffic_bias,
             float(elapsed_real_seconds)

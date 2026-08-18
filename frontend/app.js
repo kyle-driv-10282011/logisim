@@ -252,6 +252,7 @@ function renderInRouteList() {
         `Status: ${trip.status}<br>` +
         cityLine +
         `Position: ${trip.position[0].toFixed(4)}, ${trip.position[1].toFixed(4)}<br>` +
+        (trip.road_name ? `Road: ${trip.road_name}<br>` : "") +
         (trip.status === "ARRIVED"
             ? "Arrived"
             : `Speed: ${Math.round(trip.speed_mph)} mph<br>` +
