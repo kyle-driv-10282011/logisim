@@ -9,7 +9,6 @@ import requests
 import json
 import bisect
 import logging
-import math
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -68,7 +67,7 @@ def road_route(origin_coords, destination_coords):
         params={
             "overview": "full",
             "geometries": "geojson",
-            "annotations": "duration,maxspeed"
+            "annotations": "duration,speed"
         },
         timeout=10
     )
@@ -122,45 +121,18 @@ def road_route(origin_coords, destination_coords):
         ]
 
     #
-    # Posted speed limit per segment, where OSM has the tag. Segments
-    # without one come back as speed: null and fall back to a derived
-    # estimate in derive_position().
+    # OSRM's own per-segment speed (real routed distance / duration, in
+    # m/s), not our own straight-line approximation. Its car profile reads
+    # the OSM maxspeed tag directly when one exists, so this tracks posted
+    # limits where OSM has them and falls back to the profile's road-class
+    # default speed elsewhere.
     #
     max_speeds_mph = [
-        maxspeed_to_mph(entry)
-        for entry in osrm_route["legs"][0]["annotation"]["maxspeed"]
+        speed_ms * 2.23694
+        for speed_ms in osrm_route["legs"][0]["annotation"]["speed"]
     ]
 
     return route, cumulative_durations, duration_seconds, max_speeds_mph
-
-
-def maxspeed_to_mph(maxspeed_annotation):
-
-    speed = maxspeed_annotation.get("speed")
-
-    if speed is None:
-        return None
-
-    if maxspeed_annotation.get("unit") == "mph":
-        return speed
-
-    return speed * 0.621371
-
-
-def haversine_miles(lat1, lon1, lat2, lon2):
-
-    EARTH_RADIUS_MILES = 3958.8
-
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-
-    a = (
-        math.sin(dphi / 2) ** 2
-        + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
-    )
-
-    return 2 * EARTH_RADIUS_MILES * math.asin(math.sqrt(a))
 
 
 def derive_position(route, durations, duration_seconds, max_speeds, elapsed_real_seconds):
@@ -203,25 +175,13 @@ def derive_position(route, durations, duration_seconds, max_speeds, elapsed_real
     ]
 
     #
-    # Prefer the road's actual posted speed limit. Not every segment has
-    # one tagged in OSM, so fall back to a derived real-world speed (not
-    # scaled by TIME_COMPRESSION - the vehicle's speed on the actual road,
-    # not however fast it appears to move in sim time).
+    # Real-world speed for this road segment, from OSRM's own per-segment
+    # speed annotation - not scaled by TIME_COMPRESSION, since this is the
+    # vehicle's speed on the actual road, not however fast it appears to
+    # move in sim time. Paths created before this column existed have an
+    # empty max_speeds array, so fall back to 0 for those.
     #
-    maxspeed = max_speeds[segment_index] if segment_index < len(max_speeds) else None
-
-    if maxspeed is not None:
-
-        speed_mph = maxspeed
-
-    else:
-
-        segment_seconds = segment_end - segment_start
-
-        speed_mph = (
-            haversine_miles(lat1, lon1, lat2, lon2) / segment_seconds * 3600
-            if segment_seconds > 0 else 0
-        )
+    speed_mph = max_speeds[segment_index] if segment_index < len(max_speeds) else 0
 
     return {
 
