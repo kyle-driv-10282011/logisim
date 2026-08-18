@@ -92,7 +92,7 @@ def congestion_factor(trip_id, segment_index, free_flow_mph, effective_dt, traff
     # Seeded per trip+segment so repeated polls of the same trip agree on
     # the same jitter/incident instead of flickering every second.
     #
-    rng = random.Random((trip_id, segment_index))
+    rng = random.Random(f"{trip_id}:{segment_index}")
 
     jitter = rng.uniform(-JITTER_RANGE, JITTER_RANGE)
     incident = INCIDENT_FACTOR if rng.random() < INCIDENT_CHANCE else 1.0
