@@ -27,6 +27,15 @@ TIME_COMPRESSION = 60
 #
 ARRIVAL_GRACE_SECONDS = 30
 
+#
+# OSRM's per-segment speed annotation is distance/duration for that one
+# tiny segment, so a segment with a near-zero reported duration (common
+# right at intersection/ramp nodes) can spike to an unrealistic value.
+# Clamp to a plausible range for a road vehicle instead of showing that.
+#
+MIN_REALISTIC_SPEED_MPH = 5
+MAX_REALISTIC_SPEED_MPH = 85
+
 
 geolocator = Nominatim(user_agent="logisim-vehicle-sim")
 
@@ -181,7 +190,16 @@ def derive_position(route, durations, duration_seconds, max_speeds, elapsed_real
     # move in sim time. Paths created before this column existed have an
     # empty max_speeds array, so fall back to 0 for those.
     #
-    speed_mph = max_speeds[segment_index] if segment_index < len(max_speeds) else 0
+    if segment_index < len(max_speeds):
+
+        speed_mph = max(
+            MIN_REALISTIC_SPEED_MPH,
+            min(MAX_REALISTIC_SPEED_MPH, max_speeds[segment_index])
+        )
+
+    else:
+
+        speed_mph = 0
 
     return {
 
