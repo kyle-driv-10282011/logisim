@@ -26,6 +26,10 @@ services:
   backend:
     build:
       context: ./backend
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-http://us08dv2itm94.pmdomhq.protomold.com:8090}
+        HTTPS_PROXY: ${HTTPS_PROXY:-http://us08dv2itm94.pmdomhq.protomold.com:8090}
+        NO_PROXY: ${NO_PROXY:-}
 
     container_name: vehicle-backend
     restart: unless-stopped
@@ -35,6 +39,14 @@ services:
 
       # Routing service
       ROUTING_URL: https://router.project-osrm.org
+
+      # Outbound calls (geocoding/routing) go through this proxy, which
+      # reaches the internet directly rather than through Zscaler's
+      # TLS-inspecting path - overridable per machine via a real
+      # HTTP_PROXY/HTTPS_PROXY env var or a .env file next to this file.
+      HTTP_PROXY: ${HTTP_PROXY:-http://us08dv2itm94.pmdomhq.protomold.com:8090}
+      HTTPS_PROXY: ${HTTPS_PROXY:-http://us08dv2itm94.pmdomhq.protomold.com:8090}
+      NO_PROXY: ${NO_PROXY:-postgres,localhost,127.0.0.1}
 
     depends_on:
       - postgres
