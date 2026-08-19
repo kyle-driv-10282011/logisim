@@ -400,26 +400,26 @@ function previewPath(path) {
 // window/severity) for a specific chunk of one path's route, instead of
 // relying purely on the synthetic tier-based model. A chunk is picked by
 // clicking two points on the previewed route; each click snaps to the
-// nearest route vertex, whose cumulative-duration value (same domain the
-// backend already uses for position/road-name lookups) becomes the zone's
-// start/end.
+// nearest route vertex, whose cumulative-distance value (miles from the
+// origin - a fixed geometric property of the route, unlike time, which
+// now depends on the traffic model itself) becomes the zone's start/end.
 //
 let zoneDraftPath = null;          // path currently shown in the zone editor
-let zoneDraftPoints = [];          // cumulative-seconds values of picked points (0-2 of them)
+let zoneDraftPoints = [];          // cumulative-miles values of picked points (0-2 of them)
 let zoneDraftMarkers = [];         // Leaflet markers for the picked points
 let zoneDrawArmed = false;         // true while waiting for the next map click to pick a point
 let zoneOverlayLines = [];         // polylines highlighting this path's existing zones
 
 
-function secondsToRouteIndex(durations, seconds) {
+function milesToRouteIndex(distancesMiles, miles) {
 
-    let lo = 0, hi = durations.length - 1;
+    let lo = 0, hi = distancesMiles.length - 1;
 
     while (lo < hi) {
 
         const mid = (lo + hi) >> 1;
 
-        if (durations[mid] < seconds) {
+        if (distancesMiles[mid] < miles) {
             lo = mid + 1;
         } else {
             hi = mid;
@@ -466,7 +466,8 @@ function zoneSummary(zone) {
         ? ` (rush ${formatHour(zone.rush_hour_start)}-${formatHour(zone.rush_hour_end)}, severity ${zone.rush_hour_factor})`
         : "";
 
-    return `${Math.round(zone.speed_limit_mph)} mph${rush}`;
+    return `mile ${zone.start_miles.toFixed(1)}-${zone.end_miles.toFixed(1)}: ` +
+        `${Math.round(zone.speed_limit_mph)} mph${rush}`;
 }
 
 
@@ -486,8 +487,8 @@ function renderZoneOverlays(path) {
 
     for (const zone of path.zones || []) {
 
-        const startIndex = secondsToRouteIndex(path.durations, zone.start_seconds);
-        const endIndex = Math.max(startIndex, secondsToRouteIndex(path.durations, zone.end_seconds));
+        const startIndex = milesToRouteIndex(path.distances_miles, zone.start_miles);
+        const endIndex = Math.max(startIndex, milesToRouteIndex(path.distances_miles, zone.end_miles));
 
         const line = L.polyline(path.route.slice(startIndex, endIndex + 1), {
 
@@ -594,7 +595,7 @@ map.on("click", (event) => {
     }).addTo(map);
 
     zoneDraftMarkers.push(marker);
-    zoneDraftPoints.push(zoneDraftPath.durations[index]);
+    zoneDraftPoints.push(zoneDraftPath.distances_miles[index]);
 
     if (zoneDraftPoints.length === 2) {
 
@@ -623,9 +624,9 @@ async function saveZoneDraft() {
 
         body: JSON.stringify({
 
-            start_seconds: Math.min(a, b),
+            start_miles: Math.min(a, b),
 
-            end_seconds: Math.max(a, b),
+            end_miles: Math.max(a, b),
 
             speed_limit_mph: Number(document.getElementById("zone-speed").value),
 

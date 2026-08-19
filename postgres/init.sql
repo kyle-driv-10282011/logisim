@@ -20,15 +20,13 @@ CREATE TABLE paths (
 
     route JSONB NOT NULL,
 
-    durations JSONB NOT NULL,
-
-    duration_seconds DOUBLE PRECISION NOT NULL,
+    distances_miles JSONB NOT NULL,
 
     max_speeds_mph JSONB NOT NULL,
 
     road_names JSONB NOT NULL,
 
-    road_name_boundaries JSONB NOT NULL,
+    road_name_boundary_miles JSONB NOT NULL,
 
     created TIMESTAMP DEFAULT NOW()
 );
@@ -40,9 +38,9 @@ CREATE TABLE road_zones (
 
     path_id INTEGER NOT NULL REFERENCES paths(id) ON DELETE CASCADE,
 
-    start_seconds DOUBLE PRECISION NOT NULL,
+    start_miles DOUBLE PRECISION NOT NULL,
 
-    end_seconds DOUBLE PRECISION NOT NULL,
+    end_miles DOUBLE PRECISION NOT NULL,
 
     speed_limit_mph DOUBLE PRECISION NOT NULL,
 
@@ -68,5 +66,15 @@ CREATE TABLE trips (
 
     traffic_base_datetime TIMESTAMP NOT NULL DEFAULT NOW(),
 
-    traffic_bias DOUBLE PRECISION NOT NULL DEFAULT 1.0
+    traffic_bias DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+
+    -- Frozen at trip creation: the path's zones as they existed then, and
+    -- the resulting drive schedule (cumulative real seconds to reach each
+    -- route point, derived from distance / effective speed rather than
+    -- OSRM's own duration estimate). See build_trip_schedule() in app.py.
+    zones_snapshot JSONB NOT NULL DEFAULT '[]',
+
+    realized_seconds JSONB NOT NULL DEFAULT '[]',
+
+    realized_duration_seconds DOUBLE PRECISION NOT NULL DEFAULT 0
 );

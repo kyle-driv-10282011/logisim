@@ -48,6 +48,8 @@ SIMULATION_TIMEZONE = ZoneInfo("America/Chicago")
 MIN_REALISTIC_SPEED_MPH = 5
 MAX_REALISTIC_SPEED_MPH = 85
 
+METERS_PER_MILE = 1609.344
+
 #
 # Synthetic traffic model. Road "tier" is inferred from a segment's own
 # free-flow speed (OSRM's own speed annotation already reflects road class
@@ -149,10 +151,10 @@ def zone_is_rush_hour(effective_dt, rush_hour_start, rush_hour_end):
     return hour >= rush_hour_start or hour < rush_hour_end
 
 
-def find_zone(zones, position_seconds):
+def find_zone(zones, position_miles):
 
     for zone in zones:
-        if zone["start_seconds"] <= position_seconds < zone["end_seconds"]:
+        if zone["start_miles"] <= position_miles < zone["end_miles"]:
             return zone
 
     return None
@@ -184,6 +186,80 @@ def congestion_factor(trip_id, segment_index, free_flow_mph, effective_dt, traff
     incident = INCIDENT_FACTOR if rng.random() < INCIDENT_CHANCE else 1.0
 
     return max(0.15, min(1.05, baseline * incident + jitter)) * traffic_bias
+
+
+def segment_speed_mph(zones, max_speeds_mph, segment_index, position_miles, effective_dt, traffic_bias, trip_id):
+
+    #
+    # A user-defined zone covering this segment overrides the road entirely
+    # - its speed_limit_mph replaces both OSRM's reported speed and the
+    # tier default.
+    #
+    zone = find_zone(zones, position_miles)
+
+    if zone is not None:
+
+        free_flow_mph = zone["speed_limit_mph"]
+
+        factor = congestion_factor(trip_id, segment_index, free_flow_mph, effective_dt, traffic_bias, zone=zone)
+
+    else:
+
+        reported_mph = max(
+            MIN_REALISTIC_SPEED_MPH,
+            min(MAX_REALISTIC_SPEED_MPH, max_speeds_mph[segment_index])
+        )
+
+        #
+        # OSRM's reported speed is only used to classify the road's tier
+        # here - the tier's realistic default takes over as the actual
+        # free-flow baseline whenever it's higher than what OSRM reported,
+        # since OSRM's number is frequently an under-tagged fallback
+        # rather than the real posted limit.
+        #
+        tier = road_tier(reported_mph)
+
+        free_flow_mph = max(reported_mph, TIER_DEFAULT_MPH[tier])
+
+        factor = congestion_factor(trip_id, segment_index, free_flow_mph, effective_dt, traffic_bias)
+
+    return max(MIN_REALISTIC_SPEED_MPH, min(MAX_REALISTIC_SPEED_MPH, free_flow_mph * factor))
+
+
+def build_trip_schedule(distances_miles, max_speeds_mph, zones, traffic_base_datetime, traffic_bias, trip_id):
+
+    #
+    # A trip's actual drive time is derived from distance / effective speed
+    # for every segment, not trusted from OSRM's own duration estimate -
+    # this is what lets a zone's speed limit (or rush hour, or traffic_bias)
+    # actually change how long the drive takes, not just what's displayed.
+    #
+    # This has to be a sequential walk rather than a closed-form
+    # calculation: a segment's effective speed depends on the wall-clock
+    # moment it's reached (for rush hour), which depends on how long every
+    # prior segment took.
+    #
+    cumulative_seconds = [0.0]
+
+    for segment_index in range(len(distances_miles) - 1):
+
+        segment_miles = distances_miles[segment_index + 1] - distances_miles[segment_index]
+
+        effective_dt = traffic_base_datetime + timedelta(seconds=cumulative_seconds[-1])
+
+        speed_mph = segment_speed_mph(
+            zones,
+            max_speeds_mph,
+            segment_index,
+            distances_miles[segment_index],
+            effective_dt,
+            traffic_bias,
+            trip_id
+        )
+
+        cumulative_seconds.append(cumulative_seconds[-1] + (segment_miles / speed_mph) * 3600)
+
+    return cumulative_seconds
 
 
 geolocator = Nominatim(user_agent="logisim-vehicle-sim")
@@ -225,7 +301,7 @@ def road_route(origin_coords, destination_coords):
         params={
             "overview": "full",
             "geometries": "geojson",
-            "annotations": "duration,speed",
+            "annotations": "speed,distance",
             "steps": "true"
         },
         timeout=10
@@ -251,40 +327,26 @@ def road_route(origin_coords, destination_coords):
     ]
 
     #
-    # Per-segment durations (speed-limit based, from OSRM's annotation),
-    # turned into cumulative seconds elapsed at each point along the route.
+    # Per-point-to-point-segment distance, turned into cumulative miles
+    # along the route - a fixed geometric property of the path, independent
+    # of any traffic model. A trip's actual drive time gets derived from
+    # this (distance / effective speed) rather than from OSRM's own
+    # duration estimate.
     #
-    segment_durations = osrm_route["legs"][0]["annotation"]["duration"]
+    segment_distances_m = osrm_route["legs"][0]["annotation"]["distance"]
 
-    cumulative_durations = [0]
+    cumulative_miles = [0.0]
 
-    for segment_duration in segment_durations:
-        cumulative_durations.append(
-            cumulative_durations[-1] + segment_duration
-        )
-
-    #
-    # osrm_route["duration"] also includes turn penalties that aren't
-    # broken out per-segment, so rescale the cumulative durations to
-    # land on it exactly at the final point.
-    #
-    duration_seconds = osrm_route["duration"]
-
-    if cumulative_durations[-1] > 0:
-
-        scale = duration_seconds / cumulative_durations[-1]
-
-        cumulative_durations = [
-            d * scale
-            for d in cumulative_durations
-        ]
+    for segment_distance_m in segment_distances_m:
+        cumulative_miles.append(cumulative_miles[-1] + segment_distance_m / METERS_PER_MILE)
 
     #
     # OSRM's own per-segment speed (real routed distance / duration, in
     # m/s), not our own straight-line approximation. Its car profile reads
     # the OSM maxspeed tag directly when one exists, so this tracks posted
     # limits where OSM has them and falls back to the profile's road-class
-    # default speed elsewhere.
+    # default speed elsewhere. Used only to classify a segment's road tier
+    # and as the free-flow default when no zone overrides it.
     #
     max_speeds_mph = [
         speed_ms * 2.23694
@@ -294,20 +356,20 @@ def road_route(origin_coords, destination_coords):
     #
     # Road names come from OSRM's turn-by-turn steps, not the fine-grained
     # per-point annotations above - a step covers a whole named road
-    # between two maneuvers. road_name_boundaries are cumulative real
-    # seconds (same domain as duration_seconds), so the current one can be
-    # looked up the same way as a driving segment.
+    # between two maneuvers. road_name_boundary_miles are cumulative miles
+    # (same domain as cumulative_miles), so the current one can be looked
+    # up the same way as a driving segment.
     #
     steps = osrm_route["legs"][0]["steps"]
 
     road_names = [step_label(step) for step in steps]
 
-    road_name_boundaries = [0]
+    road_name_boundary_miles = [0.0]
 
     for step in steps:
-        road_name_boundaries.append(road_name_boundaries[-1] + step["duration"])
+        road_name_boundary_miles.append(road_name_boundary_miles[-1] + step["distance"] / METERS_PER_MILE)
 
-    return route, cumulative_durations, duration_seconds, max_speeds_mph, road_names, road_name_boundaries
+    return route, cumulative_miles, max_speeds_mph, road_names, road_name_boundary_miles
 
 
 def step_label(step):
@@ -315,12 +377,12 @@ def step_label(step):
     return step.get("ref") or step.get("name") or "Unnamed road"
 
 
-def current_road_name(road_names, road_name_boundaries, elapsed_seconds):
+def current_road_name(road_names, road_name_boundaries, position):
 
     if not road_names:
         return None
 
-    name_index = bisect.bisect_right(road_name_boundaries, elapsed_seconds) - 1
+    name_index = bisect.bisect_right(road_name_boundaries, position) - 1
     name_index = max(0, min(name_index, len(road_names) - 1))
 
     return road_names[name_index]
@@ -329,12 +391,13 @@ def current_road_name(road_names, road_name_boundaries, elapsed_seconds):
 def derive_position(
     trip_id,
     route,
-    durations,
-    duration_seconds,
-    max_speeds,
+    distances_miles,
+    max_speeds_mph,
     road_names,
-    road_name_boundaries,
+    road_name_boundary_miles,
     zones,
+    realized_seconds,
+    realized_duration_seconds,
     traffic_base_datetime,
     traffic_bias,
     elapsed_real_seconds
@@ -342,9 +405,7 @@ def derive_position(
 
     elapsed_seconds = elapsed_real_seconds * TIME_COMPRESSION
 
-    road_name = current_road_name(road_names, road_name_boundaries, elapsed_seconds)
-
-    if elapsed_seconds >= duration_seconds:
+    if elapsed_seconds >= realized_duration_seconds:
 
         return {
 
@@ -356,16 +417,16 @@ def derive_position(
 
             "speed_mph": 0,
 
-            "road_name": road_name
+            "road_name": current_road_name(road_names, road_name_boundary_miles, distances_miles[-1])
         }
 
     #
     # Find which route segment we're currently inside of, and how far
     # across it (by time), then interpolate position within it.
     #
-    segment_index = bisect.bisect_right(durations, elapsed_seconds) - 1
+    segment_index = bisect.bisect_right(realized_seconds, elapsed_seconds) - 1
 
-    segment_start, segment_end = durations[segment_index], durations[segment_index + 1]
+    segment_start, segment_end = realized_seconds[segment_index], realized_seconds[segment_index + 1]
 
     fraction = 0 if segment_end == segment_start else (
         (elapsed_seconds - segment_start) / (segment_end - segment_start)
@@ -381,71 +442,25 @@ def derive_position(
         lon1 + (lon2 - lon1) * fraction
     ]
 
-    #
-    # A user-defined zone covering this segment overrides the road entirely
-    # - its speed_limit_mph replaces both OSRM's reported speed and the
-    # tier default, regardless of whether OSRM had annotation data here.
-    #
-    zone = find_zone(zones, segment_start)
+    distance_start, distance_end = distances_miles[segment_index], distances_miles[segment_index + 1]
+    current_distance = distance_start + (distance_end - distance_start) * fraction
 
-    if zone is not None:
-
-        free_flow_mph = zone["speed_limit_mph"]
-
-        effective_dt = traffic_base_datetime + timedelta(seconds=segment_start)
-
-        factor = congestion_factor(
-            trip_id, segment_index, free_flow_mph, effective_dt, traffic_bias, zone=zone
-        )
-
-        speed_mph = max(
-            MIN_REALISTIC_SPEED_MPH,
-            min(MAX_REALISTIC_SPEED_MPH, free_flow_mph * factor)
-        )
+    road_name = current_road_name(road_names, road_name_boundary_miles, current_distance)
 
     #
-    # Real-world free-flow speed for this road segment, from OSRM's own
-    # per-segment speed annotation - not scaled by TIME_COMPRESSION, since
-    # this is the vehicle's speed on the actual road, not however fast it
-    # appears to move in sim time. Paths created before this column
-    # existed have an empty max_speeds array, so fall back to 0 for those.
+    # The wall-clock moment this segment is reached, advancing through the
+    # trip by real (uncompressed) drive time - so a long trip can drive
+    # into a different rush-hour window partway through, not just reflect
+    # conditions frozen at departure. segment_start comes from the trip's
+    # own realized_seconds schedule (computed once at trip start), so this
+    # matches exactly the effective_dt build_trip_schedule() used for this
+    # same segment.
     #
-    elif segment_index < len(max_speeds):
+    effective_dt = traffic_base_datetime + timedelta(seconds=segment_start)
 
-        reported_mph = max(
-            MIN_REALISTIC_SPEED_MPH,
-            min(MAX_REALISTIC_SPEED_MPH, max_speeds[segment_index])
-        )
-
-        #
-        # OSRM's reported speed is only used to classify the road's tier
-        # here - the tier's realistic default takes over as the actual
-        # free-flow baseline whenever it's higher than what OSRM reported,
-        # since OSRM's number is frequently an under-tagged fallback
-        # rather than the real posted limit.
-        #
-        tier = road_tier(reported_mph)
-
-        free_flow_mph = max(reported_mph, TIER_DEFAULT_MPH[tier])
-
-        #
-        # The wall-clock moment this segment is reached, advancing through
-        # the trip by real (uncompressed) drive time - so a long trip can
-        # drive into a different rush-hour window partway through, not
-        # just reflect conditions frozen at departure.
-        #
-        effective_dt = traffic_base_datetime + timedelta(seconds=segment_start)
-
-        factor = congestion_factor(trip_id, segment_index, free_flow_mph, effective_dt, traffic_bias)
-
-        speed_mph = max(
-            MIN_REALISTIC_SPEED_MPH,
-            min(MAX_REALISTIC_SPEED_MPH, free_flow_mph * factor)
-        )
-
-    else:
-
-        speed_mph = 0
+    speed_mph = segment_speed_mph(
+        zones, max_speeds_mph, segment_index, distance_start, effective_dt, traffic_bias, trip_id
+    )
 
     return {
 
@@ -453,7 +468,7 @@ def derive_position(
 
         "status": "DRIVING",
 
-        "remaining_sim_seconds": (duration_seconds - elapsed_seconds) / TIME_COMPRESSION,
+        "remaining_sim_seconds": (realized_duration_seconds - elapsed_seconds) / TIME_COMPRESSION,
 
         "speed_mph": round(speed_mph, 1),
 
@@ -541,9 +556,9 @@ def zone_dict(row):
 
         "path_id": row[1],
 
-        "start_seconds": row[2],
+        "start_miles": row[2],
 
-        "end_seconds": row[3],
+        "end_miles": row[3],
 
         "speed_limit_mph": row[4],
 
@@ -564,11 +579,11 @@ def fetch_zones_for_paths(cur, path_ids):
 
     cur.execute(
         """
-        SELECT id, path_id, start_seconds, end_seconds, speed_limit_mph,
+        SELECT id, path_id, start_miles, end_miles, speed_limit_mph,
             rush_hour_start, rush_hour_end, rush_hour_factor
         FROM road_zones
         WHERE path_id = ANY(%s)
-        ORDER BY path_id, start_seconds
+        ORDER BY path_id, start_miles
         """,
         (path_ids,)
     )
@@ -599,13 +614,12 @@ class CreatePathRequest(BaseModel):
 class RoadZoneRequest(BaseModel):
 
     #
-    # Position along the path, in the same "cumulative real seconds since
-    # departure" domain as paths.durations - lets the backend locate the
-    # zone against a route segment the same way derive_position() already
-    # does for position/road-name lookups.
+    # Position along the path, in miles from the origin - a fixed
+    # geometric property of the route, unlike time (which now depends on
+    # the traffic model itself and would differ trip to trip).
     #
-    start_seconds: float
-    end_seconds: float
+    start_miles: float
+    end_miles: float
 
     speed_limit_mph: float
 
@@ -687,9 +701,8 @@ def list_vehicles():
             CASE WHEN EXISTS (
                 SELECT 1
                 FROM trips t
-                JOIN paths p ON p.id = t.path_id
                 WHERE t.vehicle_id = v.id
-                AND EXTRACT(EPOCH FROM (NOW() - t.started_at)) < p.duration_seconds / %s
+                AND EXTRACT(EPOCH FROM (NOW() - t.started_at)) < t.realized_duration_seconds / %s
             ) THEN 'DRIVING' ELSE 'READY' END
         FROM vehicles v
         ORDER BY v.id
@@ -753,20 +766,21 @@ def vehicle_city(id: int):
         """
         SELECT
             t.id,
-            p.id,
             p.route,
-            p.durations,
-            p.duration_seconds,
+            p.distances_miles,
             p.max_speeds_mph,
             p.road_names,
-            p.road_name_boundaries,
+            p.road_name_boundary_miles,
+            t.zones_snapshot,
+            t.realized_seconds,
+            t.realized_duration_seconds,
             t.traffic_base_datetime,
             t.traffic_bias,
             EXTRACT(EPOCH FROM (NOW() - t.started_at))
         FROM trips t
         JOIN paths p ON p.id = t.path_id
         WHERE t.vehicle_id = %s
-        AND EXTRACT(EPOCH FROM (NOW() - t.started_at)) < (p.duration_seconds / %s) + %s
+        AND EXTRACT(EPOCH FROM (NOW() - t.started_at)) < (t.realized_duration_seconds / %s) + %s
         ORDER BY t.started_at DESC
         LIMIT 1
         """,
@@ -775,39 +789,37 @@ def vehicle_city(id: int):
 
     row = cur.fetchone()
 
+    cur.close()
+    conn.close()
+
     if row is None:
-        cur.close()
-        conn.close()
         raise HTTPException(status_code=404, detail="Vehicle is not currently on a trip")
 
     (
         trip_id,
-        path_id,
         route,
-        durations,
-        duration_seconds,
+        distances_miles,
         max_speeds_mph,
         road_names,
-        road_name_boundaries,
+        road_name_boundary_miles,
+        zones_snapshot,
+        realized_seconds,
+        realized_duration_seconds,
         traffic_base_datetime,
         traffic_bias,
         elapsed_real_seconds
     ) = row
 
-    zones = fetch_zones_for_paths(cur, [path_id]).get(path_id, [])
-
-    cur.close()
-    conn.close()
-
     derived = derive_position(
         trip_id,
         route,
-        durations,
-        duration_seconds,
+        distances_miles,
         max_speeds_mph,
         road_names,
-        road_name_boundaries,
-        zones,
+        road_name_boundary_miles,
+        zones_snapshot,
+        realized_seconds,
+        realized_duration_seconds,
         traffic_base_datetime,
         traffic_bias,
         float(elapsed_real_seconds)
@@ -829,8 +841,8 @@ def create_path(req: CreatePathRequest):
     #
     cur.execute(
         """
-        SELECT id, origin, destination, route, durations, duration_seconds,
-            max_speeds_mph, road_names, road_name_boundaries
+        SELECT id, origin, destination, route, distances_miles,
+            max_speeds_mph, road_names, road_name_boundary_miles
         FROM paths
         WHERE lower(origin) = lower(%s) AND lower(destination) = lower(%s)
         """,
@@ -856,15 +868,13 @@ def create_path(req: CreatePathRequest):
 
             "route": existing[3],
 
-            "durations": existing[4],
+            "distances_miles": existing[4],
 
-            "duration_seconds": existing[5],
+            "max_speeds_mph": existing[5],
 
-            "max_speeds_mph": existing[6],
+            "road_names": existing[6],
 
-            "road_names": existing[7],
-
-            "road_name_boundaries": existing[8],
+            "road_name_boundary_miles": existing[7],
 
             "zones": zones
         }
@@ -872,7 +882,7 @@ def create_path(req: CreatePathRequest):
     origin_coords = geocode(req.origin)
     destination_coords = geocode(req.destination)
 
-    route, durations, duration_seconds, max_speeds_mph, road_names, road_name_boundaries = road_route(
+    route, distances_miles, max_speeds_mph, road_names, road_name_boundary_miles = road_route(
         origin_coords, destination_coords
     )
 
@@ -883,15 +893,14 @@ def create_path(req: CreatePathRequest):
             origin,
             destination,
             route,
-            durations,
-            duration_seconds,
+            distances_miles,
             max_speeds_mph,
             road_names,
-            road_name_boundaries
+            road_name_boundary_miles
         )
 
         VALUES
-        (%s,%s,%s,%s,%s,%s,%s,%s)
+        (%s,%s,%s,%s,%s,%s,%s)
 
         RETURNING id
         """,
@@ -899,11 +908,10 @@ def create_path(req: CreatePathRequest):
             req.origin,
             req.destination,
             json.dumps(route),
-            json.dumps(durations),
-            duration_seconds,
+            json.dumps(distances_miles),
             json.dumps(max_speeds_mph),
             json.dumps(road_names),
-            json.dumps(road_name_boundaries)
+            json.dumps(road_name_boundary_miles)
         )
     )
 
@@ -924,15 +932,13 @@ def create_path(req: CreatePathRequest):
 
         "route": route,
 
-        "durations": durations,
-
-        "duration_seconds": duration_seconds,
+        "distances_miles": distances_miles,
 
         "max_speeds_mph": max_speeds_mph,
 
         "road_names": road_names,
 
-        "road_name_boundaries": road_name_boundaries,
+        "road_name_boundary_miles": road_name_boundary_miles,
 
         "zones": []
     }
@@ -947,8 +953,8 @@ def list_paths():
 
     cur.execute(
         """
-        SELECT id, origin, destination, route, durations, duration_seconds,
-            max_speeds_mph, road_names, road_name_boundaries
+        SELECT id, origin, destination, route, distances_miles,
+            max_speeds_mph, road_names, road_name_boundary_miles
         FROM paths
         ORDER BY id
         """
@@ -972,15 +978,13 @@ def list_paths():
 
             "route": row[3],
 
-            "durations": row[4],
+            "distances_miles": row[4],
 
-            "duration_seconds": row[5],
+            "max_speeds_mph": row[5],
 
-            "max_speeds_mph": row[6],
+            "road_names": row[6],
 
-            "road_names": row[7],
-
-            "road_name_boundaries": row[8],
+            "road_name_boundary_miles": row[7],
 
             "zones": zones_by_path.get(row[0], [])
         }
@@ -1020,7 +1024,7 @@ def create_zone(path_id: int, req: RoadZoneRequest):
     conn = db()
     cur = conn.cursor()
 
-    cur.execute("SELECT duration_seconds FROM paths WHERE id=%s", (path_id,))
+    cur.execute("SELECT distances_miles FROM paths WHERE id=%s", (path_id,))
 
     path_row = cur.fetchone()
 
@@ -1029,16 +1033,16 @@ def create_zone(path_id: int, req: RoadZoneRequest):
         conn.close()
         raise HTTPException(status_code=404, detail="Path not found")
 
-    duration_seconds = path_row[0]
+    total_miles = path_row[0][-1]
 
     #
     # Clamp to the path's actual domain and normalize ordering, rather than
     # trusting whatever the client computed from clicking points on the map.
     #
-    start_seconds = max(0.0, min(req.start_seconds, req.end_seconds))
-    end_seconds = min(duration_seconds, max(req.start_seconds, req.end_seconds))
+    start_miles = max(0.0, min(req.start_miles, req.end_miles))
+    end_miles = min(total_miles, max(req.start_miles, req.end_miles))
 
-    if end_seconds <= start_seconds:
+    if end_miles <= start_miles:
         cur.close()
         conn.close()
         raise HTTPException(status_code=400, detail="Zone must cover a non-empty stretch of the route")
@@ -1059,14 +1063,14 @@ def create_zone(path_id: int, req: RoadZoneRequest):
     cur.execute(
         """
         INSERT INTO road_zones
-        (path_id, start_seconds, end_seconds, speed_limit_mph, rush_hour_start, rush_hour_end, rush_hour_factor)
+        (path_id, start_miles, end_miles, speed_limit_mph, rush_hour_start, rush_hour_end, rush_hour_factor)
         VALUES (%s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
         (
             path_id,
-            start_seconds,
-            end_seconds,
+            start_miles,
+            end_miles,
             req.speed_limit_mph,
             req.rush_hour_start,
             req.rush_hour_end,
@@ -1087,9 +1091,9 @@ def create_zone(path_id: int, req: RoadZoneRequest):
 
         "path_id": path_id,
 
-        "start_seconds": start_seconds,
+        "start_miles": start_miles,
 
-        "end_seconds": end_seconds,
+        "end_miles": end_miles,
 
         "speed_limit_mph": req.speed_limit_mph,
 
@@ -1141,7 +1145,7 @@ def start_trip(req: StartTripRequest):
         raise HTTPException(status_code=404, detail="Vehicle not found")
 
     cur.execute(
-        "SELECT route, durations, duration_seconds FROM paths WHERE id=%s",
+        "SELECT route, distances_miles, max_speeds_mph FROM paths WHERE id=%s",
         (req.path_id,)
     )
 
@@ -1152,15 +1156,14 @@ def start_trip(req: StartTripRequest):
         conn.close()
         raise HTTPException(status_code=404, detail="Path not found")
 
-    route, durations, duration_seconds = path_row
+    route, distances_miles, max_speeds_mph = path_row
 
     cur.execute(
         """
         SELECT 1
         FROM trips t
-        JOIN paths p ON p.id = t.path_id
         WHERE t.vehicle_id = %s
-        AND EXTRACT(EPOCH FROM (NOW() - t.started_at)) < p.duration_seconds / %s
+        AND EXTRACT(EPOCH FROM (NOW() - t.started_at)) < t.realized_duration_seconds / %s
         """,
         (req.vehicle_id, TIME_COMPRESSION)
     )
@@ -1174,16 +1177,43 @@ def start_trip(req: StartTripRequest):
         to_local_naive(req.simulated_datetime) if req.simulated_datetime else local_now_naive()
     )
 
+    #
+    # A trip freezes its own snapshot of the path's zones at creation time,
+    # same as traffic_base_datetime/traffic_bias - so a zone added or
+    # removed later doesn't retroactively contradict a schedule (and
+    # displayed speed) already computed for a trip in progress.
+    #
+    zones = fetch_zones_for_paths(cur, [req.path_id]).get(req.path_id, [])
+
     cur.execute(
         """
-        INSERT INTO trips (vehicle_id, path_id, traffic_base_datetime, traffic_bias)
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO trips (vehicle_id, path_id, traffic_base_datetime, traffic_bias, zones_snapshot)
+        VALUES (%s, %s, %s, %s, %s)
         RETURNING id
         """,
-        (req.vehicle_id, req.path_id, traffic_base_datetime, req.traffic_bias)
+        (req.vehicle_id, req.path_id, traffic_base_datetime, req.traffic_bias, json.dumps(zones))
     )
 
     trip_id = cur.fetchone()[0]
+
+    #
+    # Needs the trip's own id (for jitter/incident seeding), so this can
+    # only run after the row above exists.
+    #
+    realized_seconds = build_trip_schedule(
+        distances_miles, max_speeds_mph, zones, traffic_base_datetime, req.traffic_bias, trip_id
+    )
+
+    realized_duration_seconds = realized_seconds[-1]
+
+    cur.execute(
+        """
+        UPDATE trips
+        SET realized_seconds = %s, realized_duration_seconds = %s
+        WHERE id = %s
+        """,
+        (json.dumps(realized_seconds), realized_duration_seconds, trip_id)
+    )
 
     conn.commit()
 
@@ -1202,9 +1232,9 @@ def start_trip(req: StartTripRequest):
 
         "route": route,
 
-        "duration_seconds": duration_seconds,
+        "duration_seconds": realized_duration_seconds,
 
-        "sim_duration_seconds": duration_seconds / TIME_COMPRESSION,
+        "sim_duration_seconds": realized_duration_seconds / TIME_COMPRESSION,
 
         "status": "DRIVING"
     }
@@ -1225,25 +1255,25 @@ def active_trips():
             v.name,
             t.path_id,
             p.route,
-            p.durations,
-            p.duration_seconds,
+            p.distances_miles,
             p.max_speeds_mph,
             p.road_names,
-            p.road_name_boundaries,
+            p.road_name_boundary_miles,
+            t.zones_snapshot,
+            t.realized_seconds,
+            t.realized_duration_seconds,
             t.traffic_base_datetime,
             t.traffic_bias,
             EXTRACT(EPOCH FROM (NOW() - t.started_at))
         FROM trips t
         JOIN vehicles v ON v.id = t.vehicle_id
         JOIN paths p ON p.id = t.path_id
-        WHERE EXTRACT(EPOCH FROM (NOW() - t.started_at)) < (p.duration_seconds / %s) + %s
+        WHERE EXTRACT(EPOCH FROM (NOW() - t.started_at)) < (t.realized_duration_seconds / %s) + %s
         """,
         (TIME_COMPRESSION, ARRIVAL_GRACE_SECONDS)
     )
 
     rows = cur.fetchall()
-
-    zones_by_path = fetch_zones_for_paths(cur, [row[3] for row in rows])
 
     cur.close()
     conn.close()
@@ -1256,11 +1286,13 @@ def active_trips():
         vehicle_name,
         path_id,
         route,
-        durations,
-        duration_seconds,
+        distances_miles,
         max_speeds_mph,
         road_names,
-        road_name_boundaries,
+        road_name_boundary_miles,
+        zones_snapshot,
+        realized_seconds,
+        realized_duration_seconds,
         traffic_base_datetime,
         traffic_bias,
         elapsed_real_seconds
@@ -1269,12 +1301,13 @@ def active_trips():
         derived = derive_position(
             trip_id,
             route,
-            durations,
-            duration_seconds,
+            distances_miles,
             max_speeds_mph,
             road_names,
-            road_name_boundaries,
-            zones_by_path.get(path_id, []),
+            road_name_boundary_miles,
+            zones_snapshot,
+            realized_seconds,
+            realized_duration_seconds,
             traffic_base_datetime,
             traffic_bias,
             float(elapsed_real_seconds)

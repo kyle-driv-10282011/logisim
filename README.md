@@ -107,12 +107,17 @@ case-insensitive on `origin`/`destination` — creating "minneapolis" →
 | `id`                    | serial            | primary key |
 | `origin` / `destination`| text              | as typed by the user |
 | `route`                 | jsonb             | `[[lat, lon], ...]` — full-resolution polyline from OSRM |
-| `durations`             | jsonb             | cumulative **real** seconds elapsed at each `route` point (rescaled to match `duration_seconds` exactly — see [Position and speed](#position-and-speed)) |
-| `duration_seconds`      | double precision  | total real drive time, from OSRM |
+| `distances_miles`       | jsonb             | cumulative miles from the origin at each `route` point — a fixed geometric property of the path, independent of any traffic model (see [Position and speed](#position-and-speed)) |
 | `max_speeds_mph`        | jsonb             | OSRM's own per-segment speed (real distance ÷ duration), converted to mph — the free-flow input to the traffic model |
 | `road_names`            | jsonb             | one label per OSRM turn-by-turn step (`ref` like `"I-94"`, else `name`, else `"Unnamed road"`) |
-| `road_name_boundaries`  | jsonb             | cumulative real seconds at each step boundary, same domain as `durations` |
+| `road_name_boundary_miles` | jsonb          | cumulative miles at each step boundary, same domain as `distances_miles` |
 | `created`               | timestamp         | default `NOW()` |
+
+Note there's no `duration_seconds` here — how long a drive over this path
+takes is no longer a fixed property of the path itself. It depends on the
+traffic model (speed limits, rush hour, zones, `traffic_bias`) applied at
+the moment a specific trip starts, so it's computed and stored per-*trip*
+instead (`trips.realized_duration_seconds` below).
 
 ### `road_zones`
 
@@ -124,7 +129,7 @@ on the synthetic tier-based model for that stretch.
 |----------------------|-------------------|-------|
 | `id`                 | serial            | primary key |
 | `path_id`            | integer           | FK `paths(id)`, `ON DELETE CASCADE` |
-| `start_seconds` / `end_seconds` | double precision | position range within the path, in the same "cumulative real seconds" domain as `paths.durations` |
+| `start_miles` / `end_miles` | double precision | position range within the path, in miles from the origin — same domain as `paths.distances_miles` |
 | `speed_limit_mph`    | double precision  | free-flow speed for this stretch — replaces both OSRM's reported speed and the tier default entirely |
 | `rush_hour_start` / `rush_hour_end` | double precision | hour of day (0-24, local time), both nullable together. `NULL`/`NULL` means this zone never slows down for rush hour |
 | `rush_hour_factor`   | double precision  | multiplier applied to `speed_limit_mph` during the rush window, default `0.6` |
@@ -142,6 +147,9 @@ user-specified simulated time).
 | `started_at`             | timestamp         | real wall-clock moment the trip was created — drives the compressed elapsed-time math, never overridden by the user |
 | `traffic_base_datetime`  | timestamp         | wall-clock moment congestion is anchored to; either `started_at`'s value or a user-supplied `simulated_datetime` (see [Traffic model](#traffic-model)) |
 | `traffic_bias`           | double precision  | user multiplier on computed congestion, default `1.0` |
+| `zones_snapshot`         | jsonb             | the path's `road_zones` as they existed the moment this trip was created — frozen so a zone added/removed later doesn't retroactively contradict a schedule already computed for a trip in progress |
+| `realized_seconds`       | jsonb             | cumulative **real** seconds to reach each `route` point *for this specific trip*, computed once at trip creation from `distances_miles` and the traffic model (`build_trip_schedule()` — see [Position and speed](#position-and-speed)) |
+| `realized_duration_seconds` | double precision | `realized_seconds[-1]` — this trip's actual total drive time under the traffic model in effect when it started |
 
 A vehicle can only have one trip active at a time (enforced at the
 application level in `POST /api/trips`, not a DB constraint).
@@ -150,12 +158,13 @@ application level in `POST /api/trips`, not a DB constraint).
 
 ### Time compression
 
-`TIME_COMPRESSION = 60` in `app.py`. A trip's real drive duration (from
-OSRM) is divided by this factor to get how long it plays out on screen —
-e.g. a 6-hour drive finishes in 6 minutes. All position/speed math is done
-in *real* seconds and only converted to *sim* seconds at the boundary
-(`remaining_sim_seconds` in API responses), so the underlying model always
-reasons in true drive time.
+`TIME_COMPRESSION = 60` in `app.py`. A trip's real drive duration
+(`realized_duration_seconds`, computed under the traffic model — see
+[Position and speed](#position-and-speed)) is divided by this factor to
+get how long it plays out on screen — e.g. a 6-hour drive finishes in 6
+minutes. All position/speed math is done in *real* seconds and only
+converted to *sim* seconds at the boundary (`remaining_sim_seconds` in API
+responses), so the underlying model always reasons in true drive time.
 
 An arrived trip keeps showing up in `/api/trips/active` for
 `ARRIVAL_GRACE_SECONDS` (30) real seconds afterward, so a vehicle doesn't
@@ -163,24 +172,47 @@ just vanish from the map the instant it arrives.
 
 ### Position and speed
 
-`derive_position()` in `app.py` is the core of the simulation. Given a
-trip's elapsed real time, it:
+Drive time is *derived*, not trusted from OSRM. A path only stores
+`distances_miles` — a fixed geometric property of the route (cumulative
+miles from the origin at each point) that never changes. How long it
+actually takes to drive is computed from that distance and the traffic
+model's speed for each segment, so a higher zone speed limit, a lighter
+rush hour, or a `traffic_bias` above `1.0` all genuinely shorten the
+trip's ETA — they're not just cosmetic.
+
+**`build_trip_schedule()`** runs once, when a trip is created
+(`POST /api/trips`), and produces `trips.realized_seconds` — the
+per-*trip* equivalent of the old fixed per-*path* duration array. It walks
+the route segment by segment:
+
+1. For the current segment, compute the wall-clock moment it's reached
+   (`traffic_base_datetime` + cumulative real seconds so far).
+2. Compute that segment's effective speed via [the traffic
+   model](#traffic-model) below (zone override, or tier + rush-hour +
+   jitter/incident + `traffic_bias`).
+3. `segment_time = segment_distance_miles / segment_speed_mph`, added to
+   the running total.
+
+This has to be a genuine sequential walk, not a closed-form calculation —
+a segment's effective speed depends on the clock time it's reached, which
+depends on how long every prior segment took. It only needs to run once
+per trip: the schedule (and the zones it used) is frozen into the trip
+row at creation, exactly like `traffic_base_datetime`/`traffic_bias`
+already were.
+
+**`derive_position()`** then runs on every poll, and is cheap — no need
+to re-walk the route:
 
 1. Converts elapsed real seconds → sim seconds via `TIME_COMPRESSION`.
 2. Finds which point-to-point segment of the route the vehicle is
-   currently between (binary search over the cumulative `durations`
-   array) and linearly interpolates lat/lon within it.
-3. Looks up the current road name the same way, using the independent
-   `road_name_boundaries` array (steps are coarser than the fine-grained
-   position segments).
-4. Computes the current speed via the [traffic model](#traffic-model)
-   below.
-
-`durations` is rescaled at path-creation time so its last value matches
-OSRM's total `duration_seconds` exactly — OSRM's per-segment annotations
-don't include turn penalties, which are only reflected in the route
-total, so without rescaling, cumulative segment durations would fall
-short of the real total drive time.
+   currently between (binary search over the trip's own
+   `realized_seconds` array) and linearly interpolates lat/lon within it.
+3. Looks up the current road name the same way, but in the *distance*
+   domain — interpolating `distances_miles` to get the vehicle's current
+   cumulative mileage, then bisecting `road_name_boundary_miles` against
+   it (steps are coarser than the fine-grained position segments).
+4. Recomputes that one segment's speed (for display) the same way
+   `build_trip_schedule()` did when building the schedule.
 
 ### Traffic model
 
@@ -246,16 +278,24 @@ conditions:
 A road zone lets a user manually override the traffic model for one
 specific stretch of a path — its own speed limit, and optionally its own
 rush-hour window and severity — rather than the road-tier-based model
-above. In `derive_position()`, if the vehicle's current route segment
-falls inside a zone (`find_zone()`, matched by `start_seconds`/
-`end_seconds` against the same cumulative-duration domain used for
-position/road-name lookups), the zone's `speed_limit_mph` replaces the
+above. `segment_speed_mph()` is the shared function both
+`build_trip_schedule()` and `derive_position()` call to price a single
+segment: if the segment falls inside a zone (`find_zone()`, matched by
+`start_miles`/`end_miles` against the same cumulative-distance domain used
+for position/road-name lookups), the zone's `speed_limit_mph` replaces the
 OSRM-derived free-flow speed entirely, and `zone_is_rush_hour()` (checked
 against the zone's own `rush_hour_start`/`rush_hour_end`, not the app-wide
 7-9am/4-6pm windows) decides whether `rush_hour_factor` or a flat `1.0`
 baseline applies. The same per-`(trip_id, segment_index)` jitter and
 incident chance still layers on top, so a zone still looks like real
 traffic rather than a perfectly flat speed.
+
+Because zones now genuinely affect drive time (not just a displayed
+number), a trip freezes its own copy of the path's zones at creation time
+(`trips.zones_snapshot`) rather than reading `road_zones` live on every
+poll — otherwise adding or deleting a zone mid-trip would silently
+invalidate a schedule already computed and shown to the user as an ETA.
+Zones added after a trip starts only affect *future* trips over that path.
 
 Zones are created via the frontend by picking two points along a
 previewed path's route on the map (each click snaps to the nearest route
@@ -283,7 +323,7 @@ All endpoints are on the `backend` service, default `http://localhost:5000`.
 | `POST /api/paths`               | Geocode + route an origin/destination (or return the existing match). Body: `{origin, destination}`. Response includes `zones` |
 | `GET /api/paths`                | List all created paths, each with its `zones` |
 | `DELETE /api/paths/{id}`        | Delete a path (cascades its trips and zones) |
-| `POST /api/paths/{id}/zones`    | Add a road zone to a path. Body: `{start_seconds, end_seconds, speed_limit_mph, rush_hour_start?, rush_hour_end?, rush_hour_factor?}` |
+| `POST /api/paths/{id}/zones`    | Add a road zone to a path. Body: `{start_miles, end_miles, speed_limit_mph, rush_hour_start?, rush_hour_end?, rush_hour_factor?}` |
 | `DELETE /api/zones/{id}`        | Delete a road zone |
 | `POST /api/trips`               | Start a trip. Body: `{vehicle_id, path_id, simulated_datetime?, traffic_bias?}`. 409 if the vehicle is already driving |
 | `GET /api/trips/active`         | Poll all currently-active trips, each with live position/speed/road name |
