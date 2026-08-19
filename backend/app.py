@@ -129,11 +129,50 @@ def is_rush_hour(effective_dt):
     return is_weekday and ((7 <= hour < 9) or (16 <= hour < 18))
 
 
-def congestion_factor(trip_id, segment_index, free_flow_mph, effective_dt, traffic_bias):
+def zone_is_rush_hour(effective_dt, rush_hour_start, rush_hour_end):
 
-    tier = road_tier(free_flow_mph)
+    if rush_hour_start is None or rush_hour_end is None:
+        return False
 
-    baseline = CONGESTION_BASELINE[tier]["rush" if is_rush_hour(effective_dt) else "normal"]
+    if effective_dt.weekday() >= 5:
+        return False
+
+    hour = effective_dt.hour + effective_dt.minute / 60
+
+    #
+    # Support a window that wraps past midnight (e.g. 22 -> 2), not just
+    # the common same-day case.
+    #
+    if rush_hour_start <= rush_hour_end:
+        return rush_hour_start <= hour < rush_hour_end
+
+    return hour >= rush_hour_start or hour < rush_hour_end
+
+
+def find_zone(zones, position_seconds):
+
+    for zone in zones:
+        if zone["start_seconds"] <= position_seconds < zone["end_seconds"]:
+            return zone
+
+    return None
+
+
+def congestion_factor(trip_id, segment_index, free_flow_mph, effective_dt, traffic_bias, zone=None):
+
+    #
+    # A user-defined zone fully replaces the tier-based rush/normal
+    # baseline with its own rush window and severity - it's an explicit
+    # override (e.g. "construction, 45mph, 7-9am"), not something that
+    # should still be shaped by the generic road-tier model.
+    #
+    if zone is not None:
+        baseline = zone["rush_hour_factor"] if zone_is_rush_hour(
+            effective_dt, zone["rush_hour_start"], zone["rush_hour_end"]
+        ) else 1.0
+    else:
+        tier = road_tier(free_flow_mph)
+        baseline = CONGESTION_BASELINE[tier]["rush" if is_rush_hour(effective_dt) else "normal"]
 
     #
     # Seeded per trip+segment so repeated polls of the same trip agree on
@@ -295,6 +334,7 @@ def derive_position(
     max_speeds,
     road_names,
     road_name_boundaries,
+    zones,
     traffic_base_datetime,
     traffic_bias,
     elapsed_real_seconds
@@ -342,13 +382,35 @@ def derive_position(
     ]
 
     #
+    # A user-defined zone covering this segment overrides the road entirely
+    # - its speed_limit_mph replaces both OSRM's reported speed and the
+    # tier default, regardless of whether OSRM had annotation data here.
+    #
+    zone = find_zone(zones, segment_start)
+
+    if zone is not None:
+
+        free_flow_mph = zone["speed_limit_mph"]
+
+        effective_dt = traffic_base_datetime + timedelta(seconds=segment_start)
+
+        factor = congestion_factor(
+            trip_id, segment_index, free_flow_mph, effective_dt, traffic_bias, zone=zone
+        )
+
+        speed_mph = max(
+            MIN_REALISTIC_SPEED_MPH,
+            min(MAX_REALISTIC_SPEED_MPH, free_flow_mph * factor)
+        )
+
+    #
     # Real-world free-flow speed for this road segment, from OSRM's own
     # per-segment speed annotation - not scaled by TIME_COMPRESSION, since
     # this is the vehicle's speed on the actual road, not however fast it
     # appears to move in sim time. Paths created before this column
     # existed have an empty max_speeds array, so fall back to 0 for those.
     #
-    if segment_index < len(max_speeds):
+    elif segment_index < len(max_speeds):
 
         reported_mph = max(
             MIN_REALISTIC_SPEED_MPH,
@@ -471,6 +533,54 @@ def db():
     )
 
 
+def zone_dict(row):
+
+    return {
+
+        "id": row[0],
+
+        "path_id": row[1],
+
+        "start_seconds": row[2],
+
+        "end_seconds": row[3],
+
+        "speed_limit_mph": row[4],
+
+        "rush_hour_start": row[5],
+
+        "rush_hour_end": row[6],
+
+        "rush_hour_factor": row[7]
+    }
+
+
+def fetch_zones_for_paths(cur, path_ids):
+
+    path_ids = list(set(path_ids))
+
+    if not path_ids:
+        return {}
+
+    cur.execute(
+        """
+        SELECT id, path_id, start_seconds, end_seconds, speed_limit_mph,
+            rush_hour_start, rush_hour_end, rush_hour_factor
+        FROM road_zones
+        WHERE path_id = ANY(%s)
+        ORDER BY path_id, start_seconds
+        """,
+        (path_ids,)
+    )
+
+    zones_by_path = {}
+
+    for row in cur.fetchall():
+        zones_by_path.setdefault(row[1], []).append(zone_dict(row))
+
+    return zones_by_path
+
+
 
 class CreateVehicleRequest(BaseModel):
 
@@ -483,6 +593,31 @@ class CreatePathRequest(BaseModel):
 
     origin: str
     destination: str
+
+
+
+class RoadZoneRequest(BaseModel):
+
+    #
+    # Position along the path, in the same "cumulative real seconds since
+    # departure" domain as paths.durations - lets the backend locate the
+    # zone against a route segment the same way derive_position() already
+    # does for position/road-name lookups.
+    #
+    start_seconds: float
+    end_seconds: float
+
+    speed_limit_mph: float
+
+    #
+    # Both null (the default) means this zone never has a rush-hour
+    # slowdown - it's just a flat speed override (e.g. a permanent
+    # construction zone). Setting both defines a custom rush window
+    # independent of the app-wide 7-9am/4-6pm weekday windows.
+    #
+    rush_hour_start: Optional[float] = None
+    rush_hour_end: Optional[float] = None
+    rush_hour_factor: float = 0.6
 
 
 
@@ -618,6 +753,7 @@ def vehicle_city(id: int):
         """
         SELECT
             t.id,
+            p.id,
             p.route,
             p.durations,
             p.duration_seconds,
@@ -639,14 +775,14 @@ def vehicle_city(id: int):
 
     row = cur.fetchone()
 
-    cur.close()
-    conn.close()
-
     if row is None:
+        cur.close()
+        conn.close()
         raise HTTPException(status_code=404, detail="Vehicle is not currently on a trip")
 
     (
         trip_id,
+        path_id,
         route,
         durations,
         duration_seconds,
@@ -658,6 +794,11 @@ def vehicle_city(id: int):
         elapsed_real_seconds
     ) = row
 
+    zones = fetch_zones_for_paths(cur, [path_id]).get(path_id, [])
+
+    cur.close()
+    conn.close()
+
     derived = derive_position(
         trip_id,
         route,
@@ -666,6 +807,7 @@ def vehicle_city(id: int):
         max_speeds_mph,
         road_names,
         road_name_boundaries,
+        zones,
         traffic_base_datetime,
         traffic_bias,
         float(elapsed_real_seconds)
@@ -699,6 +841,8 @@ def create_path(req: CreatePathRequest):
 
     if existing is not None:
 
+        zones = fetch_zones_for_paths(cur, [existing[0]]).get(existing[0], [])
+
         cur.close()
         conn.close()
 
@@ -720,7 +864,9 @@ def create_path(req: CreatePathRequest):
 
             "road_names": existing[7],
 
-            "road_name_boundaries": existing[8]
+            "road_name_boundaries": existing[8],
+
+            "zones": zones
         }
 
     origin_coords = geocode(req.origin)
@@ -786,7 +932,9 @@ def create_path(req: CreatePathRequest):
 
         "road_names": road_names,
 
-        "road_name_boundaries": road_name_boundaries
+        "road_name_boundaries": road_name_boundaries,
+
+        "zones": []
     }
 
 
@@ -807,6 +955,8 @@ def list_paths():
     )
 
     rows = cur.fetchall()
+
+    zones_by_path = fetch_zones_for_paths(cur, [row[0] for row in rows])
 
     cur.close()
     conn.close()
@@ -830,7 +980,9 @@ def list_paths():
 
             "road_names": row[7],
 
-            "road_name_boundaries": row[8]
+            "road_name_boundaries": row[8],
+
+            "zones": zones_by_path.get(row[0], [])
         }
         for row in rows
     ]
@@ -857,6 +1009,119 @@ def delete_path(id: int):
 
     if deleted is None:
         raise HTTPException(status_code=404, detail="Path not found")
+
+    return {"deleted": id}
+
+
+
+@app.post("/api/paths/{path_id}/zones")
+def create_zone(path_id: int, req: RoadZoneRequest):
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("SELECT duration_seconds FROM paths WHERE id=%s", (path_id,))
+
+    path_row = cur.fetchone()
+
+    if path_row is None:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=404, detail="Path not found")
+
+    duration_seconds = path_row[0]
+
+    #
+    # Clamp to the path's actual domain and normalize ordering, rather than
+    # trusting whatever the client computed from clicking points on the map.
+    #
+    start_seconds = max(0.0, min(req.start_seconds, req.end_seconds))
+    end_seconds = min(duration_seconds, max(req.start_seconds, req.end_seconds))
+
+    if end_seconds <= start_seconds:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=400, detail="Zone must cover a non-empty stretch of the route")
+
+    if req.speed_limit_mph <= 0:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=400, detail="speed_limit_mph must be positive")
+
+    if (req.rush_hour_start is None) != (req.rush_hour_end is None):
+        cur.close()
+        conn.close()
+        raise HTTPException(
+            status_code=400,
+            detail="rush_hour_start and rush_hour_end must both be set, or both omitted"
+        )
+
+    cur.execute(
+        """
+        INSERT INTO road_zones
+        (path_id, start_seconds, end_seconds, speed_limit_mph, rush_hour_start, rush_hour_end, rush_hour_factor)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """,
+        (
+            path_id,
+            start_seconds,
+            end_seconds,
+            req.speed_limit_mph,
+            req.rush_hour_start,
+            req.rush_hour_end,
+            req.rush_hour_factor
+        )
+    )
+
+    zone_id = cur.fetchone()[0]
+
+    conn.commit()
+
+    cur.close()
+    conn.close()
+
+    return {
+
+        "id": zone_id,
+
+        "path_id": path_id,
+
+        "start_seconds": start_seconds,
+
+        "end_seconds": end_seconds,
+
+        "speed_limit_mph": req.speed_limit_mph,
+
+        "rush_hour_start": req.rush_hour_start,
+
+        "rush_hour_end": req.rush_hour_end,
+
+        "rush_hour_factor": req.rush_hour_factor
+    }
+
+
+
+@app.delete("/api/zones/{id}")
+def delete_zone(id: int):
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute(
+        "DELETE FROM road_zones WHERE id=%s RETURNING id",
+        (id,)
+    )
+
+    deleted = cur.fetchone()
+
+    conn.commit()
+
+    cur.close()
+    conn.close()
+
+    if deleted is None:
+        raise HTTPException(status_code=404, detail="Zone not found")
 
     return {"deleted": id}
 
@@ -978,6 +1243,8 @@ def active_trips():
 
     rows = cur.fetchall()
 
+    zones_by_path = fetch_zones_for_paths(cur, [row[3] for row in rows])
+
     cur.close()
     conn.close()
 
@@ -1007,6 +1274,7 @@ def active_trips():
             max_speeds_mph,
             road_names,
             road_name_boundaries,
+            zones_by_path.get(path_id, []),
             traffic_base_datetime,
             traffic_bias,
             float(elapsed_real_seconds)

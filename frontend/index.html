@@ -147,6 +147,26 @@
             border-top: 1px solid #ccc;
             font-size: 14px;
         }
+
+        #zone-editor {
+            margin-top: 16px;
+            padding-top: 10px;
+            border-top: 1px solid #ccc;
+            font-size: 13px;
+        }
+
+        #zone-editor label {
+            display: block;
+            font-size: 11px;
+            color: #555;
+            margin-top: 6px;
+        }
+
+        #zone-draw-hint {
+            font-size: 12px;
+            color: #555;
+            margin: 6px 0;
+        }
     </style>
 </head>
 
@@ -194,6 +214,39 @@
         </div>
 
         <div id="path-list"></div>
+
+        <div id="zone-editor" style="display:none">
+
+            <b>Zones on <span id="zone-editor-path-label"></span></b>
+
+            <div id="zone-list"></div>
+
+            <button id="draw-zone-button" onclick="startZoneDraw()">Draw a zone</button>
+
+            <div id="zone-draw-hint" style="display:none">
+                Click the start point, then the end point, of the road chunk on the map.
+            </div>
+
+            <div id="zone-form" class="panel-form" style="display:none">
+
+                <label>Speed limit (mph)</label>
+                <input id="zone-speed" type="number" min="1" value="35">
+
+                <label>Rush hour start (0-24, blank = no rush hour)</label>
+                <input id="zone-rush-start" type="number" min="0" max="24" step="0.5" placeholder="e.g. 7">
+
+                <label>Rush hour end (0-24)</label>
+                <input id="zone-rush-end" type="number" min="0" max="24" step="0.5" placeholder="e.g. 9">
+
+                <label>Rush hour severity (0-1, lower = worse)</label>
+                <input id="zone-rush-factor" type="number" min="0" max="1" step="0.05" value="0.6">
+
+                <button onclick="saveZoneDraft()">Save Zone</button>
+                <button onclick="cancelZoneDraft()">Cancel</button>
+
+            </div>
+
+        </div>
 
     </div>
 

@@ -359,6 +359,16 @@ async function removePath(pathId) {
 
     await fetch(API + "/api/paths/" + pathId, { method: "DELETE" });
 
+    if (zoneDraftPath && zoneDraftPath.id === pathId) {
+
+        zoneDraftPath = null;
+
+        cancelZoneDraft();
+        clearZoneOverlays();
+
+        document.getElementById("zone-editor").style.display = "none";
+    }
+
     loadPaths();
 }
 
@@ -380,6 +390,293 @@ function previewPath(path) {
     }).addTo(map);
 
     map.fitBounds(pathPreviewLine.getBounds());
+
+    renderZoneEditor(path);
+}
+
+
+//
+// Zones let a user override the traffic model (speed limit, rush hour
+// window/severity) for a specific chunk of one path's route, instead of
+// relying purely on the synthetic tier-based model. A chunk is picked by
+// clicking two points on the previewed route; each click snaps to the
+// nearest route vertex, whose cumulative-duration value (same domain the
+// backend already uses for position/road-name lookups) becomes the zone's
+// start/end.
+//
+let zoneDraftPath = null;          // path currently shown in the zone editor
+let zoneDraftPoints = [];          // cumulative-seconds values of picked points (0-2 of them)
+let zoneDraftMarkers = [];         // Leaflet markers for the picked points
+let zoneDrawArmed = false;         // true while waiting for the next map click to pick a point
+let zoneOverlayLines = [];         // polylines highlighting this path's existing zones
+
+
+function secondsToRouteIndex(durations, seconds) {
+
+    let lo = 0, hi = durations.length - 1;
+
+    while (lo < hi) {
+
+        const mid = (lo + hi) >> 1;
+
+        if (durations[mid] < seconds) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+
+    return lo;
+}
+
+
+function nearestRouteIndex(route, latlng) {
+
+    let bestIndex = 0;
+    let bestDist = Infinity;
+
+    for (let i = 0; i < route.length; i++) {
+
+        const dLat = route[i][0] - latlng.lat;
+        const dLon = route[i][1] - latlng.lng;
+        const dist = dLat * dLat + dLon * dLon;
+
+        if (dist < bestDist) {
+            bestDist = dist;
+            bestIndex = i;
+        }
+    }
+
+    return bestIndex;
+}
+
+
+function formatHour(hour) {
+
+    const h = Math.floor(hour);
+    const m = Math.round((hour - h) * 60);
+
+    return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
+
+
+function zoneSummary(zone) {
+
+    const rush = zone.rush_hour_start !== null && zone.rush_hour_end !== null
+        ? ` (rush ${formatHour(zone.rush_hour_start)}-${formatHour(zone.rush_hour_end)}, severity ${zone.rush_hour_factor})`
+        : "";
+
+    return `${Math.round(zone.speed_limit_mph)} mph${rush}`;
+}
+
+
+function clearZoneOverlays() {
+
+    for (const line of zoneOverlayLines) {
+        map.removeLayer(line);
+    }
+
+    zoneOverlayLines = [];
+}
+
+
+function renderZoneOverlays(path) {
+
+    clearZoneOverlays();
+
+    for (const zone of path.zones || []) {
+
+        const startIndex = secondsToRouteIndex(path.durations, zone.start_seconds);
+        const endIndex = Math.max(startIndex, secondsToRouteIndex(path.durations, zone.end_seconds));
+
+        const line = L.polyline(path.route.slice(startIndex, endIndex + 1), {
+
+            color: "orange",
+
+            weight: 7,
+
+            opacity: 0.85
+
+        }).addTo(map);
+
+        zoneOverlayLines.push(line);
+    }
+}
+
+
+function renderZoneList(path) {
+
+    const list = document.getElementById("zone-list");
+
+    list.innerHTML = "";
+
+    for (const zone of path.zones || []) {
+
+        const item = document.createElement("div");
+
+        item.className = "vehicle-item list-row";
+
+        item.innerHTML =
+            `<span>${zoneSummary(zone)}</span>` +
+            `<button class="remove-zone-button" data-id="${zone.id}">Delete</button>`;
+
+        list.appendChild(item);
+    }
+
+    for (const button of list.querySelectorAll(".remove-zone-button")) {
+        button.onclick = () => removeZone(Number(button.dataset.id));
+    }
+}
+
+
+function renderZoneEditor(path) {
+
+    zoneDraftPath = path;
+
+    cancelZoneDraft();
+
+    document.getElementById("zone-editor").style.display = "";
+    document.getElementById("zone-editor-path-label").textContent = pathLabel(path);
+
+    renderZoneOverlays(path);
+    renderZoneList(path);
+}
+
+
+function clearZoneDraftMarkers() {
+
+    for (const marker of zoneDraftMarkers) {
+        map.removeLayer(marker);
+    }
+
+    zoneDraftMarkers = [];
+}
+
+
+function startZoneDraw() {
+
+    zoneDrawArmed = true;
+    zoneDraftPoints = [];
+
+    clearZoneDraftMarkers();
+
+    document.getElementById("zone-draw-hint").style.display = "";
+    document.getElementById("zone-form").style.display = "none";
+}
+
+
+function cancelZoneDraft() {
+
+    zoneDrawArmed = false;
+    zoneDraftPoints = [];
+
+    clearZoneDraftMarkers();
+
+    document.getElementById("zone-draw-hint").style.display = "none";
+    document.getElementById("zone-form").style.display = "none";
+}
+
+
+map.on("click", (event) => {
+
+    if (!zoneDrawArmed || !zoneDraftPath) {
+        return;
+    }
+
+    const index = nearestRouteIndex(zoneDraftPath.route, event.latlng);
+
+    const marker = L.circleMarker(zoneDraftPath.route[index], {
+
+        radius: 6,
+
+        color: "orange"
+
+    }).addTo(map);
+
+    zoneDraftMarkers.push(marker);
+    zoneDraftPoints.push(zoneDraftPath.durations[index]);
+
+    if (zoneDraftPoints.length === 2) {
+
+        zoneDrawArmed = false;
+
+        document.getElementById("zone-draw-hint").style.display = "none";
+        document.getElementById("zone-form").style.display = "";
+    }
+});
+
+
+async function saveZoneDraft() {
+
+    const [a, b] = zoneDraftPoints;
+
+    const rushStartRaw = document.getElementById("zone-rush-start").value;
+    const rushEndRaw = document.getElementById("zone-rush-end").value;
+
+    const response = await fetch(API + "/api/paths/" + zoneDraftPath.id + "/zones", {
+
+        method: "POST",
+
+        headers: {
+            "Content-Type": "application/json"
+        },
+
+        body: JSON.stringify({
+
+            start_seconds: Math.min(a, b),
+
+            end_seconds: Math.max(a, b),
+
+            speed_limit_mph: Number(document.getElementById("zone-speed").value),
+
+            rush_hour_start: rushStartRaw === "" ? null : Number(rushStartRaw),
+
+            rush_hour_end: rushEndRaw === "" ? null : Number(rushEndRaw),
+
+            rush_hour_factor: Number(document.getElementById("zone-rush-factor").value)
+
+        })
+
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+        alert(data.detail || "Could not save zone");
+        return;
+    }
+
+    const pathId = zoneDraftPath.id;
+
+    cancelZoneDraft();
+
+    await loadPaths();
+
+    const refreshed = pathsById.get(pathId);
+
+    if (refreshed) {
+        renderZoneEditor(refreshed);
+    }
+}
+
+
+async function removeZone(zoneId) {
+
+    if (!confirm("Delete this zone?")) {
+        return;
+    }
+
+    const pathId = zoneDraftPath.id;
+
+    await fetch(API + "/api/zones/" + zoneId, { method: "DELETE" });
+
+    await loadPaths();
+
+    const refreshed = pathsById.get(pathId);
+
+    if (refreshed) {
+        renderZoneEditor(refreshed);
+    }
 }
 
 

@@ -114,6 +114,22 @@ case-insensitive on `origin`/`destination` — creating "minneapolis" →
 | `road_name_boundaries`  | jsonb             | cumulative real seconds at each step boundary, same domain as `durations` |
 | `created`               | timestamp         | default `NOW()` |
 
+### `road_zones`
+
+A user-defined override for one stretch of a path's route — "this chunk of
+road has a 25 mph limit with rush hour 7-9am" — instead of relying purely
+on the synthetic tier-based model for that stretch.
+
+| Column              | Type              | Notes |
+|----------------------|-------------------|-------|
+| `id`                 | serial            | primary key |
+| `path_id`            | integer           | FK `paths(id)`, `ON DELETE CASCADE` |
+| `start_seconds` / `end_seconds` | double precision | position range within the path, in the same "cumulative real seconds" domain as `paths.durations` |
+| `speed_limit_mph`    | double precision  | free-flow speed for this stretch — replaces both OSRM's reported speed and the tier default entirely |
+| `rush_hour_start` / `rush_hour_end` | double precision | hour of day (0-24, local time), both nullable together. `NULL`/`NULL` means this zone never slows down for rush hour |
+| `rush_hour_factor`   | double precision  | multiplier applied to `speed_limit_mph` during the rush window, default `0.6` |
+| `created`            | timestamp         | default `NOW()` |
+
 ### `trips`
 
 One trip = one vehicle driving one path, starting now (or at a
@@ -225,6 +241,26 @@ conditions:
 - `traffic_bias` — a direct multiplier (e.g. `0.5` for a much worse
   traffic day, `1.0` for normal).
 
+### Road zones
+
+A road zone lets a user manually override the traffic model for one
+specific stretch of a path — its own speed limit, and optionally its own
+rush-hour window and severity — rather than the road-tier-based model
+above. In `derive_position()`, if the vehicle's current route segment
+falls inside a zone (`find_zone()`, matched by `start_seconds`/
+`end_seconds` against the same cumulative-duration domain used for
+position/road-name lookups), the zone's `speed_limit_mph` replaces the
+OSRM-derived free-flow speed entirely, and `zone_is_rush_hour()` (checked
+against the zone's own `rush_hour_start`/`rush_hour_end`, not the app-wide
+7-9am/4-6pm windows) decides whether `rush_hour_factor` or a flat `1.0`
+baseline applies. The same per-`(trip_id, segment_index)` jitter and
+incident chance still layers on top, so a zone still looks like real
+traffic rather than a perfectly flat speed.
+
+Zones are created via the frontend by picking two points along a
+previewed path's route on the map (each click snaps to the nearest route
+vertex); see [Frontend](#frontend) below.
+
 ### Nearby city lookup
 
 `GET /api/vehicles/{id}/city` reverse-geocodes the vehicle's current
@@ -244,9 +280,11 @@ All endpoints are on the `backend` service, default `http://localhost:5000`.
 | `GET /api/vehicles`             | List vehicles with computed `status` (`READY`/`DRIVING`) |
 | `DELETE /api/vehicles/{id}`     | Delete a vehicle (cascades its trips) |
 | `GET /api/vehicles/{id}/city`   | Nearest place name to the vehicle's current position, if driving |
-| `POST /api/paths`               | Geocode + route an origin/destination (or return the existing match). Body: `{origin, destination}` |
-| `GET /api/paths`                | List all created paths |
-| `DELETE /api/paths/{id}`        | Delete a path (cascades its trips) |
+| `POST /api/paths`               | Geocode + route an origin/destination (or return the existing match). Body: `{origin, destination}`. Response includes `zones` |
+| `GET /api/paths`                | List all created paths, each with its `zones` |
+| `DELETE /api/paths/{id}`        | Delete a path (cascades its trips and zones) |
+| `POST /api/paths/{id}/zones`    | Add a road zone to a path. Body: `{start_seconds, end_seconds, speed_limit_mph, rush_hour_start?, rush_hour_end?, rush_hour_factor?}` |
+| `DELETE /api/zones/{id}`        | Delete a road zone |
 | `POST /api/trips`               | Start a trip. Body: `{vehicle_id, path_id, simulated_datetime?, traffic_bias?}`. 409 if the vehicle is already driving |
 | `GET /api/trips/active`         | Poll all currently-active trips, each with live position/speed/road name |
 
@@ -264,7 +302,14 @@ Three tabs in the side panel:
 - **Vehicles** — add/sell vehicles, pick a path and start a trip for a
   `READY` vehicle.
 - **Paths** — create a path from an origin/destination, preview it on the
-  map, remove existing paths.
+  map, remove existing paths. Previewing a path also opens its zone
+  editor: "Draw a zone", then click a start point and an end point along
+  the (dashed gray) route on the map to pick a chunk — each click snaps to
+  the nearest route vertex. A form then asks for the zone's speed limit,
+  optional rush-hour start/end (0-24, local time), and rush-hour severity
+  (a 0-1 multiplier applied to the speed limit during that window). Saved
+  zones are drawn as a thick orange overlay on the chunk they cover and
+  listed below the map, each with its own delete button.
 - **In Route** — list of currently-driving vehicles; selecting one follows
   it on the map and shows status, nearest city, position, current road,
   speed, and time remaining.
