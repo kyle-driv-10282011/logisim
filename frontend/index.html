@@ -23,10 +23,34 @@
             min-width: 0;
             display: flex;
             flex-direction: column;
+            position: relative;
         }
 
         #map {
             flex: 1;
+        }
+
+        #sim-clock {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            z-index: 1000;
+            background: white;
+            padding: 8px 12px;
+            border-radius: 4px;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.35);
+            font-size: 13px;
+            line-height: 1.4;
+        }
+
+        .rush-badge {
+            display: inline-block;
+            margin-left: 6px;
+            padding: 1px 6px;
+            border-radius: 10px;
+            font-size: 11px;
+            background: #e03131;
+            color: white;
         }
 
         #vehicle-panel {
@@ -196,6 +220,7 @@
 
 <div id="main">
     <div id="map"></div>
+    <div id="sim-clock"></div>
 </div>
 
 <div id="vehicle-panel">

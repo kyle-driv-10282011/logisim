@@ -368,6 +368,16 @@ Three tabs in the side panel:
   it on the map and shows status, nearest city, position, current road,
   speed, and time remaining.
 
+A clock in the top-right corner of the map (`updateSimClock()`) shows the
+current day of week and time in `SIMULATION_TIMEZONE` — the same clock
+[the traffic model](#traffic-model) judges rush hour against — with a
+"Rush Hour" badge when it's currently a weekday 7-9am or 4-6pm. It's a
+plain client-side clock (no API call), computed from `Intl.DateTimeFormat`
+with `timeZone: "America/Chicago"`, so it only ever reflects real
+wall-clock time — a trip started with a custom `simulated_datetime` still
+experiences its own overridden clock server-side, this display doesn't
+change to match it.
+
 The map polls `GET /api/trips/active` every second and updates markers/
 tooltips in place (`pollActiveTrips()`), rather than re-rendering
 everything, so the drive animates smoothly.

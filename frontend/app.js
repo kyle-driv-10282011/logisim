@@ -15,6 +15,14 @@ const INTERSTATE_MIN_MPH = 55;
 const ARTERIAL_MIN_MPH = 35;
 const TIER_DEFAULT_MPH = { interstate: 70, arterial: 50, local: 30 };
 
+//
+// Same timezone as the backend's SIMULATION_TIMEZONE (app.py) - all rush
+// hour congestion is judged against this local clock, not the browser's
+// own timezone, so the on-page clock has to match it to make sense of
+// why a trip is (or isn't) currently seeing rush-hour slowdown.
+//
+const SIMULATION_TIMEZONE = "America/Chicago";
+
 let map;
 
 const tripLayers = new Map();      // vehicle_id -> { marker, routeLine }
@@ -1201,10 +1209,65 @@ function setsEqual(a, b) {
 }
 
 
+//
+// Mirrors the backend's is_rush_hour() (app.py): weekday, and either
+// 7-9am or 4-6pm. hourCycle: "h23" avoids Intl's well-known quirk of
+// formatting midnight as hour "24" instead of "0".
+//
+function isRushHour(date) {
+
+    const parts = new Intl.DateTimeFormat("en-US", {
+
+        timeZone: SIMULATION_TIMEZONE,
+
+        weekday: "short",
+
+        hour: "numeric",
+
+        hourCycle: "h23"
+
+    }).formatToParts(date);
+
+    const weekday = parts.find((part) => part.type === "weekday").value;
+    const hour = Number(parts.find((part) => part.type === "hour").value);
+
+    const isWeekday = weekday !== "Sat" && weekday !== "Sun";
+
+    return isWeekday && ((hour >= 7 && hour < 9) || (hour >= 16 && hour < 18));
+}
+
+
+function updateSimClock() {
+
+    const now = new Date();
+
+    const formatted = new Intl.DateTimeFormat("en-US", {
+
+        timeZone: SIMULATION_TIMEZONE,
+
+        weekday: "long",
+
+        hour: "numeric",
+
+        minute: "2-digit",
+
+        hour12: true
+
+    }).format(now);
+
+    document.getElementById("sim-clock").innerHTML =
+        formatted + (isRushHour(now) ? ' <span class="rush-badge">Rush Hour</span>' : "");
+}
+
+
 loadVehicles();
 loadPaths();
 
+updateSimClock();
+
 setInterval(pollActiveTrips, 1000);
+
+setInterval(updateSimClock, 1000);
 
 setInterval(() => {
 
