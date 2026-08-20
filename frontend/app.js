@@ -4,8 +4,19 @@
 //
 const API = `http://${window.location.hostname}:5000`;
 
+//
+// Mirrors the backend's own tier classification (app.py) so the path
+// preview can color-code each section by its effective speed limit
+// without a round trip - same thresholds/defaults, kept in sync by hand.
+//
+const MIN_REALISTIC_SPEED_MPH = 5;
+const MAX_REALISTIC_SPEED_MPH = 85;
+const INTERSTATE_MIN_MPH = 55;
+const ARTERIAL_MIN_MPH = 35;
+const TIER_DEFAULT_MPH = { interstate: 70, arterial: 50, local: 30 };
+
 let map;
-let pathPreviewLine;
+let pathPreviewLines = [];
 
 const tripLayers = new Map();      // vehicle_id -> { marker, routeLine }
 let pathsById = new Map();         // path_id -> path (from GET /api/paths)
@@ -374,23 +385,121 @@ async function removePath(pathId) {
 }
 
 
-function previewPath(path) {
+function roadTier(freeFlowMph) {
 
-    if (pathPreviewLine) {
-        map.removeLayer(pathPreviewLine);
+    if (freeFlowMph >= INTERSTATE_MIN_MPH) {
+        return "interstate";
     }
 
-    pathPreviewLine = L.polyline(path.route, {
+    if (freeFlowMph >= ARTERIAL_MIN_MPH) {
+        return "arterial";
+    }
 
-        color: "gray",
+    return "local";
+}
 
-        dashArray: "6 6",
 
-        weight: 3
+function zoneAtMiles(zones, positionMiles) {
 
-    }).addTo(map);
+    for (const zone of zones || []) {
+        if (zone.start_miles <= positionMiles && positionMiles < zone.end_miles) {
+            return zone;
+        }
+    }
 
-    map.fitBounds(pathPreviewLine.getBounds());
+    return null;
+}
+
+
+function segmentSpeedLimitMph(path, segmentIndex) {
+
+    //
+    // Same override rule as the backend's segment_speed_mph(): a zone
+    // covering this segment replaces the road entirely, otherwise fall
+    // back to OSRM's reported speed floored by the tier default.
+    //
+    const zone = zoneAtMiles(path.zones, path.distances_miles[segmentIndex]);
+
+    if (zone) {
+        return zone.speed_limit_mph;
+    }
+
+    const reported = Math.max(
+        MIN_REALISTIC_SPEED_MPH,
+        Math.min(MAX_REALISTIC_SPEED_MPH, path.max_speeds_mph[segmentIndex])
+    );
+
+    return Math.max(reported, TIER_DEFAULT_MPH[roadTier(reported)]);
+}
+
+
+function speedOverlayColor(mph) {
+
+    if (mph >= 65) {
+        return "#2f9e44";
+    }
+
+    if (mph >= 45) {
+        return "#f08c00";
+    }
+
+    return "#e03131";
+}
+
+
+function renderSpeedOverlay(path) {
+
+    const lines = [];
+    const segmentCount = path.max_speeds_mph.length;
+
+    if (segmentCount === 0) {
+        return lines;
+    }
+
+    //
+    // Merge consecutive same-color segments into a single polyline instead
+    // of one per segment - a multi-hour route can have thousands of points,
+    // and most of them share a tier with their neighbors.
+    //
+    let runStart = 0;
+    let runColor = speedOverlayColor(segmentSpeedLimitMph(path, 0));
+
+    for (let i = 1; i <= segmentCount; i++) {
+
+        const color = i < segmentCount ? speedOverlayColor(segmentSpeedLimitMph(path, i)) : null;
+
+        if (color !== runColor) {
+
+            lines.push(L.polyline(path.route.slice(runStart, i + 1), {
+
+                color: runColor,
+
+                weight: 4,
+
+                dashArray: "6 4",
+
+                opacity: 0.85
+
+            }).addTo(map));
+
+            runStart = i;
+            runColor = color;
+        }
+    }
+
+    return lines;
+}
+
+
+function previewPath(path) {
+
+    for (const line of pathPreviewLines) {
+        map.removeLayer(line);
+    }
+
+    pathPreviewLines = renderSpeedOverlay(path);
+
+    map.fitBounds(L.latLngBounds(path.route));
 
     selectedZoneId = null;
 
