@@ -297,9 +297,9 @@ poll — otherwise adding or deleting a zone mid-trip would silently
 invalidate a schedule already computed and shown to the user as an ETA.
 Zones added after a trip starts only affect *future* trips over that path.
 
-Zones are created via the frontend by picking two points along a
-previewed path's route on the map (each click snaps to the nearest route
-vertex); see [Frontend](#frontend) below.
+Zones are created and edited via the frontend by clicking directly on the
+route (or drawing a custom stretch by picking two points); see
+[Frontend](#frontend) below.
 
 ### Nearby city lookup
 
@@ -324,6 +324,7 @@ All endpoints are on the `backend` service, default `http://localhost:5000`.
 | `GET /api/paths`                | List all created paths, each with its `zones` |
 | `DELETE /api/paths/{id}`        | Delete a path (cascades its trips and zones) |
 | `POST /api/paths/{id}/zones`    | Add a road zone to a path. Body: `{start_miles, end_miles, speed_limit_mph, rush_hour_start?, rush_hour_end?, rush_hour_factor?}` |
+| `PUT /api/zones/{id}`           | Update an existing road zone. Same body as create |
 | `DELETE /api/zones/{id}`        | Delete a road zone |
 | `POST /api/trips`               | Start a trip. Body: `{vehicle_id, path_id, simulated_datetime?, traffic_bias?}`. 409 if the vehicle is already driving |
 | `GET /api/trips/active`         | Poll all currently-active trips, each with live position/speed/road name |
@@ -342,14 +343,22 @@ Three tabs in the side panel:
 - **Vehicles** — add/sell vehicles, pick a path and start a trip for a
   `READY` vehicle.
 - **Paths** — create a path from an origin/destination, preview it on the
-  map, remove existing paths. Previewing a path also opens its zone
-  editor: "Draw a zone", then click a start point and an end point along
-  the (dashed gray) route on the map to pick a chunk — each click snaps to
-  the nearest route vertex. A form then asks for the zone's speed limit,
-  optional rush-hour start/end (0-24, local time), and rush-hour severity
-  (a 0-1 multiplier applied to the speed limit during that window). Saved
-  zones are drawn as a thick orange overlay on the chunk they cover and
-  listed below the map, each with its own delete button.
+  map, remove existing paths. Previewing a path draws the *entire* route
+  color-coded by effective speed limit (red &lt;45 mph, orange 45-64,
+  green 65+ — `buildRouteSections()` in `app.js`, mirroring the backend's
+  own tier logic), whether or not any of it has a zone override; existing
+  zones render as a heavier solid line over their stretch, everything else
+  as a thinner dashed line. **Clicking any point on that route** selects
+  the whole section it belongs to (highlighted in red) and opens an edit
+  form in the sidebar pre-filled with that section's current speed limit
+  (and rush-hour fields, if it's an existing zone) — editing and saving
+  either updates that zone in place (`PUT /api/zones/{id}`) or creates a
+  new one covering exactly that stretch (`POST /api/paths/{id}/zones`),
+  depending on whether the clicked section already had one. "Draw a custom
+  zone" is still available for picking an arbitrary sub-range instead of a
+  whole displayed section (two clicks on the map, snapping to the nearest
+  route vertex). Existing zones are also listed below the map, each
+  clickable to select/edit and with its own delete button.
 - **In Route** — list of currently-driving vehicles; selecting one follows
   it on the map and shows status, nearest city, position, current road,
   speed, and time remaining.

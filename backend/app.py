@@ -1106,6 +1106,101 @@ def create_zone(path_id: int, req: RoadZoneRequest):
 
 
 
+@app.put("/api/zones/{id}")
+def update_zone(id: int, req: RoadZoneRequest):
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT z.path_id, p.distances_miles
+        FROM road_zones z
+        JOIN paths p ON p.id = z.path_id
+        WHERE z.id = %s
+        """,
+        (id,)
+    )
+
+    row = cur.fetchone()
+
+    if row is None:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=404, detail="Zone not found")
+
+    path_id, distances_miles = row
+    total_miles = distances_miles[-1]
+
+    #
+    # Clamp to the path's actual domain and normalize ordering, rather than
+    # trusting whatever the client computed from clicking points on the map.
+    #
+    start_miles = max(0.0, min(req.start_miles, req.end_miles))
+    end_miles = min(total_miles, max(req.start_miles, req.end_miles))
+
+    if end_miles <= start_miles:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=400, detail="Zone must cover a non-empty stretch of the route")
+
+    if req.speed_limit_mph <= 0:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=400, detail="speed_limit_mph must be positive")
+
+    if (req.rush_hour_start is None) != (req.rush_hour_end is None):
+        cur.close()
+        conn.close()
+        raise HTTPException(
+            status_code=400,
+            detail="rush_hour_start and rush_hour_end must both be set, or both omitted"
+        )
+
+    cur.execute(
+        """
+        UPDATE road_zones
+        SET start_miles = %s, end_miles = %s, speed_limit_mph = %s,
+            rush_hour_start = %s, rush_hour_end = %s, rush_hour_factor = %s
+        WHERE id = %s
+        """,
+        (
+            start_miles,
+            end_miles,
+            req.speed_limit_mph,
+            req.rush_hour_start,
+            req.rush_hour_end,
+            req.rush_hour_factor,
+            id
+        )
+    )
+
+    conn.commit()
+
+    cur.close()
+    conn.close()
+
+    return {
+
+        "id": id,
+
+        "path_id": path_id,
+
+        "start_miles": start_miles,
+
+        "end_miles": end_miles,
+
+        "speed_limit_mph": req.speed_limit_mph,
+
+        "rush_hour_start": req.rush_hour_start,
+
+        "rush_hour_end": req.rush_hour_end,
+
+        "rush_hour_factor": req.rush_hour_factor
+    }
+
+
+
 @app.delete("/api/zones/{id}")
 def delete_zone(id: int):
 

@@ -177,6 +177,11 @@
             vertical-align: middle;
         }
 
+        #zone-range-label {
+            font-weight: bold;
+            font-size: 12px;
+        }
+
         #zone-draw-hint {
             font-size: 12px;
             color: #555;
@@ -237,19 +242,22 @@
                 <span class="legend-swatch" style="background:#e03131"></span>&lt;45
                 <span class="legend-swatch" style="background:#f08c00"></span>45-64
                 <span class="legend-swatch" style="background:#2f9e44"></span>65+
+                <br>Click any section of the route to edit it, or draw a custom one below.
             </div>
 
             <b>Zones on <span id="zone-editor-path-label"></span></b>
 
             <div id="zone-list"></div>
 
-            <button id="draw-zone-button" onclick="startZoneDraw()">Draw a zone</button>
+            <button id="draw-zone-button" onclick="startZoneDraw()">Draw a custom zone</button>
 
             <div id="zone-draw-hint" style="display:none">
                 Click the start point, then the end point, of the road chunk on the map.
             </div>
 
             <div id="zone-form" class="panel-form" style="display:none">
+
+                <div id="zone-range-label"></div>
 
                 <label>Speed limit (mph)</label>
                 <input id="zone-speed" type="number" min="1" value="35">
@@ -263,8 +271,9 @@
                 <label>Rush hour severity (0-1, lower = worse)</label>
                 <input id="zone-rush-factor" type="number" min="0" max="1" step="0.05" value="0.6">
 
-                <button onclick="saveZoneDraft()">Save Zone</button>
-                <button onclick="cancelZoneDraft()">Cancel</button>
+                <button onclick="saveZone()">Save</button>
+                <button onclick="cancelZoneForm()">Cancel</button>
+                <button id="zone-delete-button" onclick="deleteSelectedZone()" style="display:none">Delete Zone</button>
 
             </div>
 

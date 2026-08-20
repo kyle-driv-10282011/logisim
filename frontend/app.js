@@ -16,7 +16,6 @@ const ARTERIAL_MIN_MPH = 35;
 const TIER_DEFAULT_MPH = { interstate: 70, arterial: 50, local: 30 };
 
 let map;
-let pathPreviewLines = [];
 
 const tripLayers = new Map();      // vehicle_id -> { marker, routeLine }
 let pathsById = new Map();         // path_id -> path (from GET /api/paths)
@@ -373,11 +372,12 @@ async function removePath(pathId) {
     if (zoneDraftPath && zoneDraftPath.id === pathId) {
 
         zoneDraftPath = null;
-        selectedZoneId = null;
+        selectedSection = null;
 
-        cancelZoneDraft();
-        clearZoneOverlays();
+        resetZoneDraw();
+        clearRouteSections();
 
+        document.getElementById("zone-form").style.display = "none";
         document.getElementById("zone-editor").style.display = "none";
     }
 
@@ -447,100 +447,72 @@ function speedOverlayColor(mph) {
 }
 
 
-function renderSpeedOverlay(path) {
+//
+// The whole route is split into clickable "sections" - each one either an
+// existing road_zone (its exact start/end) or a run of consecutive segments
+// sharing the same non-zoned speed color. Every section shows its effective
+// speed limit (zone override or tier default), so the whole road is visible
+// and editable, not just stretches that already have a zone.
+//
+function buildRouteSections(path) {
 
-    const lines = [];
+    const sections = [];
     const segmentCount = path.max_speeds_mph.length;
 
     if (segmentCount === 0) {
-        return lines;
+        return sections;
     }
 
-    //
-    // Merge consecutive same-color segments into a single polyline instead
-    // of one per segment - a multi-hour route can have thousands of points,
-    // and most of them share a tier with their neighbors.
-    //
+    const sectionAt = (i) => {
+
+        const zone = zoneAtMiles(path.zones, path.distances_miles[i]);
+
+        return {
+            zone,
+            mph: zone ? zone.speed_limit_mph : segmentSpeedLimitMph(path, i),
+            key: zone ? `zone:${zone.id}` : `tier:${speedOverlayColor(segmentSpeedLimitMph(path, i))}`
+        };
+    };
+
     let runStart = 0;
-    let runColor = speedOverlayColor(segmentSpeedLimitMph(path, 0));
+    let run = sectionAt(0);
 
     for (let i = 1; i <= segmentCount; i++) {
 
-        const color = i < segmentCount ? speedOverlayColor(segmentSpeedLimitMph(path, i)) : null;
+        const current = i < segmentCount ? sectionAt(i) : null;
 
-        if (color !== runColor) {
+        if (!current || current.key !== run.key) {
 
-            lines.push(L.polyline(path.route.slice(runStart, i + 1), {
+            sections.push({
 
-                color: runColor,
+                startIndex: runStart,
 
-                weight: 4,
+                endIndex: i,
 
-                dashArray: "6 4",
+                startMiles: path.distances_miles[runStart],
 
-                opacity: 0.85
+                endMiles: path.distances_miles[i],
 
-            }).addTo(map));
+                speedLimitMph: run.mph,
+
+                zone: run.zone
+            });
 
             runStart = i;
-            runColor = color;
+            run = current;
         }
     }
 
-    return lines;
+    return sections;
 }
 
 
-function previewPath(path) {
-
-    for (const line of pathPreviewLines) {
-        map.removeLayer(line);
-    }
-
-    pathPreviewLines = renderSpeedOverlay(path);
-
-    map.fitBounds(L.latLngBounds(path.route));
-
-    selectedZoneId = null;
-
-    renderZoneEditor(path);
-}
-
-
-//
-// Zones let a user override the traffic model (speed limit, rush hour
-// window/severity) for a specific chunk of one path's route, instead of
-// relying purely on the synthetic tier-based model. A chunk is picked by
-// clicking two points on the previewed route; each click snaps to the
-// nearest route vertex, whose cumulative-distance value (miles from the
-// origin - a fixed geometric property of the route, unlike time, which
-// now depends on the traffic model itself) becomes the zone's start/end.
-//
-let zoneDraftPath = null;              // path currently shown in the zone editor
-let zoneDraftPoints = [];              // cumulative-miles values of picked points (0-2 of them)
-let zoneDraftMarkers = [];             // Leaflet markers for the picked points
-let zoneDrawArmed = false;             // true while waiting for the next map click to pick a point
-let zoneOverlayLinesById = new Map();  // zone id -> polyline for that zone's chunk of the route
-let selectedZoneId = null;             // zone id highlighted after being clicked (list or map)
-
-
-function milesToRouteIndex(distancesMiles, miles) {
-
-    let lo = 0, hi = distancesMiles.length - 1;
-
-    while (lo < hi) {
-
-        const mid = (lo + hi) >> 1;
-
-        if (distancesMiles[mid] < miles) {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
-    }
-
-    return lo;
-}
+let zoneDraftPath = null;    // path currently shown in the zone editor
+let zoneDraftPoints = [];    // cumulative-miles values of picked points (0-2 of them), for "Draw a zone"
+let zoneDraftMarkers = [];   // Leaflet markers for the picked points
+let zoneDrawArmed = false;   // true while waiting for the next map click to pick a point
+let routeSectionLines = [];  // every drawn Leaflet polyline for the current path's sections
+let selectedSection = null;  // { zoneId: number|null, startMiles, endMiles } loaded into the edit form
 
 
 function nearestRouteIndex(route, latlng) {
@@ -584,56 +556,146 @@ function zoneSummary(zone) {
 }
 
 
-function clearZoneOverlays() {
+function clearRouteSections() {
 
-    for (const line of zoneOverlayLinesById.values()) {
+    for (const line of routeSectionLines) {
         map.removeLayer(line);
     }
 
-    zoneOverlayLinesById = new Map();
+    routeSectionLines = [];
 }
 
 
-function zoneOverlayStyle(zone) {
+function sectionIsSelected(section) {
 
-    return zone.id === selectedZoneId
-        ? { color: "red", weight: 9, opacity: 0.95 }
-        : { color: "orange", weight: 7, opacity: 0.85 };
+    if (!selectedSection) {
+        return false;
+    }
+
+    if (selectedSection.zoneId !== null) {
+        return section.zone !== null && section.zone.id === selectedSection.zoneId;
+    }
+
+    return section.zone === null
+        && Math.abs(section.startMiles - selectedSection.startMiles) < 1e-6
+        && Math.abs(section.endMiles - selectedSection.endMiles) < 1e-6;
 }
 
 
-function renderZoneOverlays(path) {
+function renderRouteSections(path) {
 
-    clearZoneOverlays();
+    clearRouteSections();
 
-    for (const zone of path.zones || []) {
+    let selectedLine = null;
 
-        const startIndex = milesToRouteIndex(path.distances_miles, zone.start_miles);
-        const endIndex = Math.max(startIndex, milesToRouteIndex(path.distances_miles, zone.end_miles));
+    for (const section of buildRouteSections(path)) {
 
-        const line = L.polyline(path.route.slice(startIndex, endIndex + 1), zoneOverlayStyle(zone)).addTo(map);
+        const selected = sectionIsSelected(section);
 
-        line.on("click", () => selectZone(zone.id));
+        const line = L.polyline(path.route.slice(section.startIndex, section.endIndex + 1), {
 
-        zoneOverlayLinesById.set(zone.id, line);
+            color: selected ? "#c92a2a" : speedOverlayColor(section.speedLimitMph),
+
+            weight: selected ? 8 : (section.zone ? 6 : 4),
+
+            dashArray: section.zone ? null : "6 4",
+
+            opacity: selected ? 0.95 : 0.85
+
+        }).addTo(map);
+
+        line.on("click", () => selectSection(path, section));
+
+        routeSectionLines.push(line);
+
+        if (selected) {
+            selectedLine = line;
+        }
     }
 
     //
-    // Drawn last (after every zone's own layer already exists) so the
-    // highlighted one renders on top of any overlapping neighbors.
+    // Drawn last so the highlighted section renders on top of any
+    // overlapping neighbor.
     //
-    if (zoneOverlayLinesById.has(selectedZoneId)) {
-        zoneOverlayLinesById.get(selectedZoneId).bringToFront();
+    if (selectedLine) {
+        selectedLine.bringToFront();
     }
 }
 
 
-function selectZone(zoneId) {
+function fillZoneForm(values) {
 
-    selectedZoneId = selectedZoneId === zoneId ? null : zoneId;
+    document.getElementById("zone-range-label").textContent =
+        `mile ${values.startMiles.toFixed(1)} - ${values.endMiles.toFixed(1)}`;
 
-    renderZoneOverlays(zoneDraftPath);
-    renderZoneList(zoneDraftPath);
+    document.getElementById("zone-speed").value = Math.round(values.speedLimitMph);
+    document.getElementById("zone-rush-start").value = values.rushHourStart ?? "";
+    document.getElementById("zone-rush-end").value = values.rushHourEnd ?? "";
+    document.getElementById("zone-rush-factor").value = values.rushHourFactor;
+
+    document.getElementById("zone-delete-button").style.display =
+        selectedSection.zoneId !== null ? "" : "none";
+
+    document.getElementById("zone-draw-hint").style.display = "none";
+    document.getElementById("zone-form").style.display = "";
+}
+
+
+function selectZoneObject(path, zone) {
+
+    selectedSection = { zoneId: zone.id, startMiles: zone.start_miles, endMiles: zone.end_miles };
+
+    fillZoneForm({
+
+        startMiles: zone.start_miles,
+
+        endMiles: zone.end_miles,
+
+        speedLimitMph: zone.speed_limit_mph,
+
+        rushHourStart: zone.rush_hour_start,
+
+        rushHourEnd: zone.rush_hour_end,
+
+        rushHourFactor: zone.rush_hour_factor
+    });
+
+    renderRouteSections(path);
+    renderZoneList(path);
+}
+
+
+function selectFreshSection(path, startMiles, endMiles, defaultSpeedMph) {
+
+    selectedSection = { zoneId: null, startMiles, endMiles };
+
+    fillZoneForm({
+
+        startMiles,
+
+        endMiles,
+
+        speedLimitMph: defaultSpeedMph,
+
+        rushHourStart: null,
+
+        rushHourEnd: null,
+
+        rushHourFactor: 0.6
+    });
+
+    renderRouteSections(path);
+    renderZoneList(path);
+}
+
+
+function selectSection(path, section) {
+
+    if (section.zone) {
+        selectZoneObject(path, section.zone);
+    } else {
+        selectFreshSection(path, section.startMiles, section.endMiles, section.speedLimitMph);
+    }
 }
 
 
@@ -647,9 +709,11 @@ function renderZoneList(path) {
 
         const item = document.createElement("div");
 
-        item.className = "vehicle-item list-row" + (zone.id === selectedZoneId ? " selected" : "");
+        const selected = selectedSection && selectedSection.zoneId === zone.id;
+
+        item.className = "vehicle-item list-row" + (selected ? " selected" : "");
         item.style.cursor = "pointer";
-        item.onclick = () => selectZone(zone.id);
+        item.onclick = () => selectZoneObject(path, zone);
 
         item.innerHTML =
             `<span>${zoneSummary(zone)}</span>` +
@@ -668,51 +732,62 @@ function renderZoneList(path) {
 }
 
 
-function renderZoneEditor(path) {
+function resetZoneDraw() {
 
-    zoneDraftPath = path;
-
-    cancelZoneDraft();
-
-    document.getElementById("zone-editor").style.display = "";
-    document.getElementById("zone-editor-path-label").textContent = pathLabel(path);
-
-    renderZoneOverlays(path);
-    renderZoneList(path);
-}
-
-
-function clearZoneDraftMarkers() {
+    zoneDrawArmed = false;
+    zoneDraftPoints = [];
 
     for (const marker of zoneDraftMarkers) {
         map.removeLayer(marker);
     }
 
     zoneDraftMarkers = [];
+
+    document.getElementById("zone-draw-hint").style.display = "none";
+}
+
+
+function renderZoneEditor(path) {
+
+    zoneDraftPath = path;
+    selectedSection = null;
+
+    resetZoneDraw();
+
+    document.getElementById("zone-form").style.display = "none";
+    document.getElementById("zone-editor").style.display = "";
+    document.getElementById("zone-editor-path-label").textContent = pathLabel(path);
+
+    renderRouteSections(path);
+    renderZoneList(path);
 }
 
 
 function startZoneDraw() {
 
-    zoneDrawArmed = true;
-    zoneDraftPoints = [];
+    selectedSection = null;
 
-    clearZoneDraftMarkers();
+    resetZoneDraw();
+
+    zoneDrawArmed = true;
 
     document.getElementById("zone-draw-hint").style.display = "";
     document.getElementById("zone-form").style.display = "none";
+
+    renderRouteSections(zoneDraftPath);
 }
 
 
-function cancelZoneDraft() {
+function cancelZoneForm() {
 
-    zoneDrawArmed = false;
-    zoneDraftPoints = [];
+    selectedSection = null;
 
-    clearZoneDraftMarkers();
+    resetZoneDraw();
 
-    document.getElementById("zone-draw-hint").style.display = "none";
     document.getElementById("zone-form").style.display = "none";
+
+    renderRouteSections(zoneDraftPath);
+    renderZoneList(zoneDraftPath);
 }
 
 
@@ -737,24 +812,37 @@ map.on("click", (event) => {
 
     if (zoneDraftPoints.length === 2) {
 
+        const [a, b] = zoneDraftPoints;
+
         zoneDrawArmed = false;
 
         document.getElementById("zone-draw-hint").style.display = "none";
-        document.getElementById("zone-form").style.display = "";
+
+        for (const marker of zoneDraftMarkers) {
+            map.removeLayer(marker);
+        }
+
+        zoneDraftMarkers = [];
+
+        selectFreshSection(zoneDraftPath, Math.min(a, b), Math.max(a, b), 35);
     }
 });
 
 
-async function saveZoneDraft() {
-
-    const [a, b] = zoneDraftPoints;
+async function saveZone() {
 
     const rushStartRaw = document.getElementById("zone-rush-start").value;
     const rushEndRaw = document.getElementById("zone-rush-end").value;
 
-    const response = await fetch(API + "/api/paths/" + zoneDraftPath.id + "/zones", {
+    const url = selectedSection.zoneId !== null
+        ? API + "/api/zones/" + selectedSection.zoneId
+        : API + "/api/paths/" + zoneDraftPath.id + "/zones";
 
-        method: "POST",
+    const method = selectedSection.zoneId !== null ? "PUT" : "POST";
+
+    const response = await fetch(url, {
+
+        method,
 
         headers: {
             "Content-Type": "application/json"
@@ -762,9 +850,9 @@ async function saveZoneDraft() {
 
         body: JSON.stringify({
 
-            start_miles: Math.min(a, b),
+            start_miles: selectedSection.startMiles,
 
-            end_miles: Math.max(a, b),
+            end_miles: selectedSection.endMiles,
 
             speed_limit_mph: Number(document.getElementById("zone-speed").value),
 
@@ -787,14 +875,34 @@ async function saveZoneDraft() {
 
     const pathId = zoneDraftPath.id;
 
-    cancelZoneDraft();
+    selectedSection = { zoneId: data.id, startMiles: data.start_miles, endMiles: data.end_miles };
+
+    //
+    // Whether this save created a fresh zone or updated an existing one,
+    // the section now definitely corresponds to a real zone - show the
+    // delete button even if this was just created (fillZoneForm() only
+    // ran with zoneId still null, before the save completed).
+    //
+    document.getElementById("zone-delete-button").style.display = "";
 
     await loadPaths();
 
     const refreshed = pathsById.get(pathId);
 
     if (refreshed) {
-        renderZoneEditor(refreshed);
+
+        zoneDraftPath = refreshed;
+
+        renderRouteSections(refreshed);
+        renderZoneList(refreshed);
+    }
+}
+
+
+function deleteSelectedZone() {
+
+    if (selectedSection && selectedSection.zoneId !== null) {
+        removeZone(selectedSection.zoneId);
     }
 }
 
@@ -807,8 +915,9 @@ async function removeZone(zoneId) {
 
     const pathId = zoneDraftPath.id;
 
-    if (zoneId === selectedZoneId) {
-        selectedZoneId = null;
+    if (selectedSection && selectedSection.zoneId === zoneId) {
+        selectedSection = null;
+        document.getElementById("zone-form").style.display = "none";
     }
 
     await fetch(API + "/api/zones/" + zoneId, { method: "DELETE" });
@@ -818,8 +927,20 @@ async function removeZone(zoneId) {
     const refreshed = pathsById.get(pathId);
 
     if (refreshed) {
-        renderZoneEditor(refreshed);
+
+        zoneDraftPath = refreshed;
+
+        renderRouteSections(refreshed);
+        renderZoneList(refreshed);
     }
+}
+
+
+function previewPath(path) {
+
+    map.fitBounds(L.latLngBounds(path.route));
+
+    renderZoneEditor(path);
 }
 
 
