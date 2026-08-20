@@ -582,6 +582,17 @@ function sectionIsSelected(section) {
 }
 
 
+//
+// The visible line is much thinner than a comfortable click target,
+// especially for short zones - so each section also gets an invisible,
+// much wider "hit" line stacked on top of it purely to catch clicks
+// (Leaflet's default CSS gives interactive vector layers
+// `pointer-events: auto`, so a zero-opacity stroke still registers
+// clicks across its full weight).
+//
+const SECTION_CLICK_WEIGHT = 24;
+
+
 function renderRouteSections(path) {
 
     clearRouteSections();
@@ -591,8 +602,23 @@ function renderRouteSections(path) {
     for (const section of buildRouteSections(path)) {
 
         const selected = sectionIsSelected(section);
+        const points = path.route.slice(section.startIndex, section.endIndex + 1);
 
-        const line = L.polyline(path.route.slice(section.startIndex, section.endIndex + 1), {
+        //
+        // While "Draw a custom zone" is armed, a section's own click
+        // shouldn't fire - the click still needs to bubble up to the map's
+        // click handler below, which is what actually places draft points.
+        //
+        const onClick = () => {
+
+            if (zoneDrawArmed) {
+                return;
+            }
+
+            selectSection(path, section);
+        };
+
+        const line = L.polyline(points, {
 
             color: selected ? "#c92a2a" : speedOverlayColor(section.speedLimitMph),
 
@@ -604,9 +630,18 @@ function renderRouteSections(path) {
 
         }).addTo(map);
 
-        line.on("click", () => selectSection(path, section));
+        const hitLine = L.polyline(points, {
 
-        routeSectionLines.push(line);
+            weight: SECTION_CLICK_WEIGHT,
+
+            opacity: 0
+
+        }).addTo(map);
+
+        line.on("click", onClick);
+        hitLine.on("click", onClick);
+
+        routeSectionLines.push(line, hitLine);
 
         if (selected) {
             selectedLine = line;
