@@ -618,11 +618,35 @@ function renderRouteSections(path) {
             selectSection(path, section);
         };
 
+        const lineWeight = selected ? 8 : (section.zone ? 6 : 4);
+
+        //
+        // A custom zone's color alone can coincidentally match the tier
+        // color of the plain road right next to it (e.g. a 50mph zone
+        // butting up against a 50mph arterial default), so weight/dash
+        // alone can be too subtle to notice at a glance. A dark casing
+        // drawn underneath - wider than the zone's own line, so only its
+        // edges peek out - makes any custom zone unmistakable regardless
+        // of what color it happens to render in.
+        //
+        if (section.zone) {
+
+            routeSectionLines.push(L.polyline(points, {
+
+                color: "#1a1a1a",
+
+                weight: lineWeight + 5,
+
+                opacity: 0.9
+
+            }).addTo(map));
+        }
+
         const line = L.polyline(points, {
 
             color: selected ? "#c92a2a" : speedOverlayColor(section.speedLimitMph),
 
-            weight: selected ? 8 : (section.zone ? 6 : 4),
+            weight: lineWeight,
 
             dashArray: section.zone ? null : "6 4",
 

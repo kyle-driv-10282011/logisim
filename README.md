@@ -347,8 +347,13 @@ Three tabs in the side panel:
   color-coded by effective speed limit (red &lt;45 mph, orange 45-64,
   green 65+ — `buildRouteSections()` in `app.js`, mirroring the backend's
   own tier logic), whether or not any of it has a zone override; existing
-  zones render as a heavier solid line over their stretch, everything else
-  as a thinner dashed line. **Clicking any point on that route** selects
+  zones render as a heavier solid line with a dark casing outline behind
+  it (so a custom zone is unmistakable even if its speed color happens to
+  match the plain tier road right next to it), while everything else is a
+  thinner dashed line with no casing. Every section also has an invisible,
+  much wider companion line stacked on top purely to make it easier to
+  click — the visible line alone is too thin to reliably hit, especially
+  for a short zone. **Clicking any point on that route** selects
   the whole section it belongs to (highlighted in red) and opens an edit
   form in the sidebar pre-filled with that section's current speed limit
   (and rush-hour fields, if it's an existing zone) — editing and saving
