@@ -362,6 +362,7 @@ async function removePath(pathId) {
     if (zoneDraftPath && zoneDraftPath.id === pathId) {
 
         zoneDraftPath = null;
+        selectedZoneId = null;
 
         cancelZoneDraft();
         clearZoneOverlays();
@@ -391,6 +392,8 @@ function previewPath(path) {
 
     map.fitBounds(pathPreviewLine.getBounds());
 
+    selectedZoneId = null;
+
     renderZoneEditor(path);
 }
 
@@ -404,11 +407,12 @@ function previewPath(path) {
 // origin - a fixed geometric property of the route, unlike time, which
 // now depends on the traffic model itself) becomes the zone's start/end.
 //
-let zoneDraftPath = null;          // path currently shown in the zone editor
-let zoneDraftPoints = [];          // cumulative-miles values of picked points (0-2 of them)
-let zoneDraftMarkers = [];         // Leaflet markers for the picked points
-let zoneDrawArmed = false;         // true while waiting for the next map click to pick a point
-let zoneOverlayLines = [];         // polylines highlighting this path's existing zones
+let zoneDraftPath = null;              // path currently shown in the zone editor
+let zoneDraftPoints = [];              // cumulative-miles values of picked points (0-2 of them)
+let zoneDraftMarkers = [];             // Leaflet markers for the picked points
+let zoneDrawArmed = false;             // true while waiting for the next map click to pick a point
+let zoneOverlayLinesById = new Map();  // zone id -> polyline for that zone's chunk of the route
+let selectedZoneId = null;             // zone id highlighted after being clicked (list or map)
 
 
 function milesToRouteIndex(distancesMiles, miles) {
@@ -473,11 +477,19 @@ function zoneSummary(zone) {
 
 function clearZoneOverlays() {
 
-    for (const line of zoneOverlayLines) {
+    for (const line of zoneOverlayLinesById.values()) {
         map.removeLayer(line);
     }
 
-    zoneOverlayLines = [];
+    zoneOverlayLinesById = new Map();
+}
+
+
+function zoneOverlayStyle(zone) {
+
+    return zone.id === selectedZoneId
+        ? { color: "red", weight: 9, opacity: 0.95 }
+        : { color: "orange", weight: 7, opacity: 0.85 };
 }
 
 
@@ -490,18 +502,29 @@ function renderZoneOverlays(path) {
         const startIndex = milesToRouteIndex(path.distances_miles, zone.start_miles);
         const endIndex = Math.max(startIndex, milesToRouteIndex(path.distances_miles, zone.end_miles));
 
-        const line = L.polyline(path.route.slice(startIndex, endIndex + 1), {
+        const line = L.polyline(path.route.slice(startIndex, endIndex + 1), zoneOverlayStyle(zone)).addTo(map);
 
-            color: "orange",
+        line.on("click", () => selectZone(zone.id));
 
-            weight: 7,
-
-            opacity: 0.85
-
-        }).addTo(map);
-
-        zoneOverlayLines.push(line);
+        zoneOverlayLinesById.set(zone.id, line);
     }
+
+    //
+    // Drawn last (after every zone's own layer already exists) so the
+    // highlighted one renders on top of any overlapping neighbors.
+    //
+    if (zoneOverlayLinesById.has(selectedZoneId)) {
+        zoneOverlayLinesById.get(selectedZoneId).bringToFront();
+    }
+}
+
+
+function selectZone(zoneId) {
+
+    selectedZoneId = selectedZoneId === zoneId ? null : zoneId;
+
+    renderZoneOverlays(zoneDraftPath);
+    renderZoneList(zoneDraftPath);
 }
 
 
@@ -515,7 +538,9 @@ function renderZoneList(path) {
 
         const item = document.createElement("div");
 
-        item.className = "vehicle-item list-row";
+        item.className = "vehicle-item list-row" + (zone.id === selectedZoneId ? " selected" : "");
+        item.style.cursor = "pointer";
+        item.onclick = () => selectZone(zone.id);
 
         item.innerHTML =
             `<span>${zoneSummary(zone)}</span>` +
@@ -525,7 +550,11 @@ function renderZoneList(path) {
     }
 
     for (const button of list.querySelectorAll(".remove-zone-button")) {
-        button.onclick = () => removeZone(Number(button.dataset.id));
+
+        button.onclick = (event) => {
+            event.stopPropagation();
+            removeZone(Number(button.dataset.id));
+        };
     }
 }
 
@@ -668,6 +697,10 @@ async function removeZone(zoneId) {
     }
 
     const pathId = zoneDraftPath.id;
+
+    if (zoneId === selectedZoneId) {
+        selectedZoneId = null;
+    }
 
     await fetch(API + "/api/zones/" + zoneId, { method: "DELETE" });
 
