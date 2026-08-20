@@ -20,7 +20,7 @@ logger = logging.getLogger("uvicorn.error")
 
 #
 # Real drive time is compressed into simulated time by this factor,
-# e.g. a 6 hour drive plays out over 6 minutes.
+# e.g. a 5 hour drive plays out over 5 minutes.
 #
 TIME_COMPRESSION = 60
 
