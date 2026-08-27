@@ -28,7 +28,8 @@ let map;
 const tripLayers = new Map();      // vehicle_id -> { marker, routeLine }
 let specsById = new Map();         // spec_id -> vehicle spec (from GET /api/vehicle-specs)
 let pathsById = new Map();         // path_id -> path (from GET /api/paths)
-let vehiclesById = new Map();      // vehicle_id -> vehicle (from GET /api/vehicles)
+let vehiclesById = new Map();      // vehicle_id -> vehicle - current fleet, not sold (from GET /api/vehicles)
+let allVehiclesById = new Map();   // vehicle_id -> vehicle - full history, sold or not (from GET /api/vehicles?include_sold=true)
 let activeTripsById = new Map();   // vehicle_id -> trip (from the last poll)
 let activeVehicleIds = new Set();  // vehicle ids seen on the last poll
 let selectedVehicleId = null;      // vehicle id followed in the In Route tab
@@ -64,7 +65,7 @@ function formatHMS(totalSeconds) {
 
 function showTab(tab) {
 
-    for (const name of ["vehicles", "paths", "inroute"]) {
+    for (const name of ["templates", "myvehicles", "allvehicles", "paths", "inroute"]) {
 
         document.getElementById(`tab-${name}`).classList.toggle("active", name === tab);
         document.getElementById(`tab-button-${name}`).classList.toggle("active", name === tab);
@@ -227,10 +228,16 @@ async function removeSpec(specId) {
 
 async function loadVehicles() {
 
-    const response = await fetch(API + "/api/vehicles");
-    const vehicles = await response.json();
+    const [ownedResponse, allResponse] = await Promise.all([
+        fetch(API + "/api/vehicles"),
+        fetch(API + "/api/vehicles?include_sold=true")
+    ]);
+
+    const vehicles = await ownedResponse.json();
+    const allVehicles = await allResponse.json();
 
     vehiclesById = new Map(vehicles.map((vehicle) => [vehicle.id, vehicle]));
+    allVehiclesById = new Map(allVehicles.map((vehicle) => [vehicle.id, vehicle]));
 
     //
     // The vehicle chosen for a trip might have been sold, or started driving
@@ -244,6 +251,7 @@ async function loadVehicles() {
     }
 
     renderVehicleList();
+    renderAllVehicleList();
     updateStartTripVisibility();
 }
 
@@ -297,6 +305,32 @@ function renderVehicleList() {
 }
 
 
+function renderAllVehicleList() {
+
+    const list = document.getElementById("all-vehicle-list");
+
+    list.innerHTML = "";
+
+    for (const vehicle of allVehiclesById.values()) {
+
+        const item = document.createElement("div");
+
+        item.className = "vehicle-item list-row";
+
+        const imageUrl = vehicle.spec ? specImageUrl(vehicle.spec.image) : null;
+
+        item.innerHTML =
+            `<span class="spec-item-label">` +
+            (imageUrl ? `<img class="spec-thumb" src="${imageUrl}">` : "") +
+            `<span>${vehicle.name} (${vehicle.vehicle_type}` +
+            (vehicle.spec ? ` &middot; ${specLabel(vehicle.spec)}` : "") + `) ` +
+            `<span class="status-badge status-${vehicle.status}">${vehicle.status}</span></span></span>`;
+
+        list.appendChild(item);
+    }
+}
+
+
 async function sellVehicle(vehicleId) {
 
     const vehicle = vehiclesById.get(vehicleId);
@@ -305,7 +339,14 @@ async function sellVehicle(vehicleId) {
         return;
     }
 
-    await fetch(API + "/api/vehicles/" + vehicleId, { method: "DELETE" });
+    const response = await fetch(API + "/api/vehicles/" + vehicleId + "/sell", { method: "POST" });
+
+    if (!response.ok) {
+
+        const data = await response.json();
+        alert(data.detail || "Could not sell vehicle");
+        return;
+    }
 
     loadVehicles();
 }

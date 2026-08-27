@@ -76,8 +76,8 @@
 
         .tab-button {
             flex: 1;
-            padding: 6px 4px;
-            font-size: 13px;
+            padding: 6px 2px;
+            font-size: 11px;
             border: 1px solid #ccc;
             background: #f0f0f0;
             cursor: pointer;
@@ -163,6 +163,10 @@
 
         .status-DRIVING {
             background: #2a8f2a;
+        }
+
+        .status-SOLD {
+            background: #555;
         }
 
         #vehicle-details {
@@ -253,12 +257,38 @@
 <div id="vehicle-panel">
 
     <div class="tab-bar">
-        <button class="tab-button active" id="tab-button-vehicles" onclick="showTab('vehicles')">Vehicles</button>
+        <button class="tab-button" id="tab-button-templates" onclick="showTab('templates')">Templates</button>
+        <button class="tab-button active" id="tab-button-myvehicles" onclick="showTab('myvehicles')">My Vehicles</button>
+        <button class="tab-button" id="tab-button-allvehicles" onclick="showTab('allvehicles')">All Vehicles</button>
         <button class="tab-button" id="tab-button-paths" onclick="showTab('paths')">Paths</button>
         <button class="tab-button" id="tab-button-inroute" onclick="showTab('inroute')">In Route</button>
     </div>
 
-    <div class="tab-content active" id="tab-vehicles">
+    <div class="tab-content" id="tab-templates">
+
+        <div id="spec-editor">
+
+            <b>Vehicle Templates</b>
+
+            <div id="spec-list"></div>
+
+            <div class="panel-form">
+                <input id="spec-year" type="number" placeholder="Year" value="2026">
+                <input id="spec-brand" placeholder="Brand" value="Chevy">
+                <input id="spec-model" placeholder="Model" value="Express">
+                <input id="spec-person-capacity" type="number" min="1" placeholder="Person capacity" value="12">
+                <input id="spec-cargo-capacity" type="number" min="0" step="0.1" placeholder="Cargo capacity (cu ft)" value="240">
+                <input id="spec-cost" type="number" min="0" step="0.01" placeholder="Cost ($)" value="45000">
+                <input id="spec-mpg" type="number" min="0" step="0.1" placeholder="MPG" value="18">
+                <input id="spec-image" placeholder="Image filename (frontend/images/...)" value="2026-Chevy-Express.png">
+                <button onclick="addSpec()">Add Template</button>
+            </div>
+
+        </div>
+
+    </div>
+
+    <div class="tab-content active" id="tab-myvehicles">
 
         <div class="panel-form">
             <input id="vehicle-name" placeholder="Name" value="Truck 1">
@@ -276,25 +306,12 @@
             <button id="start-trip-button" onclick="startTrip()" style="display:none">Start Trip</button>
         </div>
 
-        <div id="spec-editor">
+    </div>
 
-            <b>Hauling Specs</b>
+    <div class="tab-content" id="tab-allvehicles">
 
-            <div id="spec-list"></div>
-
-            <div class="panel-form">
-                <input id="spec-year" type="number" placeholder="Year" value="2026">
-                <input id="spec-brand" placeholder="Brand" value="Chevy">
-                <input id="spec-model" placeholder="Model" value="Express">
-                <input id="spec-person-capacity" type="number" min="1" placeholder="Person capacity" value="12">
-                <input id="spec-cargo-capacity" type="number" min="0" step="0.1" placeholder="Cargo capacity (cu ft)" value="240">
-                <input id="spec-cost" type="number" min="0" step="0.01" placeholder="Cost ($)" value="45000">
-                <input id="spec-mpg" type="number" min="0" step="0.1" placeholder="MPG" value="18">
-                <input id="spec-image" placeholder="Image filename (frontend/images/...)" value="2026-Chevy-Express.png">
-                <button onclick="addSpec()">Add Spec</button>
-            </div>
-
-        </div>
+        <b>All Vehicles</b>
+        <div id="all-vehicle-list"></div>
 
     </div>
 

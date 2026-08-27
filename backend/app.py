@@ -853,25 +853,39 @@ def delete_vehicle_spec(id: int):
 
 
 @app.get("/api/vehicles")
-def list_vehicles():
+def list_vehicles(include_sold: bool = False):
 
     conn = db()
     cur = conn.cursor()
 
+    #
+    # "My Vehicles" (the current fleet, include_sold=False - the default)
+    # filters to sold = FALSE; "All Vehicles" (include_sold=True) is the
+    # full history, sold or not. This is a static, non-user-controlled
+    # clause (only the bool toggles which literal is used), so it's safe
+    # to splice in rather than parameterize.
+    #
     cur.execute(
-        """
+        f"""
         SELECT
             v.id,
             v.name,
             v.vehicle_type,
             v.spec_id,
-            CASE WHEN EXISTS (
-                SELECT 1
-                FROM trips t
-                WHERE t.vehicle_id = v.id
-                AND EXTRACT(EPOCH FROM (NOW() - t.started_at)) < t.realized_duration_seconds / %s
-            ) THEN 'DRIVING' ELSE 'READY' END
+            v.sold,
+            v.sold_at,
+            CASE
+                WHEN v.sold THEN 'SOLD'
+                WHEN EXISTS (
+                    SELECT 1
+                    FROM trips t
+                    WHERE t.vehicle_id = v.id
+                    AND EXTRACT(EPOCH FROM (NOW() - t.started_at)) < t.realized_duration_seconds / %s
+                ) THEN 'DRIVING'
+                ELSE 'READY'
+            END
         FROM vehicles v
+        {"" if include_sold else "WHERE v.sold = FALSE"}
         ORDER BY v.id
         """,
         (TIME_COMPRESSION,)
@@ -895,16 +909,74 @@ def list_vehicles():
 
             "spec": specs_by_id.get(row[3]),
 
-            "status": row[4]
+            "sold": row[4],
+
+            "sold_at": row[5],
+
+            "status": row[6]
         }
         for row in rows
     ]
 
 
 
+@app.post("/api/vehicles/{id}/sell")
+def sell_vehicle(id: int):
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("SELECT sold FROM vehicles WHERE id=%s", (id,))
+
+    row = cur.fetchone()
+
+    if row is None:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=404, detail="Vehicle not found")
+
+    if row[0]:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=409, detail="Vehicle already sold")
+
+    cur.execute(
+        """
+        SELECT 1
+        FROM trips t
+        WHERE t.vehicle_id = %s
+        AND EXTRACT(EPOCH FROM (NOW() - t.started_at)) < t.realized_duration_seconds / %s
+        """,
+        (id, TIME_COMPRESSION)
+    )
+
+    if cur.fetchone() is not None:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=409, detail="Vehicle is currently on a trip")
+
+    cur.execute(
+        "UPDATE vehicles SET sold = TRUE, sold_at = NOW() WHERE id=%s",
+        (id,)
+    )
+
+    conn.commit()
+
+    cur.close()
+    conn.close()
+
+    return {"id": id, "sold": True}
+
+
+
 @app.delete("/api/vehicles/{id}")
 def delete_vehicle(id: int):
 
+    #
+    # Permanently erases the row (cascades its trips) - distinct from
+    # selling, which just marks sold = TRUE so it still shows up in "All
+    # Vehicles" history. Not exposed in the UI; kept for cleanup.
+    #
     conn = db()
     cur = conn.cursor()
 
@@ -1403,12 +1475,19 @@ def start_trip(req: StartTripRequest):
     conn = db()
     cur = conn.cursor()
 
-    cur.execute("SELECT id FROM vehicles WHERE id=%s", (req.vehicle_id,))
+    cur.execute("SELECT sold FROM vehicles WHERE id=%s", (req.vehicle_id,))
 
-    if cur.fetchone() is None:
+    vehicle_row = cur.fetchone()
+
+    if vehicle_row is None:
         cur.close()
         conn.close()
         raise HTTPException(status_code=404, detail="Vehicle not found")
+
+    if vehicle_row[0]:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=409, detail="Vehicle has been sold")
 
     cur.execute(
         "SELECT route, distances_miles, max_speeds_mph FROM paths WHERE id=%s",

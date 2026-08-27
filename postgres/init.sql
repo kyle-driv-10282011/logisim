@@ -37,6 +37,12 @@ CREATE TABLE vehicles (
     -- being reused across trips instead of storing route data per trip.
     spec_id INTEGER NOT NULL REFERENCES vehicle_specs(id),
 
+    -- Selling a vehicle marks it sold rather than deleting the row, so
+    -- "All Vehicles" can show full history while "My Vehicles" (the
+    -- current fleet) filters to sold = FALSE.
+    sold BOOLEAN NOT NULL DEFAULT FALSE,
+    sold_at TIMESTAMP,
+
     created TIMESTAMP DEFAULT NOW()
 );
 

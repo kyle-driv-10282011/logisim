@@ -109,10 +109,13 @@ geocoded/routed once and reused by any number of trips.
 | `name`         | text    |                                  |
 | `vehicle_type` | text    | default `'truck'`               |
 | `spec_id`      | integer | FK `vehicle_specs(id)` — hauling specs live on the spec, not duplicated per vehicle |
+| `sold`         | boolean | default `false`. Selling a vehicle sets this rather than deleting the row, so "All Vehicles" can show full history while "My Vehicles" filters to `sold = false` |
+| `sold_at`      | timestamp | nullable                      |
 | `created`      | timestamp | default `NOW()`                |
 
-A vehicle's `status` (`READY` / `DRIVING`) is computed on read from
-whether it has an active trip — it isn't a stored column.
+A vehicle's `status` (`READY` / `DRIVING` / `SOLD`) is computed on read
+from `sold` and whether it has an active trip — none of that is a stored
+column besides `sold` itself.
 
 ### `paths`
 
@@ -336,8 +339,9 @@ All endpoints are on the `backend` service, default `http://localhost:5000`.
 | Method & path                  | Description |
 |---------------------------------|-------------|
 | `POST /api/vehicles`            | Create a vehicle. Body: `{name, vehicle_type?, spec_id}`. Response includes the resolved `spec` |
-| `GET /api/vehicles`             | List vehicles with computed `status` (`READY`/`DRIVING`) and each vehicle's `spec` |
-| `DELETE /api/vehicles/{id}`     | Delete a vehicle (cascades its trips) |
+| `GET /api/vehicles`             | List vehicles with computed `status` (`READY`/`DRIVING`/`SOLD`) and each vehicle's `spec`. Defaults to the current fleet (`sold = false`, "My Vehicles"); `?include_sold=true` returns full history ("All Vehicles") |
+| `POST /api/vehicles/{id}/sell`  | Mark a vehicle sold (soft-delete). 409 if already sold or currently on a trip |
+| `DELETE /api/vehicles/{id}`     | Permanently delete a vehicle (cascades its trips) — distinct from selling; not used by the frontend |
 | `POST /api/vehicle-specs`       | Create a hauling-spec catalog entry. Body: `{year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, image?}` |
 | `GET /api/vehicle-specs`        | List all vehicle specs |
 | `DELETE /api/vehicle-specs/{id}`| Delete a spec. 409 if any vehicle still references it |
@@ -360,17 +364,22 @@ a normal FastAPI exception handler and still carry CORS headers).
 ## Frontend
 
 Plain JS + Leaflet, no build step (`frontend/app.js`, `frontend/index.html`).
-Three tabs in the side panel:
+Five tabs in the side panel:
 
-- **Vehicles** — add/sell vehicles, pick a path and start a trip for a
-  `READY` vehicle. Adding a vehicle requires picking a hauling spec from
-  a dropdown; the "Hauling Specs" section below lets you create new specs
+- **Templates** — the hauling-spec catalog. Create specs
   (year/brand/model/person capacity/cargo capacity/cost/MPG/image) and
-  delete unused ones. A spec's `image` is just a filename resolved
-  against `frontend/images/` (e.g. dropping in
-  `frontend/images/2026-Chevy-Express.png` and setting `image` to
-  `2026-Chevy-Express.png`) — nginx serves that directory alongside the
-  rest of the static frontend, no separate upload endpoint.
+  delete unused ones (409 if any vehicle still references one). A spec's
+  `image` is just a filename resolved against `frontend/images/` (e.g.
+  dropping in `frontend/images/2026-Chevy-Express.png` and setting
+  `image` to `2026-Chevy-Express.png`) — nginx serves that directory
+  alongside the rest of the static frontend, no separate upload endpoint.
+- **My Vehicles** — the current fleet (not sold). Add a vehicle by
+  picking a template from a dropdown (required — templates must exist
+  first), pick a path and start a trip for a `READY` vehicle, or sell a
+  `READY` vehicle (soft-delete — it moves off this list but stays
+  visible in All Vehicles as `SOLD`).
+- **All Vehicles** — read-only history of every vehicle ever created,
+  sold or not, with its current status badge (`READY`/`DRIVING`/`SOLD`).
 - **Paths** — create a path from an origin/destination, preview it on the
   map, remove existing paths. Previewing a path draws the *entire* route
   color-coded by effective speed limit (red &lt;45 mph, orange 45-64,
