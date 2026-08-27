@@ -221,8 +221,14 @@ it — see [Traffic model](#traffic-model).
 All position/speed math is done in *real* seconds and only converted to
 *sim* seconds at the boundary (`remaining_sim_seconds` in API responses,
 using the current `time_multiplier`), so the underlying model always
-reasons in true drive time — and live changes to `time_multiplier`
-immediately speed up or slow down every in-progress trip's displayed ETA.
+reasons in true drive time.
+
+`PUT /api/settings` rejects the change (409) while any vehicle is
+currently in route — changing the multiplier mid-trip would retroactively
+rescale a schedule already computed and shown to the user as an ETA, the
+same reasoning as `zones_snapshot` freezing a trip's zones at creation
+(see [Road zones](#road-zones)). The frontend disables the "Time x"
+control the same way (`updateTimeMultiplierControlState()` in `app.js`).
 
 An arrived trip keeps showing up in `/api/trips/active` for
 `ARRIVAL_GRACE_SECONDS` (30) real seconds afterward, so a vehicle doesn't
@@ -376,7 +382,7 @@ All endpoints are on the `backend` service, default `http://localhost:5000`.
 | Method & path                  | Description |
 |---------------------------------|-------------|
 | `GET /api/settings`             | Current game clock: `{time_multiplier, game_time}` |
-| `PUT /api/settings`             | Change `time_multiplier`. Body: `{time_multiplier}` — re-anchors the game clock at its current value so it speeds up/slows down rather than jumping |
+| `PUT /api/settings`             | Change `time_multiplier`. Body: `{time_multiplier}` — re-anchors the game clock at its current value so it speeds up/slows down rather than jumping. 409 if any vehicle is currently in route |
 | `POST /api/vehicles`            | Create a vehicle. Body: `{name, spec_id}`. Response includes the resolved `spec` |
 | `GET /api/vehicles`             | List vehicles with computed `status` (`READY`/`DRIVING`/`SOLD`) and each vehicle's `spec`. Defaults to the current fleet (`sold = false`, "My Vehicles"); `?include_sold=true` returns full history ("All Vehicles") |
 | `POST /api/vehicles/{id}/sell`  | Mark a vehicle sold (soft-delete). 409 if already sold or currently on a trip |
@@ -449,8 +455,11 @@ A clock in the top-right corner of the map (`updateSimClock()`) shows the
 current [game time](#game-time) — the same clock the traffic model judges
 rush hour against — with a "Rush Hour" badge when it's currently a
 weekday 7-9am or 4-6pm, and a "Time x" control next to it to change
-`time_multiplier` (`setTimeMultiplier()`, `PUT /api/settings`). Rather
-than calling `GET /api/settings` every second, `loadSettings()` fetches
+`time_multiplier` (`setTimeMultiplier()`, `PUT /api/settings`) — disabled
+whenever any vehicle is in route (`updateTimeMultiplierControlState()`,
+checked on every `pollActiveTrips()` tick), since the backend rejects
+that change anyway. Rather than calling `GET /api/settings` every second,
+`loadSettings()` fetches
 it every 5s and `updateSimClock()` extrapolates forward from that anchor
 each second (`gameClockAnchor` in `app.js`) so the clock ticks smoothly
 in between; the 5s refresh also re-syncs against a multiplier change made

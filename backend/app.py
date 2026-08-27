@@ -813,7 +813,32 @@ def update_settings(req: UpdateSettingsRequest):
     # before switching - so changing the multiplier speeds up/slows down
     # the clock from here, rather than jumping it to a different value.
     #
-    _, game_time = get_settings(conn, cur)
+    time_multiplier, game_time = get_settings(conn, cur)
+
+    #
+    # Changing the multiplier mid-trip would retroactively rescale a
+    # schedule already shown to the user as an ETA (same reasoning as
+    # zones_snapshot freezing a trip's zones at creation) - block it
+    # entirely while any vehicle is in route rather than let it distort
+    # trips already underway.
+    #
+    cur.execute(
+        """
+        SELECT 1
+        FROM trips t
+        WHERE EXTRACT(EPOCH FROM (NOW() - t.started_at)) < t.realized_duration_seconds / %s
+        LIMIT 1
+        """,
+        (time_multiplier,)
+    )
+
+    if cur.fetchone() is not None:
+        cur.close()
+        conn.close()
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot change time multiplier while vehicles are in route"
+        )
 
     cur.execute(
         """

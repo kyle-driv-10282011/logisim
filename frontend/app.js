@@ -70,6 +70,29 @@ async function loadSettings() {
 }
 
 
+//
+// Changing the multiplier mid-trip would retroactively rescale a
+// schedule already shown to the user as an ETA, so the backend rejects
+// it (409) while any vehicle is in route - this mirrors that state in
+// the UI rather than just waiting for the request to fail. Excludes
+// "ARRIVED" trips still lingering in activeTripsById during the arrival
+// grace period, matching the backend's own in-route check.
+//
+function updateTimeMultiplierControlState() {
+
+    const anyInRoute = [...activeTripsById.values()].some((trip) => trip.status !== "ARRIVED");
+
+    const input = document.getElementById("time-multiplier-input");
+    const button = document.getElementById("time-multiplier-set-button");
+
+    input.disabled = anyInRoute;
+    button.disabled = anyInRoute;
+
+    document.getElementById("time-multiplier-control").title =
+        anyInRoute ? "Cannot change while vehicles are in route" : "";
+}
+
+
 async function setTimeMultiplier() {
 
     const value = Number(document.getElementById("time-multiplier-input").value);
@@ -1488,6 +1511,7 @@ async function pollActiveTrips() {
     }
 
     renderInRouteList();
+    updateTimeMultiplierControlState();
 
     if (!setsEqual(seen, activeVehicleIds)) {
 
