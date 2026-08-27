@@ -570,6 +570,50 @@ def zone_dict(row):
     }
 
 
+def spec_dict(row):
+
+    return {
+
+        "id": row[0],
+
+        "year": row[1],
+
+        "brand": row[2],
+
+        "model": row[3],
+
+        "person_capacity": row[4],
+
+        "cargo_capacity_cuft": row[5],
+
+        "cost": row[6],
+
+        "mpg": row[7],
+
+        "image": row[8]
+    }
+
+
+SPEC_COLUMNS = """
+    id, year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, image
+"""
+
+
+def fetch_specs_by_id(cur, spec_ids):
+
+    spec_ids = list(set(spec_ids))
+
+    if not spec_ids:
+        return {}
+
+    cur.execute(
+        f"SELECT {SPEC_COLUMNS} FROM vehicle_specs WHERE id = ANY(%s)",
+        (spec_ids,)
+    )
+
+    return {row[0]: spec_dict(row) for row in cur.fetchall()}
+
+
 def fetch_zones_for_paths(cur, path_ids):
 
     path_ids = list(set(path_ids))
@@ -601,6 +645,26 @@ class CreateVehicleRequest(BaseModel):
 
     name: str
     vehicle_type: str = "truck"
+    spec_id: int
+
+
+
+class CreateVehicleSpecRequest(BaseModel):
+
+    year: int
+    brand: str
+    model: str
+    person_capacity: int
+    cargo_capacity_cuft: float
+    cost: float
+    mpg: float
+
+    #
+    # Filename under frontend/images/ (e.g. "2026-Chevy-Express.png"), not a
+    # full URL - the frontend is what knows it's serving that directory at
+    # its own origin.
+    #
+    image: Optional[str] = None
 
 
 
@@ -657,16 +721,25 @@ def create_vehicle(req: CreateVehicleRequest):
     conn = db()
     cur = conn.cursor()
 
+    cur.execute("SELECT id FROM vehicle_specs WHERE id=%s", (req.spec_id,))
+
+    if cur.fetchone() is None:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=404, detail="Vehicle spec not found")
+
     cur.execute(
         """
-        INSERT INTO vehicles (name, vehicle_type)
-        VALUES (%s, %s)
+        INSERT INTO vehicles (name, vehicle_type, spec_id)
+        VALUES (%s, %s, %s)
         RETURNING id
         """,
-        (req.name, req.vehicle_type)
+        (req.name, req.vehicle_type, req.spec_id)
     )
 
     vehicle_id = cur.fetchone()[0]
+
+    spec = fetch_specs_by_id(cur, [req.spec_id])[req.spec_id]
 
     conn.commit()
 
@@ -681,8 +754,101 @@ def create_vehicle(req: CreateVehicleRequest):
 
         "vehicle_type": req.vehicle_type,
 
+        "spec": spec,
+
         "status": "READY"
     }
+
+
+
+@app.post("/api/vehicle-specs")
+def create_vehicle_spec(req: CreateVehicleSpecRequest):
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        INSERT INTO vehicle_specs
+        (year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, image)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """,
+        (
+            req.year,
+            req.brand,
+            req.model,
+            req.person_capacity,
+            req.cargo_capacity_cuft,
+            req.cost,
+            req.mpg,
+            req.image
+        )
+    )
+
+    spec_id = cur.fetchone()[0]
+
+    conn.commit()
+
+    cur.close()
+    conn.close()
+
+    return {**req.model_dump(), "id": spec_id}
+
+
+
+@app.get("/api/vehicle-specs")
+def list_vehicle_specs():
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute(f"SELECT {SPEC_COLUMNS} FROM vehicle_specs ORDER BY id")
+
+    specs = [spec_dict(row) for row in cur.fetchall()]
+
+    cur.close()
+    conn.close()
+
+    return specs
+
+
+
+@app.delete("/api/vehicle-specs/{id}")
+def delete_vehicle_spec(id: int):
+
+    conn = db()
+    cur = conn.cursor()
+
+    try:
+
+        cur.execute(
+            "DELETE FROM vehicle_specs WHERE id=%s RETURNING id",
+            (id,)
+        )
+
+        deleted = cur.fetchone()
+
+        conn.commit()
+
+    except psycopg2.errors.ForeignKeyViolation:
+
+        conn.rollback()
+        cur.close()
+        conn.close()
+
+        raise HTTPException(
+            status_code=409,
+            detail="Vehicle spec is still in use by one or more vehicles"
+        )
+
+    cur.close()
+    conn.close()
+
+    if deleted is None:
+        raise HTTPException(status_code=404, detail="Vehicle spec not found")
+
+    return {"deleted": id}
 
 
 
@@ -698,6 +864,7 @@ def list_vehicles():
             v.id,
             v.name,
             v.vehicle_type,
+            v.spec_id,
             CASE WHEN EXISTS (
                 SELECT 1
                 FROM trips t
@@ -712,6 +879,8 @@ def list_vehicles():
 
     rows = cur.fetchall()
 
+    specs_by_id = fetch_specs_by_id(cur, [row[3] for row in rows])
+
     cur.close()
     conn.close()
 
@@ -724,7 +893,9 @@ def list_vehicles():
 
             "vehicle_type": row[2],
 
-            "status": row[3]
+            "spec": specs_by_id.get(row[3]),
+
+            "status": row[4]
         }
         for row in rows
     ]

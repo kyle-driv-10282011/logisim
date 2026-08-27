@@ -64,7 +64,7 @@ to an empty value) on a machine with unrestricted direct internet access.
 
 ## Data model
 
-Three tables, defined in `postgres/init.sql`. **There is no migration
+Four tables, defined in `postgres/init.sql`. **There is no migration
 tooling** — `init.sql` only runs the first time a Postgres container starts
 against an empty volume. Changing the schema after that (adding a column,
 etc.) requires either:
@@ -83,6 +83,24 @@ etc.) requires either:
     -c "ALTER TABLE ... ADD COLUMN ..."
   ```
 
+### `vehicle_specs`
+
+A reusable hauling-spec catalog entry — e.g. "2026 Chevy Express" — that
+any number of vehicles can be created against, the same way a `path` is
+geocoded/routed once and reused by any number of trips.
+
+| Column                 | Type    | Notes                          |
+|------------------------|---------|----------------------------------|
+| `id`                   | serial  | primary key                     |
+| `year`                 | integer |                                  |
+| `brand` / `model`      | text    |                                  |
+| `person_capacity`      | integer |                                  |
+| `cargo_capacity_cuft`  | double precision |                         |
+| `cost`                 | double precision |                         |
+| `mpg`                  | double precision |                         |
+| `image`                | text    | nullable; a filename under `frontend/images/` (e.g. `"2026-Chevy-Express.png"`), not a URL — the frontend resolves it against its own origin |
+| `created`              | timestamp | default `NOW()`                |
+
 ### `vehicles`
 
 | Column         | Type    | Notes                          |
@@ -90,6 +108,7 @@ etc.) requires either:
 | `id`           | serial  | primary key                     |
 | `name`         | text    |                                  |
 | `vehicle_type` | text    | default `'truck'`               |
+| `spec_id`      | integer | FK `vehicle_specs(id)` — hauling specs live on the spec, not duplicated per vehicle |
 | `created`      | timestamp | default `NOW()`                |
 
 A vehicle's `status` (`READY` / `DRIVING`) is computed on read from
@@ -316,9 +335,12 @@ All endpoints are on the `backend` service, default `http://localhost:5000`.
 
 | Method & path                  | Description |
 |---------------------------------|-------------|
-| `POST /api/vehicles`            | Create a vehicle. Body: `{name, vehicle_type?}` |
-| `GET /api/vehicles`             | List vehicles with computed `status` (`READY`/`DRIVING`) |
+| `POST /api/vehicles`            | Create a vehicle. Body: `{name, vehicle_type?, spec_id}`. Response includes the resolved `spec` |
+| `GET /api/vehicles`             | List vehicles with computed `status` (`READY`/`DRIVING`) and each vehicle's `spec` |
 | `DELETE /api/vehicles/{id}`     | Delete a vehicle (cascades its trips) |
+| `POST /api/vehicle-specs`       | Create a hauling-spec catalog entry. Body: `{year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, image?}` |
+| `GET /api/vehicle-specs`        | List all vehicle specs |
+| `DELETE /api/vehicle-specs/{id}`| Delete a spec. 409 if any vehicle still references it |
 | `GET /api/vehicles/{id}/city`   | Nearest place name to the vehicle's current position, if driving |
 | `POST /api/paths`               | Geocode + route an origin/destination (or return the existing match). Body: `{origin, destination}`. Response includes `zones` |
 | `GET /api/paths`                | List all created paths, each with its `zones` |
@@ -341,7 +363,14 @@ Plain JS + Leaflet, no build step (`frontend/app.js`, `frontend/index.html`).
 Three tabs in the side panel:
 
 - **Vehicles** — add/sell vehicles, pick a path and start a trip for a
-  `READY` vehicle.
+  `READY` vehicle. Adding a vehicle requires picking a hauling spec from
+  a dropdown; the "Hauling Specs" section below lets you create new specs
+  (year/brand/model/person capacity/cargo capacity/cost/MPG/image) and
+  delete unused ones. A spec's `image` is just a filename resolved
+  against `frontend/images/` (e.g. dropping in
+  `frontend/images/2026-Chevy-Express.png` and setting `image` to
+  `2026-Chevy-Express.png`) — nginx serves that directory alongside the
+  rest of the static frontend, no separate upload endpoint.
 - **Paths** — create a path from an origin/destination, preview it on the
   map, remove existing paths. Previewing a path draws the *entire* route
   color-coded by effective speed limit (red &lt;45 mph, orange 45-64,

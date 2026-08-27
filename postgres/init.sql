@@ -1,3 +1,29 @@
+CREATE TABLE vehicle_specs (
+
+    id SERIAL PRIMARY KEY,
+
+    year INTEGER NOT NULL,
+
+    brand TEXT NOT NULL,
+
+    model TEXT NOT NULL,
+
+    person_capacity INTEGER NOT NULL,
+
+    cargo_capacity_cuft DOUBLE PRECISION NOT NULL,
+
+    cost DOUBLE PRECISION NOT NULL,
+
+    mpg DOUBLE PRECISION NOT NULL,
+
+    -- Filename under frontend/images/, e.g. "2026-Chevy-Express.png". Nullable
+    -- since a spec is still usable without a picture.
+    image TEXT,
+
+    created TIMESTAMP DEFAULT NOW()
+);
+
+
 CREATE TABLE vehicles (
 
     id SERIAL PRIMARY KEY,
@@ -5,6 +31,11 @@ CREATE TABLE vehicles (
     name TEXT NOT NULL,
 
     vehicle_type TEXT NOT NULL DEFAULT 'truck',
+
+    -- Hauling specs (year/brand/model/capacity/cost/mpg/image) live on the
+    -- reusable spec, not duplicated per vehicle - same pattern as paths
+    -- being reused across trips instead of storing route data per trip.
+    spec_id INTEGER NOT NULL REFERENCES vehicle_specs(id),
 
     created TIMESTAMP DEFAULT NOW()
 );

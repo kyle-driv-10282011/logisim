@@ -179,6 +179,33 @@
             font-size: 13px;
         }
 
+        #spec-editor {
+            margin-top: 16px;
+            padding-top: 10px;
+            border-top: 1px solid #ccc;
+            font-size: 13px;
+        }
+
+        .spec-thumb {
+            width: 32px;
+            height: 32px;
+            object-fit: contain;
+            border-radius: 3px;
+            background: #f0f0f0;
+            flex-shrink: 0;
+        }
+
+        .spec-item-label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .spec-item-details {
+            font-size: 11px;
+            color: #555;
+        }
+
         #zone-editor label {
             display: block;
             font-size: 11px;
@@ -236,6 +263,7 @@
         <div class="panel-form">
             <input id="vehicle-name" placeholder="Name" value="Truck 1">
             <input id="vehicle-type" placeholder="Type" value="truck">
+            <select id="vehicle-spec-select"></select>
             <button onclick="addVehicle()">Add Vehicle</button>
         </div>
 
@@ -246,6 +274,26 @@
                 <option value="">Select a path...</option>
             </select>
             <button id="start-trip-button" onclick="startTrip()" style="display:none">Start Trip</button>
+        </div>
+
+        <div id="spec-editor">
+
+            <b>Hauling Specs</b>
+
+            <div id="spec-list"></div>
+
+            <div class="panel-form">
+                <input id="spec-year" type="number" placeholder="Year" value="2026">
+                <input id="spec-brand" placeholder="Brand" value="Chevy">
+                <input id="spec-model" placeholder="Model" value="Express">
+                <input id="spec-person-capacity" type="number" min="1" placeholder="Person capacity" value="12">
+                <input id="spec-cargo-capacity" type="number" min="0" step="0.1" placeholder="Cargo capacity (cu ft)" value="240">
+                <input id="spec-cost" type="number" min="0" step="0.01" placeholder="Cost ($)" value="45000">
+                <input id="spec-mpg" type="number" min="0" step="0.1" placeholder="MPG" value="18">
+                <input id="spec-image" placeholder="Image filename (frontend/images/...)" value="2026-Chevy-Express.png">
+                <button onclick="addSpec()">Add Spec</button>
+            </div>
+
         </div>
 
     </div>

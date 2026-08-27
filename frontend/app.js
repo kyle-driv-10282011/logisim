@@ -26,6 +26,7 @@ const SIMULATION_TIMEZONE = "America/Chicago";
 let map;
 
 const tripLayers = new Map();      // vehicle_id -> { marker, routeLine }
+let specsById = new Map();         // spec_id -> vehicle spec (from GET /api/vehicle-specs)
 let pathsById = new Map();         // path_id -> path (from GET /api/paths)
 let vehiclesById = new Map();      // vehicle_id -> vehicle (from GET /api/vehicles)
 let activeTripsById = new Map();   // vehicle_id -> trip (from the last poll)
@@ -68,6 +69,159 @@ function showTab(tab) {
         document.getElementById(`tab-${name}`).classList.toggle("active", name === tab);
         document.getElementById(`tab-button-${name}`).classList.toggle("active", name === tab);
     }
+}
+
+
+//
+// Specs are served by the backend as a filename (e.g. "2026-Chevy-Express.png"),
+// not a URL - the frontend is what knows it's serving frontend/images/ at its
+// own origin (same host/port index.html was loaded from), so this is a plain
+// relative path rather than going through the API host/port.
+//
+function specImageUrl(filename) {
+
+    return filename ? `images/${encodeURIComponent(filename)}` : null;
+}
+
+
+function specLabel(spec) {
+
+    return `${spec.year} ${spec.brand} ${spec.model}`;
+}
+
+
+async function loadSpecs() {
+
+    const response = await fetch(API + "/api/vehicle-specs");
+    const specs = await response.json();
+
+    specsById = new Map(specs.map((spec) => [spec.id, spec]));
+
+    const select = document.getElementById("vehicle-spec-select");
+    const previousValue = select.value;
+
+    select.innerHTML = specs.length
+        ? ""
+        : '<option value="">No specs yet - add one below</option>';
+
+    for (const spec of specs) {
+
+        const option = document.createElement("option");
+
+        option.value = spec.id;
+        option.textContent = specLabel(spec);
+
+        select.appendChild(option);
+    }
+
+    if (specs.some((spec) => String(spec.id) === previousValue)) {
+        select.value = previousValue;
+    }
+
+    renderSpecList();
+    renderVehicleList();
+    renderInRouteList();
+}
+
+
+function renderSpecList() {
+
+    const list = document.getElementById("spec-list");
+
+    list.innerHTML = "";
+
+    for (const spec of specsById.values()) {
+
+        const item = document.createElement("div");
+
+        item.className = "vehicle-item list-row";
+
+        const imageUrl = specImageUrl(spec.image);
+
+        item.innerHTML =
+            `<span class="spec-item-label">` +
+            (imageUrl ? `<img class="spec-thumb" src="${imageUrl}">` : "") +
+            `<span>${specLabel(spec)}` +
+            `<div class="spec-item-details">` +
+            `${spec.person_capacity} people &middot; ${spec.cargo_capacity_cuft} cu ft &middot; ` +
+            `$${Math.round(spec.cost).toLocaleString()} &middot; ${spec.mpg} mpg` +
+            `</div></span></span>` +
+            `<button class="remove-spec-button" data-id="${spec.id}">Delete</button>`;
+
+        list.appendChild(item);
+    }
+
+    for (const button of list.querySelectorAll(".remove-spec-button")) {
+
+        button.onclick = (event) => {
+            event.stopPropagation();
+            removeSpec(Number(button.dataset.id));
+        };
+    }
+}
+
+
+async function addSpec() {
+
+    const response = await fetch(API + "/api/vehicle-specs", {
+
+        method: "POST",
+
+        headers: {
+            "Content-Type": "application/json"
+        },
+
+        body: JSON.stringify({
+
+            year: Number(document.getElementById("spec-year").value),
+
+            brand: document.getElementById("spec-brand").value,
+
+            model: document.getElementById("spec-model").value,
+
+            person_capacity: Number(document.getElementById("spec-person-capacity").value),
+
+            cargo_capacity_cuft: Number(document.getElementById("spec-cargo-capacity").value),
+
+            cost: Number(document.getElementById("spec-cost").value),
+
+            mpg: Number(document.getElementById("spec-mpg").value),
+
+            image: document.getElementById("spec-image").value || null
+
+        })
+
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+        alert(data.detail || "Could not add spec");
+        return;
+    }
+
+    loadSpecs();
+}
+
+
+async function removeSpec(specId) {
+
+    const spec = specsById.get(specId);
+
+    if (!confirm(`Delete spec "${spec ? specLabel(spec) : specId}"?`)) {
+        return;
+    }
+
+    const response = await fetch(API + "/api/vehicle-specs/" + specId, { method: "DELETE" });
+
+    if (!response.ok) {
+
+        const data = await response.json();
+        alert(data.detail || "Could not delete spec");
+        return;
+    }
+
+    loadSpecs();
 }
 
 
@@ -118,9 +272,14 @@ function renderVehicleList() {
             item.onclick = () => selectTripVehicle(vehicle.id);
         }
 
+        const imageUrl = vehicle.spec ? specImageUrl(vehicle.spec.image) : null;
+
         item.innerHTML =
-            `<span>${vehicle.name} (${vehicle.vehicle_type}) ` +
-            `<span class="status-badge status-${vehicle.status}">${vehicle.status}</span></span>` +
+            `<span class="spec-item-label">` +
+            (imageUrl ? `<img class="spec-thumb" src="${imageUrl}">` : "") +
+            `<span>${vehicle.name} (${vehicle.vehicle_type}` +
+            (vehicle.spec ? ` &middot; ${specLabel(vehicle.spec)}` : "") + `) ` +
+            `<span class="status-badge status-${vehicle.status}">${vehicle.status}</span></span></span>` +
             (vehicle.status === "READY"
                 ? `<button class="sell-button" data-id="${vehicle.id}">Sell</button>`
                 : "");
@@ -264,9 +423,16 @@ function renderInRouteList() {
         ? `Near: ${currentCity.city || "unknown"}<br>`
         : "Near: (looking up...)<br>";
 
+    const spec = vehicle ? vehicle.spec : null;
+
     details.innerHTML =
         `<b>${vehicle ? vehicle.name : trip.vehicle_name}</b><br>` +
         (vehicle ? `Type: ${vehicle.vehicle_type}<br>` : "") +
+        (spec
+            ? `Spec: ${specLabel(spec)}<br>` +
+              `Capacity: ${spec.person_capacity} people, ${spec.cargo_capacity_cuft} cu ft cargo<br>` +
+              `Cost: $${Math.round(spec.cost).toLocaleString()} &middot; ${spec.mpg} mpg<br>`
+            : "") +
         `Status: ${trip.status}<br>` +
         cityLine +
         `Position: ${trip.position[0].toFixed(4)}, ${trip.position[1].toFixed(4)}<br>` +
@@ -280,7 +446,14 @@ function renderInRouteList() {
 
 async function addVehicle() {
 
-    await fetch(API + "/api/vehicles", {
+    const specId = document.getElementById("vehicle-spec-select").value;
+
+    if (!specId) {
+        alert("Add a hauling spec first");
+        return;
+    }
+
+    const response = await fetch(API + "/api/vehicles", {
 
         method: "POST",
 
@@ -292,11 +465,20 @@ async function addVehicle() {
 
             name: document.getElementById("vehicle-name").value,
 
-            vehicle_type: document.getElementById("vehicle-type").value
+            vehicle_type: document.getElementById("vehicle-type").value,
+
+            spec_id: Number(specId)
 
         })
 
     });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+        alert(data.detail || "Could not add vehicle");
+        return;
+    }
 
     loadVehicles();
 }
@@ -1260,7 +1442,7 @@ function updateSimClock() {
 }
 
 
-loadVehicles();
+loadSpecs().then(loadVehicles);
 loadPaths();
 
 updateSimClock();
