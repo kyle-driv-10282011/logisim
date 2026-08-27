@@ -644,7 +644,6 @@ def fetch_zones_for_paths(cur, path_ids):
 class CreateVehicleRequest(BaseModel):
 
     name: str
-    vehicle_type: str = "truck"
     spec_id: int
 
 
@@ -730,11 +729,11 @@ def create_vehicle(req: CreateVehicleRequest):
 
     cur.execute(
         """
-        INSERT INTO vehicles (name, vehicle_type, spec_id)
-        VALUES (%s, %s, %s)
+        INSERT INTO vehicles (name, spec_id)
+        VALUES (%s, %s)
         RETURNING id
         """,
-        (req.name, req.vehicle_type, req.spec_id)
+        (req.name, req.spec_id)
     )
 
     vehicle_id = cur.fetchone()[0]
@@ -751,8 +750,6 @@ def create_vehicle(req: CreateVehicleRequest):
         "id": vehicle_id,
 
         "name": req.name,
-
-        "vehicle_type": req.vehicle_type,
 
         "spec": spec,
 
@@ -870,7 +867,6 @@ def list_vehicles(include_sold: bool = False):
         SELECT
             v.id,
             v.name,
-            v.vehicle_type,
             v.spec_id,
             v.sold,
             v.sold_at,
@@ -893,7 +889,7 @@ def list_vehicles(include_sold: bool = False):
 
     rows = cur.fetchall()
 
-    specs_by_id = fetch_specs_by_id(cur, [row[3] for row in rows])
+    specs_by_id = fetch_specs_by_id(cur, [row[2] for row in rows])
 
     cur.close()
     conn.close()
@@ -905,15 +901,13 @@ def list_vehicles(include_sold: bool = False):
 
             "name": row[1],
 
-            "vehicle_type": row[2],
+            "spec": specs_by_id.get(row[2]),
 
-            "spec": specs_by_id.get(row[3]),
+            "sold": row[3],
 
-            "sold": row[4],
+            "sold_at": row[4],
 
-            "sold_at": row[5],
-
-            "status": row[6]
+            "status": row[5]
         }
         for row in rows
     ]

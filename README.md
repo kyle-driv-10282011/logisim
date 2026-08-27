@@ -107,8 +107,7 @@ geocoded/routed once and reused by any number of trips.
 |----------------|---------|----------------------------------|
 | `id`           | serial  | primary key                     |
 | `name`         | text    |                                  |
-| `vehicle_type` | text    | default `'truck'`               |
-| `spec_id`      | integer | FK `vehicle_specs(id)` — hauling specs live on the spec, not duplicated per vehicle |
+| `spec_id`      | integer | FK `vehicle_specs(id)` — hauling specs (including type/brand/model) live on the spec, not duplicated per vehicle |
 | `sold`         | boolean | default `false`. Selling a vehicle sets this rather than deleting the row, so "All Vehicles" can show full history while "My Vehicles" filters to `sold = false` |
 | `sold_at`      | timestamp | nullable                      |
 | `created`      | timestamp | default `NOW()`                |
@@ -338,7 +337,7 @@ All endpoints are on the `backend` service, default `http://localhost:5000`.
 
 | Method & path                  | Description |
 |---------------------------------|-------------|
-| `POST /api/vehicles`            | Create a vehicle. Body: `{name, vehicle_type?, spec_id}`. Response includes the resolved `spec` |
+| `POST /api/vehicles`            | Create a vehicle. Body: `{name, spec_id}`. Response includes the resolved `spec` |
 | `GET /api/vehicles`             | List vehicles with computed `status` (`READY`/`DRIVING`/`SOLD`) and each vehicle's `spec`. Defaults to the current fleet (`sold = false`, "My Vehicles"); `?include_sold=true` returns full history ("All Vehicles") |
 | `POST /api/vehicles/{id}/sell`  | Mark a vehicle sold (soft-delete). 409 if already sold or currently on a trip |
 | `DELETE /api/vehicles/{id}`     | Permanently delete a vehicle (cascades its trips) — distinct from selling; not used by the frontend |

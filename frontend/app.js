@@ -285,8 +285,8 @@ function renderVehicleList() {
         item.innerHTML =
             `<span class="spec-item-label">` +
             (imageUrl ? `<img class="spec-thumb" src="${imageUrl}">` : "") +
-            `<span>${vehicle.name} (${vehicle.vehicle_type}` +
-            (vehicle.spec ? ` &middot; ${specLabel(vehicle.spec)}` : "") + `) ` +
+            `<span>${vehicle.name}` +
+            (vehicle.spec ? ` (${specLabel(vehicle.spec)})` : "") + ` ` +
             `<span class="status-badge status-${vehicle.status}">${vehicle.status}</span></span></span>` +
             (vehicle.status === "READY"
                 ? `<button class="sell-button" data-id="${vehicle.id}">Sell</button>`
@@ -322,8 +322,8 @@ function renderAllVehicleList() {
         item.innerHTML =
             `<span class="spec-item-label">` +
             (imageUrl ? `<img class="spec-thumb" src="${imageUrl}">` : "") +
-            `<span>${vehicle.name} (${vehicle.vehicle_type}` +
-            (vehicle.spec ? ` &middot; ${specLabel(vehicle.spec)}` : "") + `) ` +
+            `<span>${vehicle.name}` +
+            (vehicle.spec ? ` (${specLabel(vehicle.spec)})` : "") + ` ` +
             `<span class="status-badge status-${vehicle.status}">${vehicle.status}</span></span></span>`;
 
         list.appendChild(item);
@@ -468,7 +468,6 @@ function renderInRouteList() {
 
     details.innerHTML =
         `<b>${vehicle ? vehicle.name : trip.vehicle_name}</b><br>` +
-        (vehicle ? `Type: ${vehicle.vehicle_type}<br>` : "") +
         (spec
             ? `Spec: ${specLabel(spec)}<br>` +
               `Capacity: ${spec.person_capacity} people, ${spec.cargo_capacity_cuft} cu ft cargo<br>` +
@@ -505,8 +504,6 @@ async function addVehicle() {
         body: JSON.stringify({
 
             name: document.getElementById("vehicle-name").value,
-
-            vehicle_type: document.getElementById("vehicle-type").value,
 
             spec_id: Number(specId)
 
