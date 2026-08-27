@@ -64,7 +64,7 @@ to an empty value) on a machine with unrestricted direct internet access.
 
 ## Data model
 
-Four tables, defined in `postgres/init.sql`. **There is no migration
+Five tables, defined in `postgres/init.sql`. **There is no migration
 tooling** — `init.sql` only runs the first time a Postgres container starts
 against an empty volume. Changing the schema after that (adding a column,
 etc.) requires either:
@@ -82,6 +82,25 @@ etc.) requires either:
   docker compose exec postgres psql -U simulator -d vehicle_sim \
     -c "ALTER TABLE ... ADD COLUMN ..."
   ```
+
+### `settings`
+
+A single row (`id = 1`) holding the game clock's live-adjustable speed.
+Replaces the old hardcoded `TIME_COMPRESSION` constant — see
+[Game time](#game-time) below.
+
+| Column             | Type      | Notes                          |
+|--------------------|-----------|----------------------------------|
+| `id`               | integer   | always `1` (`CHECK (id = 1)`)   |
+| `time_multiplier`  | double precision | how fast game time runs relative to real time |
+| `anchor_real_utc`  | timestamp | a real UTC moment                |
+| `anchor_game_time` | timestamp | the game time at that moment; re-anchored on every multiplier change |
+
+Seeded lazily by the backend on first use (`get_settings()` in
+`app.py`), not by `init.sql` — the anchor has to be comparable to
+Python's own `datetime.utcnow()`, which `init.sql` inserting via
+Postgres's `NOW()` can't guarantee without depending on the container's
+configured timezone.
 
 ### `vehicle_specs`
 
@@ -166,7 +185,7 @@ user-specified simulated time).
 | `id`                     | serial            | primary key |
 | `vehicle_id` / `path_id` | integer           | FKs, `ON DELETE CASCADE` |
 | `started_at`             | timestamp         | real wall-clock moment the trip was created — drives the compressed elapsed-time math, never overridden by the user |
-| `traffic_base_datetime`  | timestamp         | wall-clock moment congestion is anchored to; either `started_at`'s value or a user-supplied `simulated_datetime` (see [Traffic model](#traffic-model)) |
+| `traffic_base_datetime`  | timestamp         | game-clock moment congestion is anchored to; either the game time at trip creation or a user-supplied `simulated_datetime` (see [Traffic model](#traffic-model)) |
 | `traffic_bias`           | double precision  | user multiplier on computed congestion, default `1.0` |
 | `zones_snapshot`         | jsonb             | the path's `road_zones` as they existed the moment this trip was created — frozen so a zone added/removed later doesn't retroactively contradict a schedule already computed for a trip in progress |
 | `realized_seconds`       | jsonb             | cumulative **real** seconds to reach each `route` point *for this specific trip*, computed once at trip creation from `distances_miles` and the traffic model (`build_trip_schedule()` — see [Position and speed](#position-and-speed)) |
@@ -177,15 +196,33 @@ application level in `POST /api/trips`, not a DB constraint).
 
 ## How the simulation works
 
-### Time compression
+### Game time
 
-`TIME_COMPRESSION = 60` in `app.py`. A trip's real drive duration
-(`realized_duration_seconds`, computed under the traffic model — see
-[Position and speed](#position-and-speed)) is divided by this factor to
-get how long it plays out on screen — e.g. a 6-hour drive finishes in 6
-minutes. All position/speed math is done in *real* seconds and only
-converted to *sim* seconds at the boundary (`remaining_sim_seconds` in API
-responses), so the underlying model always reasons in true drive time.
+The whole simulation runs on a **game clock** — a virtual date/time,
+independent of real wall-clock time, that advances at
+`time_multiplier` × real speed (e.g. a 6-hour drive finishes in 6 minutes
+on screen at `time_multiplier = 60`). This is the single knob for all
+time-based behavior: trip playback speed, the displayed clock, and which
+rush-hour window the traffic model judges a trip against.
+
+The game clock is stored as an anchor pair in the `settings` table
+(`anchor_real_utc`, `anchor_game_time`) rather than as a value that gets
+updated every tick — `get_settings()` in `app.py` derives the current
+game time on every read as `anchor_game_time + (now_utc - anchor_real_utc)
+× time_multiplier`. `PUT /api/settings` changes `time_multiplier` by
+re-anchoring at the game time the *old* multiplier had just reached, so
+the clock speeds up/slows down from wherever it currently is instead of
+jumping to a different value.
+
+A trip departs at the game clock's current value unless the caller
+passes `simulated_datetime` (`POST /api/trips`) to explicitly override
+it — see [Traffic model](#traffic-model).
+
+All position/speed math is done in *real* seconds and only converted to
+*sim* seconds at the boundary (`remaining_sim_seconds` in API responses,
+using the current `time_multiplier`), so the underlying model always
+reasons in true drive time — and live changes to `time_multiplier`
+immediately speed up or slow down every in-progress trip's displayed ETA.
 
 An arrived trip keeps showing up in `/api/trips/active` for
 `ARRIVAL_GRACE_SECONDS` (30) real seconds afterward, so a vehicle doesn't
@@ -279,8 +316,9 @@ The result is clamped to `[MIN_REALISTIC_SPEED_MPH, MAX_REALISTIC_SPEED_MPH]`
 `traffic_base_datetime + segment's cumulative real duration` — not a
 single snapshot frozen at departure. A long trip can drive into a
 different rush-hour window partway through, the same way a real multi-hour
-drive would. `traffic_base_datetime` (and therefore all congestion math)
-is anchored to `SIMULATION_TIMEZONE` (`America/Chicago`), not the
+drive would. `traffic_base_datetime` defaults to the current [game
+time](#game-time) (not real wall-clock time) and, like the game clock
+itself, is anchored to `SIMULATION_TIMEZONE` (`America/Chicago`), not the
 container's system clock (which is UTC) — otherwise "rush hour" would be
 keyed to whatever the UTC offset happens to be rather than a real local
 clock.
@@ -337,6 +375,8 @@ All endpoints are on the `backend` service, default `http://localhost:5000`.
 
 | Method & path                  | Description |
 |---------------------------------|-------------|
+| `GET /api/settings`             | Current game clock: `{time_multiplier, game_time}` |
+| `PUT /api/settings`             | Change `time_multiplier`. Body: `{time_multiplier}` — re-anchors the game clock at its current value so it speeds up/slows down rather than jumping |
 | `POST /api/vehicles`            | Create a vehicle. Body: `{name, spec_id}`. Response includes the resolved `spec` |
 | `GET /api/vehicles`             | List vehicles with computed `status` (`READY`/`DRIVING`/`SOLD`) and each vehicle's `spec`. Defaults to the current fleet (`sold = false`, "My Vehicles"); `?include_sold=true` returns full history ("All Vehicles") |
 | `POST /api/vehicles/{id}/sell`  | Mark a vehicle sold (soft-delete). 409 if already sold or currently on a trip |
@@ -406,14 +446,17 @@ Five tabs in the side panel:
   speed, and time remaining.
 
 A clock in the top-right corner of the map (`updateSimClock()`) shows the
-current day of week and time in `SIMULATION_TIMEZONE` — the same clock
-[the traffic model](#traffic-model) judges rush hour against — with a
-"Rush Hour" badge when it's currently a weekday 7-9am or 4-6pm. It's a
-plain client-side clock (no API call), computed from `Intl.DateTimeFormat`
-with `timeZone: "America/Chicago"`, so it only ever reflects real
-wall-clock time — a trip started with a custom `simulated_datetime` still
-experiences its own overridden clock server-side, this display doesn't
-change to match it.
+current [game time](#game-time) — the same clock the traffic model judges
+rush hour against — with a "Rush Hour" badge when it's currently a
+weekday 7-9am or 4-6pm, and a "Time x" control next to it to change
+`time_multiplier` (`setTimeMultiplier()`, `PUT /api/settings`). Rather
+than calling `GET /api/settings` every second, `loadSettings()` fetches
+it every 5s and `updateSimClock()` extrapolates forward from that anchor
+each second (`gameClockAnchor` in `app.js`) so the clock ticks smoothly
+in between; the 5s refresh also re-syncs against a multiplier change made
+from another browser/tab. A trip started with a custom
+`simulated_datetime` still experiences its own overridden clock
+server-side — this display doesn't change to match it, same as before.
 
 The map polls `GET /api/trips/active` every second and updates markers/
 tooltips in place (`pollActiveTrips()`), rather than re-rendering

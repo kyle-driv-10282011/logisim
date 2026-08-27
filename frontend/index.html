@@ -43,6 +43,24 @@
             line-height: 1.4;
         }
 
+        #time-multiplier-control {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            margin-top: 4px;
+            font-size: 11px;
+            color: #555;
+        }
+
+        #time-multiplier-input {
+            width: 55px;
+        }
+
+        #time-multiplier-control button {
+            font-size: 11px;
+            padding: 1px 6px;
+        }
+
         .rush-badge {
             display: inline-block;
             margin-left: 6px;
@@ -258,7 +276,14 @@
 
 <div id="main">
     <div id="map"></div>
-    <div id="sim-clock"></div>
+    <div id="sim-clock">
+        <div id="sim-clock-text"></div>
+        <div id="time-multiplier-control">
+            <label for="time-multiplier-input">Time x</label>
+            <input id="time-multiplier-input" type="number" min="0.1" step="1">
+            <button onclick="setTimeMultiplier()">Set</button>
+        </div>
+    </div>
 </div>
 
 <div id="vehicle-panel">

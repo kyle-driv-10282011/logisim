@@ -15,15 +15,100 @@ const INTERSTATE_MIN_MPH = 55;
 const ARTERIAL_MIN_MPH = 35;
 const TIER_DEFAULT_MPH = { interstate: 70, arterial: 50, local: 30 };
 
-//
-// Same timezone as the backend's SIMULATION_TIMEZONE (app.py) - all rush
-// hour congestion is judged against this local clock, not the browser's
-// own timezone, so the on-page clock has to match it to make sense of
-// why a trip is (or isn't) currently seeing rush-hour slowdown.
-//
-const SIMULATION_TIMEZONE = "America/Chicago";
-
 let map;
+
+//
+// The game clock (app.py's get_settings()) is transmitted as a naive
+// local wall-clock string (e.g. "2026-08-27T13:15:00.123456", no
+// timezone/offset - see settings_dict() in app.py). gameClockAnchor
+// holds the last fetch: {gameTimeMs, realTimeMs, multiplier}, where
+// gameTimeMs/realTimeMs are both epoch milliseconds. Every second,
+// updateSimClock() extrapolates forward from this anchor rather than
+// polling every tick, so the clock ticks smoothly between the periodic
+// GET /api/settings refreshes (loadSettings()).
+//
+let gameClockAnchor = null;
+
+
+//
+// Parses the naive local string as if it were UTC (appending "Z" forces
+// that) so its digits are preserved exactly - formatting later with
+// timeZone: "UTC" reads those same digits back out unchanged. This
+// avoids ever reinterpreting the value through the *browser's* own
+// timezone, which would misrepresent it since it's not a real UTC instant.
+//
+function parseGameTime(iso) {
+
+    return new Date(iso + "Z");
+}
+
+
+async function loadSettings() {
+
+    const response = await fetch(API + "/api/settings");
+    const settings = await response.json();
+
+    gameClockAnchor = {
+
+        gameTimeMs: parseGameTime(settings.game_time).getTime(),
+
+        realTimeMs: Date.now(),
+
+        multiplier: settings.time_multiplier
+    };
+
+    //
+    // Don't clobber the input while the user is mid-edit typing a new value.
+    //
+    const input = document.getElementById("time-multiplier-input");
+
+    if (document.activeElement !== input) {
+        input.value = settings.time_multiplier;
+    }
+
+    updateSimClock();
+}
+
+
+async function setTimeMultiplier() {
+
+    const value = Number(document.getElementById("time-multiplier-input").value);
+
+    if (!(value > 0)) {
+        alert("Time multiplier must be positive");
+        return;
+    }
+
+    const response = await fetch(API + "/api/settings", {
+
+        method: "PUT",
+
+        headers: {
+            "Content-Type": "application/json"
+        },
+
+        body: JSON.stringify({ time_multiplier: value })
+
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+        alert(data.detail || "Could not update time multiplier");
+        return;
+    }
+
+    gameClockAnchor = {
+
+        gameTimeMs: parseGameTime(data.game_time).getTime(),
+
+        realTimeMs: Date.now(),
+
+        multiplier: data.time_multiplier
+    };
+
+    updateSimClock();
+}
 
 const tripLayers = new Map();      // vehicle_id -> { marker, routeLine }
 let specsById = new Map();         // spec_id -> vehicle spec (from GET /api/vehicle-specs)
@@ -1431,14 +1516,17 @@ function setsEqual(a, b) {
 
 //
 // Mirrors the backend's is_rush_hour() (app.py): weekday, and either
-// 7-9am or 4-6pm. hourCycle: "h23" avoids Intl's well-known quirk of
-// formatting midnight as hour "24" instead of "0".
+// 7-9am or 4-6pm. `gameDate` was built by parseGameTime()/updateSimClock()
+// treating the naive game-time digits as UTC, so timeZone: "UTC" here
+// reads those same digits back out rather than converting through the
+// browser's own timezone. hourCycle: "h23" avoids Intl's well-known
+// quirk of formatting midnight as hour "24" instead of "0".
 //
-function isRushHour(date) {
+function isRushHour(gameDate) {
 
     const parts = new Intl.DateTimeFormat("en-US", {
 
-        timeZone: SIMULATION_TIMEZONE,
+        timeZone: "UTC",
 
         weekday: "short",
 
@@ -1446,7 +1534,7 @@ function isRushHour(date) {
 
         hourCycle: "h23"
 
-    }).formatToParts(date);
+    }).formatToParts(gameDate);
 
     const weekday = parts.find((part) => part.type === "weekday").value;
     const hour = Number(parts.find((part) => part.type === "hour").value);
@@ -1459,11 +1547,24 @@ function isRushHour(date) {
 
 function updateSimClock() {
 
-    const now = new Date();
+    const clockText = document.getElementById("sim-clock-text");
+
+    if (!gameClockAnchor) {
+        clockText.textContent = "Loading game clock...";
+        return;
+    }
+
+    //
+    // Extrapolate forward from the last GET /api/settings fetch rather
+    // than fetching every tick - 1 real ms since that fetch is
+    // `multiplier` game ms.
+    //
+    const elapsedRealMs = Date.now() - gameClockAnchor.realTimeMs;
+    const gameDate = new Date(gameClockAnchor.gameTimeMs + elapsedRealMs * gameClockAnchor.multiplier);
 
     const formatted = new Intl.DateTimeFormat("en-US", {
 
-        timeZone: SIMULATION_TIMEZONE,
+        timeZone: "UTC",
 
         weekday: "long",
 
@@ -1473,21 +1574,29 @@ function updateSimClock() {
 
         hour12: true
 
-    }).format(now);
+    }).format(gameDate);
 
-    document.getElementById("sim-clock").innerHTML =
-        formatted + (isRushHour(now) ? ' <span class="rush-badge">Rush Hour</span>' : "");
+    clockText.innerHTML =
+        formatted + (isRushHour(gameDate) ? ' <span class="rush-badge">Rush Hour</span>' : "");
 }
 
 
 loadSpecs().then(loadVehicles);
 loadPaths();
 
-updateSimClock();
+loadSettings();
 
 setInterval(pollActiveTrips, 1000);
 
 setInterval(updateSimClock, 1000);
+
+//
+// Re-syncs against the backend's own anchor every few seconds, correcting
+// for client clock drift and picking up a multiplier change made from
+// another browser/tab - the 1s updateSimClock() tick above just
+// extrapolates smoothly between these refreshes.
+//
+setInterval(loadSettings, 5000);
 
 setInterval(() => {
 

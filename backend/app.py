@@ -19,10 +19,13 @@ logger = logging.getLogger("uvicorn.error")
 
 
 #
-# Real drive time is compressed into simulated time by this factor,
-# e.g. a 5 hour drive plays out over 5 minutes.
+# Game time runs at time_multiplier x real speed (e.g. a 5 hour drive
+# plays out over 5 minutes at multiplier=60) - this is now a live,
+# database-backed setting (see the `settings` table and get_settings()
+# below) rather than a hardcoded constant, adjustable via
+# PUT /api/settings. Used only to seed that row the first time it's read.
 #
-TIME_COMPRESSION = 60
+DEFAULT_TIME_MULTIPLIER = 60
 
 #
 # How long (in real seconds) an arrived trip keeps showing up in
@@ -121,6 +124,49 @@ def to_local_naive(dt):
         return dt.astimezone(SIMULATION_TIMEZONE).replace(tzinfo=None)
 
     return dt
+
+
+def ensure_settings_row(conn, cur):
+
+    #
+    # Seeded lazily on first use rather than in init.sql, using Python's
+    # own clock for both anchors - anchor_real_utc has to be genuinely
+    # comparable to datetime.utcnow() (see get_settings() below), which
+    # NOW() at the Postgres level can't guarantee without depending on
+    # the container's configured timezone matching that assumption.
+    #
+    cur.execute(
+        """
+        INSERT INTO settings (id, time_multiplier, anchor_real_utc, anchor_game_time)
+        VALUES (1, %s, %s, %s)
+        ON CONFLICT (id) DO NOTHING
+        """,
+        (DEFAULT_TIME_MULTIPLIER, datetime.utcnow(), local_now_naive())
+    )
+
+    conn.commit()
+
+
+def get_settings(conn, cur):
+
+    #
+    # The game clock is derived on every read from an anchor pair, not
+    # stored directly - it was anchor_game_time at the real UTC moment
+    # anchor_real_utc, and has advanced at time_multiplier x real speed
+    # ever since. Comparing against datetime.utcnow() (not local_now_naive())
+    # here since anchor_real_utc is always written from datetime.utcnow().
+    #
+    ensure_settings_row(conn, cur)
+
+    cur.execute("SELECT time_multiplier, anchor_real_utc, anchor_game_time FROM settings WHERE id = 1")
+
+    multiplier, anchor_real_utc, anchor_game_time = cur.fetchone()
+
+    elapsed_real_seconds = (datetime.utcnow() - anchor_real_utc).total_seconds()
+
+    game_time = anchor_game_time + timedelta(seconds=elapsed_real_seconds * multiplier)
+
+    return multiplier, game_time
 
 
 def is_rush_hour(effective_dt):
@@ -400,10 +446,11 @@ def derive_position(
     realized_duration_seconds,
     traffic_base_datetime,
     traffic_bias,
-    elapsed_real_seconds
+    elapsed_real_seconds,
+    time_multiplier
 ):
 
-    elapsed_seconds = elapsed_real_seconds * TIME_COMPRESSION
+    elapsed_seconds = elapsed_real_seconds * time_multiplier
 
     if elapsed_seconds >= realized_duration_seconds:
 
@@ -468,7 +515,7 @@ def derive_position(
 
         "status": "DRIVING",
 
-        "remaining_sim_seconds": (realized_duration_seconds - elapsed_seconds) / TIME_COMPRESSION,
+        "remaining_sim_seconds": (realized_duration_seconds - elapsed_seconds) / time_multiplier,
 
         "speed_mph": round(speed_mph, 1),
 
@@ -648,6 +695,12 @@ class CreateVehicleRequest(BaseModel):
 
 
 
+class UpdateSettingsRequest(BaseModel):
+
+    time_multiplier: float
+
+
+
 class CreateVehicleSpecRequest(BaseModel):
 
     year: int
@@ -711,6 +764,72 @@ class StartTripRequest(BaseModel):
     #
     simulated_datetime: Optional[datetime] = None
     traffic_bias: float = 1.0
+
+
+
+def settings_dict(time_multiplier, game_time):
+
+    return {
+
+        "time_multiplier": time_multiplier,
+
+        #
+        # Naive local wall-clock value (no tzinfo, no UTC offset) - the
+        # frontend treats these digits as literal calendar/clock values
+        # (parsing/formatting both as UTC) rather than converting through
+        # the browser's own timezone. See updateSimClock() in app.js.
+        #
+        "game_time": game_time.isoformat()
+    }
+
+
+
+@app.get("/api/settings")
+def read_settings():
+
+    conn = db()
+    cur = conn.cursor()
+
+    time_multiplier, game_time = get_settings(conn, cur)
+
+    cur.close()
+    conn.close()
+
+    return settings_dict(time_multiplier, game_time)
+
+
+
+@app.put("/api/settings")
+def update_settings(req: UpdateSettingsRequest):
+
+    if req.time_multiplier <= 0:
+        raise HTTPException(status_code=400, detail="time_multiplier must be positive")
+
+    conn = db()
+    cur = conn.cursor()
+
+    #
+    # Re-anchor at the game time the OLD multiplier had reached, right
+    # before switching - so changing the multiplier speeds up/slows down
+    # the clock from here, rather than jumping it to a different value.
+    #
+    _, game_time = get_settings(conn, cur)
+
+    cur.execute(
+        """
+        UPDATE settings
+        SET time_multiplier = %s, anchor_real_utc = %s, anchor_game_time = %s
+        WHERE id = 1
+        """,
+        (req.time_multiplier, datetime.utcnow(), game_time)
+    )
+
+    conn.commit()
+
+    cur.close()
+    conn.close()
+
+    return settings_dict(req.time_multiplier, game_time)
 
 
 
@@ -855,6 +974,8 @@ def list_vehicles(include_sold: bool = False):
     conn = db()
     cur = conn.cursor()
 
+    time_multiplier, _ = get_settings(conn, cur)
+
     #
     # "My Vehicles" (the current fleet, include_sold=False - the default)
     # filters to sold = FALSE; "All Vehicles" (include_sold=True) is the
@@ -884,7 +1005,7 @@ def list_vehicles(include_sold: bool = False):
         {"" if include_sold else "WHERE v.sold = FALSE"}
         ORDER BY v.id
         """,
-        (TIME_COMPRESSION,)
+        (time_multiplier,)
     )
 
     rows = cur.fetchall()
@@ -934,6 +1055,8 @@ def sell_vehicle(id: int):
         conn.close()
         raise HTTPException(status_code=409, detail="Vehicle already sold")
 
+    time_multiplier, _ = get_settings(conn, cur)
+
     cur.execute(
         """
         SELECT 1
@@ -941,7 +1064,7 @@ def sell_vehicle(id: int):
         WHERE t.vehicle_id = %s
         AND EXTRACT(EPOCH FROM (NOW() - t.started_at)) < t.realized_duration_seconds / %s
         """,
-        (id, TIME_COMPRESSION)
+        (id, time_multiplier)
     )
 
     if cur.fetchone() is not None:
@@ -999,6 +1122,8 @@ def vehicle_city(id: int):
     conn = db()
     cur = conn.cursor()
 
+    time_multiplier, _ = get_settings(conn, cur)
+
     cur.execute(
         """
         SELECT
@@ -1021,7 +1146,7 @@ def vehicle_city(id: int):
         ORDER BY t.started_at DESC
         LIMIT 1
         """,
-        (id, TIME_COMPRESSION, ARRIVAL_GRACE_SECONDS)
+        (id, time_multiplier, ARRIVAL_GRACE_SECONDS)
     )
 
     row = cur.fetchone()
@@ -1059,7 +1184,8 @@ def vehicle_city(id: int):
         realized_duration_seconds,
         traffic_base_datetime,
         traffic_bias,
-        float(elapsed_real_seconds)
+        float(elapsed_real_seconds),
+        time_multiplier
     )
 
     return {"city": reverse_geocode(derived["position"])}
@@ -1497,6 +1623,8 @@ def start_trip(req: StartTripRequest):
 
     route, distances_miles, max_speeds_mph = path_row
 
+    time_multiplier, game_time = get_settings(conn, cur)
+
     cur.execute(
         """
         SELECT 1
@@ -1504,7 +1632,7 @@ def start_trip(req: StartTripRequest):
         WHERE t.vehicle_id = %s
         AND EXTRACT(EPOCH FROM (NOW() - t.started_at)) < t.realized_duration_seconds / %s
         """,
-        (req.vehicle_id, TIME_COMPRESSION)
+        (req.vehicle_id, time_multiplier)
     )
 
     if cur.fetchone() is not None:
@@ -1512,8 +1640,15 @@ def start_trip(req: StartTripRequest):
         conn.close()
         raise HTTPException(status_code=409, detail="Vehicle already on a trip")
 
+    #
+    # A trip departs "now" in game time (not real wall-clock time) unless
+    # the caller explicitly overrides it - the game clock is what the
+    # traffic model's rush-hour windows are judged against throughout the
+    # trip (build_trip_schedule()/derive_position() below), consistent
+    # with the clock shown in the frontend.
+    #
     traffic_base_datetime = (
-        to_local_naive(req.simulated_datetime) if req.simulated_datetime else local_now_naive()
+        to_local_naive(req.simulated_datetime) if req.simulated_datetime else game_time
     )
 
     #
@@ -1573,7 +1708,7 @@ def start_trip(req: StartTripRequest):
 
         "duration_seconds": realized_duration_seconds,
 
-        "sim_duration_seconds": realized_duration_seconds / TIME_COMPRESSION,
+        "sim_duration_seconds": realized_duration_seconds / time_multiplier,
 
         "status": "DRIVING"
     }
@@ -1585,6 +1720,8 @@ def active_trips():
 
     conn = db()
     cur = conn.cursor()
+
+    time_multiplier, _ = get_settings(conn, cur)
 
     cur.execute(
         """
@@ -1609,7 +1746,7 @@ def active_trips():
         JOIN paths p ON p.id = t.path_id
         WHERE EXTRACT(EPOCH FROM (NOW() - t.started_at)) < (t.realized_duration_seconds / %s) + %s
         """,
-        (TIME_COMPRESSION, ARRIVAL_GRACE_SECONDS)
+        (time_multiplier, ARRIVAL_GRACE_SECONDS)
     )
 
     rows = cur.fetchall()
@@ -1649,7 +1786,8 @@ def active_trips():
             realized_duration_seconds,
             traffic_base_datetime,
             traffic_bias,
-            float(elapsed_real_seconds)
+            float(elapsed_real_seconds),
+            time_multiplier
         )
 
         trips.append({

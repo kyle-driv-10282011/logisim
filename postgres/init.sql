@@ -1,3 +1,30 @@
+CREATE TABLE settings (
+
+    id INTEGER PRIMARY KEY,
+
+    -- How fast game time runs relative to real time (e.g. 60 = one real
+    -- second is one game minute). Replaces the old hardcoded
+    -- TIME_COMPRESSION constant - this is the single knob for all
+    -- time-based behavior (trip playback speed AND the displayed clock).
+    time_multiplier DOUBLE PRECISION NOT NULL,
+
+    -- The game clock is derived, not stored directly: it was
+    -- anchor_game_time at the real UTC moment anchor_real_utc, and has
+    -- advanced at time_multiplier x real speed ever since. Re-anchored
+    -- every time time_multiplier changes (PUT /api/settings) so the game
+    -- clock stays continuous across a multiplier change instead of
+    -- jumping. This row is seeded lazily by the backend (get_settings()
+    -- in app.py) using Python's own clock, not NOW() here - that keeps
+    -- anchor_real_utc genuinely comparable to Python's datetime.utcnow()
+    -- without depending on the Postgres container's configured timezone.
+    anchor_real_utc TIMESTAMP NOT NULL,
+
+    anchor_game_time TIMESTAMP NOT NULL,
+
+    CONSTRAINT settings_single_row CHECK (id = 1)
+);
+
+
 CREATE TABLE vehicle_specs (
 
     id SERIAL PRIMARY KEY,
