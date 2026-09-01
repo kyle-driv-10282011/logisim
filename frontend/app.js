@@ -364,6 +364,22 @@ async function loadVehicles() {
 }
 
 
+//
+// A vehicle's settled total_miles_traveled (from GET /api/vehicles) only
+// picks up a trip once it's arrived - while DRIVING, the distance covered
+// so far on the current trip comes from the live poll (GET
+// /api/trips/active's distance_miles, see derive_position()) instead, so
+// the odometer shown in the vehicle lists keeps ticking up in real time.
+//
+function vehicleTotalMiles(vehicle) {
+
+    const trip = activeTripsById.get(vehicle.id);
+    const liveMiles = trip && trip.status === "DRIVING" ? trip.distance_miles : 0;
+
+    return vehicle.total_miles_traveled + liveMiles;
+}
+
+
 function renderVehicleList() {
 
     const list = document.getElementById("vehicle-list");
@@ -396,6 +412,7 @@ function renderVehicleList() {
             `<span>${vehicle.name}` +
             (vehicle.spec ? ` (${specLabel(vehicle.spec)})` : "") +
             ` &middot; ${vehicle.current_location} ` +
+            `&middot; ${Math.round(vehicleTotalMiles(vehicle)).toLocaleString()} mi ` +
             `<span class="status-badge status-${vehicle.status}">${vehicle.status}</span></span></span>` +
             (vehicle.status === "READY"
                 ? `<button class="sell-button" data-id="${vehicle.id}">Sell</button>`
@@ -442,6 +459,7 @@ function renderAllVehicleList() {
             `<span>${vehicle.name}` +
             (vehicle.spec ? ` (${specLabel(vehicle.spec)})` : "") +
             ` &middot; ${vehicle.current_location} ` +
+            `&middot; ${Math.round(vehicleTotalMiles(vehicle)).toLocaleString()} mi ` +
             `<span class="status-badge status-${vehicle.status}">${vehicle.status}</span></span></span>`;
 
         list.appendChild(item);
@@ -699,7 +717,9 @@ async function addVehicle() {
 
             spec_id: Number(specId),
 
-            current_location: document.getElementById("vehicle-location").value
+            current_location: document.getElementById("vehicle-location").value,
+
+            starting_mileage: Number(document.getElementById("vehicle-starting-mileage").value || 0)
 
         })
 
@@ -1607,6 +1627,15 @@ async function pollActiveTrips() {
     }
 
     renderInRouteList();
+
+    //
+    // Keeps each vehicle's displayed odometer (starting_mileage + its
+    // settled total + whatever it's covered on its current trip so far)
+    // ticking up live while driving, not just once the trip arrives.
+    //
+    renderVehicleList();
+    renderAllVehicleList();
+
     updateTimeMultiplierControlState();
 
     if (!setsEqual(seen, activeVehicleIds)) {

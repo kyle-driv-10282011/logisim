@@ -533,7 +533,9 @@ def derive_position(
 
             "speed_mph": 0,
 
-            "road_name": current_road_name(road_names, road_name_boundary_miles, distances_miles[-1])
+            "road_name": current_road_name(road_names, road_name_boundary_miles, distances_miles[-1]),
+
+            "distance_miles": distances_miles[-1]
         }
 
     #
@@ -588,7 +590,9 @@ def derive_position(
 
         "speed_mph": round(speed_mph, 1),
 
-        "road_name": road_name
+        "road_name": road_name,
+
+        "distance_miles": current_distance
     }
 
 
@@ -672,6 +676,26 @@ def db():
         "password=simulator_password "
         "host=postgres"
     )
+
+
+@app.on_event("startup")
+def run_migrations():
+
+    #
+    # init.sql only runs against a brand-new postgres volume, so a column
+    # added after someone's DB already exists needs its own migration -
+    # this one's additive (has a default) and idempotent, safe to run
+    # against a fresh DB too (where init.sql already created the column).
+    #
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS starting_mileage DOUBLE PRECISION NOT NULL DEFAULT 0")
+
+    conn.commit()
+
+    cur.close()
+    conn.close()
 
 
 def zone_dict(row):
@@ -779,6 +803,13 @@ class CreateVehicleRequest(BaseModel):
     # can start a trip on) is done on those coordinates, not this text.
     #
     current_location: str
+
+    #
+    # Odometer reading at the moment this vehicle joins the fleet (e.g. a
+    # used vehicle bought with miles already on it) - added to every mile
+    # it drives afterward to get its displayed total (see list_vehicles()).
+    #
+    starting_mileage: float = 0
 
 
 
@@ -972,11 +1003,11 @@ def create_vehicle(req: CreateVehicleRequest):
 
     cur.execute(
         """
-        INSERT INTO vehicles (name, spec_id, current_lat, current_lng)
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO vehicles (name, spec_id, current_lat, current_lng, starting_mileage)
+        VALUES (%s, %s, %s, %s, %s)
         RETURNING id
         """,
-        (req.name, req.spec_id, current_lat, current_lng)
+        (req.name, req.spec_id, current_lat, current_lng, req.starting_mileage)
     )
 
     vehicle_id = cur.fetchone()[0]
@@ -1001,6 +1032,14 @@ def create_vehicle(req: CreateVehicleRequest):
         "current_lat": current_lat,
 
         "current_lng": current_lng,
+
+        "starting_mileage": req.starting_mileage,
+
+        #
+        # A brand-new vehicle has no trips yet, so its total is just what
+        # it started with.
+        #
+        "total_miles_traveled": req.starting_mileage,
 
         "status": "READY"
     }
@@ -1115,6 +1154,12 @@ def list_vehicles(include_sold: bool = False):
     # clause (only the bool toggles which literal is used), so it's safe
     # to splice in rather than parameterize.
     #
+    # completed_trip_miles sums, per vehicle, the full length of every path
+    # driven on a trip that's actually arrived (same "arrived" condition as
+    # the DRIVING check below) - a trip in progress contributes its
+    # partial distance separately, via GET /api/trips/active's own
+    # distance_miles (see derive_position()), not here.
+    #
     cur.execute(
         f"""
         SELECT
@@ -1123,6 +1168,7 @@ def list_vehicles(include_sold: bool = False):
             v.spec_id,
             v.current_lat,
             v.current_lng,
+            v.starting_mileage,
             v.sold,
             v.sold_at,
             CASE
@@ -1134,12 +1180,20 @@ def list_vehicles(include_sold: bool = False):
                     AND EXTRACT(EPOCH FROM (NOW() - t.started_at)) < t.realized_duration_seconds / %s
                 ) THEN 'DRIVING'
                 ELSE 'READY'
-            END
+            END,
+            COALESCE(ctm.miles, 0)
         FROM vehicles v
+        LEFT JOIN (
+            SELECT t.vehicle_id, SUM((p.distances_miles ->> -1)::double precision) AS miles
+            FROM trips t
+            JOIN paths p ON p.id = t.path_id
+            WHERE EXTRACT(EPOCH FROM (NOW() - t.started_at)) >= t.realized_duration_seconds / %s
+            GROUP BY t.vehicle_id
+        ) ctm ON ctm.vehicle_id = v.id
         {"" if include_sold else "WHERE v.sold = FALSE"}
         ORDER BY v.id
         """,
-        (time_multiplier,)
+        (time_multiplier, time_multiplier)
     )
 
     rows = cur.fetchall()
@@ -1164,11 +1218,15 @@ def list_vehicles(include_sold: bool = False):
 
             "current_lng": row[4],
 
-            "sold": row[5],
+            "starting_mileage": row[5],
 
-            "sold_at": row[6],
+            "total_miles_traveled": row[5] + row[9],
 
-            "status": row[7]
+            "sold": row[6],
+
+            "sold_at": row[7],
+
+            "status": row[8]
         }
         for row in rows
     ]

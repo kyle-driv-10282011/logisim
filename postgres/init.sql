@@ -69,6 +69,12 @@ CREATE TABLE vehicles (
 
     current_lng DOUBLE PRECISION NOT NULL,
 
+    -- Odometer reading at the moment this vehicle was added to the fleet
+    -- (e.g. a used vehicle bought with miles already on it). The vehicle's
+    -- displayed total is this plus every trip it's driven since - see
+    -- list_vehicles() in app.py.
+    starting_mileage DOUBLE PRECISION NOT NULL DEFAULT 0,
+
     -- Hauling specs (year/brand/model/capacity/cost/mpg/image) live on the
     -- reusable spec, not duplicated per vehicle - same pattern as paths
     -- being reused across trips instead of storing route data per trip.
