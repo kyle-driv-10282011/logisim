@@ -1406,6 +1406,12 @@ async function removeZone(zoneId) {
 
 function previewPath(path) {
 
+    if (selectedVehicleId !== null) {
+        selectedVehicleId = null;
+        renderInRouteList();
+        renderVehicleList();
+    }
+
     map.fitBounds(L.latLngBounds(path.route));
 
     renderZoneEditor(path);
