@@ -57,24 +57,17 @@ CREATE TABLE vehicles (
 
     name TEXT NOT NULL,
 
-    -- Where the vehicle currently is - matched case-insensitively against
-    -- a path's `origin` (same convention as paths.origin/destination
-    -- lookup) to restrict which paths a vehicle can start a trip on. Set
-    -- at creation, then updated to a trip's destination once that trip
+    -- Where the vehicle currently is, matched (within ROUND_DECIMALS
+    -- precision - see app.py) against a path's origin_lat/origin_lng to
+    -- restrict which paths a vehicle can start a trip on. Set at creation,
+    -- then updated to a trip's destination coordinates once that trip
     -- arrives (settle_arrived_vehicles() in app.py) - not touched while
     -- a trip is in progress, so it reflects the last place the vehicle
     -- was confirmed to be, not a live position (see the `trips` live
     -- position/road-name fields for that).
-    current_location TEXT NOT NULL,
+    current_lat DOUBLE PRECISION NOT NULL,
 
-    -- [lat, lon] for current_location - geocoded once at creation (see
-    -- geocode() in app.py), then kept in sync with current_location by
-    -- reusing the arrived path's own route endpoint coordinates (no
-    -- extra geocoding call needed - see settle_arrived_vehicles()).
-    -- Lets the frontend center the map on a vehicle that isn't currently
-    -- driving (a driving vehicle's live position instead comes from its
-    -- active trip - see trips/derive_position()).
-    current_position JSONB NOT NULL,
+    current_lng DOUBLE PRECISION NOT NULL,
 
     -- Hauling specs (year/brand/model/capacity/cost/mpg/image) live on the
     -- reusable spec, not duplicated per vehicle - same pattern as paths
@@ -95,9 +88,13 @@ CREATE TABLE paths (
 
     id SERIAL PRIMARY KEY,
 
-    origin TEXT NOT NULL,
+    origin_lat DOUBLE PRECISION NOT NULL,
 
-    destination TEXT NOT NULL,
+    origin_lng DOUBLE PRECISION NOT NULL,
+
+    destination_lat DOUBLE PRECISION NOT NULL,
+
+    destination_lng DOUBLE PRECISION NOT NULL,
 
     route JSONB NOT NULL,
 

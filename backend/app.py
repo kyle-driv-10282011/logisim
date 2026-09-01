@@ -172,23 +172,20 @@ def get_settings(conn, cur):
 def settle_arrived_vehicles(conn, cur, time_multiplier):
 
     #
-    # A vehicle's current_location/current_position only updates once its
-    # most recent trip has actually arrived (real elapsed time since
-    # started_at has passed the compressed playback duration - same
-    # condition list_vehicles()/active_trips() use to decide DRIVING vs
-    # not) - not the instant a trip is created, and not continuously
-    # while driving. `p.route -> -1` (Postgres supports negative JSONB
-    # array indices) is the path's own destination coordinate - reusing
-    # it needs no extra geocoding call. A single bulk UPDATE covers every
-    # vehicle at once rather than looping per vehicle; IS DISTINCT FROM
-    # skips vehicles already settled at that destination so this is cheap
-    # to call on every read.
+    # A vehicle's current_lat/current_lng only updates once its most
+    # recent trip has actually arrived (real elapsed time since started_at
+    # has passed the compressed playback duration - same condition
+    # list_vehicles()/active_trips() use to decide DRIVING vs not) - not
+    # the instant a trip is created, and not continuously while driving.
+    # A single bulk UPDATE covers every vehicle at once rather than
+    # looping per vehicle; IS DISTINCT FROM skips vehicles already settled
+    # at that destination so this is cheap to call on every read.
     #
     cur.execute(
         """
         UPDATE vehicles v
-        SET current_location = p.destination,
-            current_position = p.route -> -1
+        SET current_lat = p.destination_lat,
+            current_lng = p.destination_lng
         FROM trips t
         JOIN paths p ON p.id = t.path_id
         WHERE t.id = (
@@ -199,7 +196,7 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
         )
         AND t.vehicle_id = v.id
         AND EXTRACT(EPOCH FROM (NOW() - t.started_at)) >= t.realized_duration_seconds / %s
-        AND v.current_location IS DISTINCT FROM p.destination
+        AND (v.current_lat IS DISTINCT FROM p.destination_lat OR v.current_lng IS DISTINCT FROM p.destination_lng)
         """,
         (time_multiplier,)
     )
@@ -357,17 +354,19 @@ geolocator = Nominatim(user_agent="logisim-vehicle-sim")
 reverse_geocode_limited = RateLimiter(geolocator.reverse, min_delay_seconds=1)
 
 
-def geocode(place):
+#
+# Locations are entered as raw lat/lng, not geocoded from a place name.
+# Rounding to a fixed precision (~1m) before storing/comparing means two
+# independently-typed coordinates for "the same place" (e.g. a vehicle's
+# current_lat/lng and a path's origin_lat/lng) still compare equal despite
+# whatever float noise came in from the client.
+#
+ROUND_DECIMALS = 5
 
-    location = geolocator.geocode(place)
 
-    if location is None:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Could not geocode location: {place}"
-        )
+def round_coord(value):
 
-    return (location.latitude, location.longitude)
+    return round(value, ROUND_DECIMALS)
 
 
 def road_route(origin_coords, destination_coords):
@@ -732,12 +731,12 @@ class CreateVehicleRequest(BaseModel):
     spec_id: int
 
     #
-    # Free text, matched case-insensitively against a path's `origin` -
-    # same convention as paths.origin/destination lookup, not geocoded
-    # (a vehicle's location is just a label to match trips against, not
-    # a point that needs coordinates).
+    # Matched (within ROUND_DECIMALS precision) against a path's
+    # origin_lat/origin_lng to decide which paths this vehicle can start
+    # a trip on.
     #
-    current_location: str
+    current_lat: float
+    current_lng: float
 
 
 
@@ -768,8 +767,10 @@ class CreateVehicleSpecRequest(BaseModel):
 
 class CreatePathRequest(BaseModel):
 
-    origin: str
-    destination: str
+    origin_lat: float
+    origin_lng: float
+    destination_lat: float
+    destination_lng: float
 
 
 
@@ -907,13 +908,8 @@ def update_settings(req: UpdateSettingsRequest):
 @app.post("/api/vehicles")
 def create_vehicle(req: CreateVehicleRequest):
 
-    #
-    # Geocoded up front (same as create_path()'s origin/destination) so a
-    # bad location name fails fast, before touching the DB - and so the
-    # frontend can center the map on a resting vehicle (current_position)
-    # without a live trip to derive a position from.
-    #
-    current_position = geocode(req.current_location)
+    current_lat = round_coord(req.current_lat)
+    current_lng = round_coord(req.current_lng)
 
     conn = db()
     cur = conn.cursor()
@@ -927,11 +923,11 @@ def create_vehicle(req: CreateVehicleRequest):
 
     cur.execute(
         """
-        INSERT INTO vehicles (name, spec_id, current_location, current_position)
+        INSERT INTO vehicles (name, spec_id, current_lat, current_lng)
         VALUES (%s, %s, %s, %s)
         RETURNING id
         """,
-        (req.name, req.spec_id, req.current_location, json.dumps(current_position))
+        (req.name, req.spec_id, current_lat, current_lng)
     )
 
     vehicle_id = cur.fetchone()[0]
@@ -951,9 +947,9 @@ def create_vehicle(req: CreateVehicleRequest):
 
         "spec": spec,
 
-        "current_location": req.current_location,
+        "current_lat": current_lat,
 
-        "current_position": current_position,
+        "current_lng": current_lng,
 
         "status": "READY"
     }
@@ -1074,8 +1070,8 @@ def list_vehicles(include_sold: bool = False):
             v.id,
             v.name,
             v.spec_id,
-            v.current_location,
-            v.current_position,
+            v.current_lat,
+            v.current_lng,
             v.sold,
             v.sold_at,
             CASE
@@ -1111,9 +1107,9 @@ def list_vehicles(include_sold: bool = False):
 
             "spec": specs_by_id.get(row[2]),
 
-            "current_location": row[3],
+            "current_lat": row[3],
 
-            "current_position": row[4],
+            "current_lng": row[4],
 
             "sold": row[5],
 
@@ -1286,21 +1282,27 @@ def vehicle_city(id: int):
 @app.post("/api/paths")
 def create_path(req: CreatePathRequest):
 
+    origin_lat = round_coord(req.origin_lat)
+    origin_lng = round_coord(req.origin_lng)
+    destination_lat = round_coord(req.destination_lat)
+    destination_lng = round_coord(req.destination_lng)
+
     conn = db()
     cur = conn.cursor()
 
     #
-    # Same origin/destination (case-insensitive) is the same path - return
-    # the existing one instead of geocoding/routing and inserting a duplicate.
+    # Same origin/destination coordinates is the same path - return the
+    # existing one instead of re-routing and inserting a duplicate.
     #
     cur.execute(
         """
-        SELECT id, origin, destination, route, distances_miles,
-            max_speeds_mph, road_names, road_name_boundary_miles
+        SELECT id, origin_lat, origin_lng, destination_lat, destination_lng,
+            route, distances_miles, max_speeds_mph, road_names, road_name_boundary_miles
         FROM paths
-        WHERE lower(origin) = lower(%s) AND lower(destination) = lower(%s)
+        WHERE origin_lat = %s AND origin_lng = %s
+            AND destination_lat = %s AND destination_lng = %s
         """,
-        (req.origin, req.destination)
+        (origin_lat, origin_lng, destination_lat, destination_lng)
     )
 
     existing = cur.fetchone()
@@ -1316,36 +1318,39 @@ def create_path(req: CreatePathRequest):
 
             "id": existing[0],
 
-            "origin": existing[1],
+            "origin_lat": existing[1],
 
-            "destination": existing[2],
+            "origin_lng": existing[2],
 
-            "route": existing[3],
+            "destination_lat": existing[3],
 
-            "distances_miles": existing[4],
+            "destination_lng": existing[4],
 
-            "max_speeds_mph": existing[5],
+            "route": existing[5],
 
-            "road_names": existing[6],
+            "distances_miles": existing[6],
 
-            "road_name_boundary_miles": existing[7],
+            "max_speeds_mph": existing[7],
+
+            "road_names": existing[8],
+
+            "road_name_boundary_miles": existing[9],
 
             "zones": zones
         }
 
-    origin_coords = geocode(req.origin)
-    destination_coords = geocode(req.destination)
-
     route, distances_miles, max_speeds_mph, road_names, road_name_boundary_miles = road_route(
-        origin_coords, destination_coords
+        (origin_lat, origin_lng), (destination_lat, destination_lng)
     )
 
     cur.execute(
         """
         INSERT INTO paths
         (
-            origin,
-            destination,
+            origin_lat,
+            origin_lng,
+            destination_lat,
+            destination_lng,
             route,
             distances_miles,
             max_speeds_mph,
@@ -1354,13 +1359,15 @@ def create_path(req: CreatePathRequest):
         )
 
         VALUES
-        (%s,%s,%s,%s,%s,%s,%s)
+        (%s,%s,%s,%s,%s,%s,%s,%s,%s)
 
         RETURNING id
         """,
         (
-            req.origin,
-            req.destination,
+            origin_lat,
+            origin_lng,
+            destination_lat,
+            destination_lng,
             json.dumps(route),
             json.dumps(distances_miles),
             json.dumps(max_speeds_mph),
@@ -1380,9 +1387,13 @@ def create_path(req: CreatePathRequest):
 
         "id": path_id,
 
-        "origin": req.origin,
+        "origin_lat": origin_lat,
 
-        "destination": req.destination,
+        "origin_lng": origin_lng,
+
+        "destination_lat": destination_lat,
+
+        "destination_lng": destination_lng,
 
         "route": route,
 
@@ -1407,8 +1418,8 @@ def list_paths():
 
     cur.execute(
         """
-        SELECT id, origin, destination, route, distances_miles,
-            max_speeds_mph, road_names, road_name_boundary_miles
+        SELECT id, origin_lat, origin_lng, destination_lat, destination_lng,
+            route, distances_miles, max_speeds_mph, road_names, road_name_boundary_miles
         FROM paths
         ORDER BY id
         """
@@ -1426,19 +1437,23 @@ def list_paths():
 
             "id": row[0],
 
-            "origin": row[1],
+            "origin_lat": row[1],
 
-            "destination": row[2],
+            "origin_lng": row[2],
 
-            "route": row[3],
+            "destination_lat": row[3],
 
-            "distances_miles": row[4],
+            "destination_lng": row[4],
 
-            "max_speeds_mph": row[5],
+            "route": row[5],
 
-            "road_names": row[6],
+            "distances_miles": row[6],
 
-            "road_name_boundary_miles": row[7],
+            "max_speeds_mph": row[7],
+
+            "road_names": row[8],
+
+            "road_name_boundary_miles": row[9],
 
             "zones": zones_by_path.get(row[0], [])
         }
@@ -1689,14 +1704,14 @@ def start_trip(req: StartTripRequest):
     time_multiplier, game_time = get_settings(conn, cur)
 
     #
-    # Settle before reading current_location below - otherwise a vehicle
-    # whose previous trip just arrived (but hasn't been read since, e.g.
-    # GET /api/vehicles hasn't been polled yet) would still show its old,
-    # pre-arrival location here.
+    # Settle before reading current_lat/current_lng below - otherwise a
+    # vehicle whose previous trip just arrived (but hasn't been read since,
+    # e.g. GET /api/vehicles hasn't been polled yet) would still show its
+    # old, pre-arrival location here.
     #
     settle_arrived_vehicles(conn, cur, time_multiplier)
 
-    cur.execute("SELECT sold, current_location FROM vehicles WHERE id=%s", (req.vehicle_id,))
+    cur.execute("SELECT sold, current_lat, current_lng FROM vehicles WHERE id=%s", (req.vehicle_id,))
 
     vehicle_row = cur.fetchone()
 
@@ -1705,7 +1720,7 @@ def start_trip(req: StartTripRequest):
         conn.close()
         raise HTTPException(status_code=404, detail="Vehicle not found")
 
-    sold, vehicle_location = vehicle_row
+    sold, vehicle_lat, vehicle_lng = vehicle_row
 
     if sold:
         cur.close()
@@ -1713,7 +1728,7 @@ def start_trip(req: StartTripRequest):
         raise HTTPException(status_code=409, detail="Vehicle has been sold")
 
     cur.execute(
-        "SELECT route, distances_miles, max_speeds_mph, origin FROM paths WHERE id=%s",
+        "SELECT route, distances_miles, max_speeds_mph, origin_lat, origin_lng FROM paths WHERE id=%s",
         (req.path_id,)
     )
 
@@ -1724,14 +1739,14 @@ def start_trip(req: StartTripRequest):
         conn.close()
         raise HTTPException(status_code=404, detail="Path not found")
 
-    route, distances_miles, max_speeds_mph, origin = path_row
+    route, distances_miles, max_speeds_mph, origin_lat, origin_lng = path_row
 
-    if vehicle_location.strip().lower() != origin.strip().lower():
+    if round_coord(vehicle_lat) != round_coord(origin_lat) or round_coord(vehicle_lng) != round_coord(origin_lng):
         cur.close()
         conn.close()
         raise HTTPException(
             status_code=409,
-            detail=f"Vehicle is currently in {vehicle_location}, not {origin} - pick a path that starts there"
+            detail=f"Vehicle is currently at ({vehicle_lat}, {vehicle_lng}), not ({origin_lat}, {origin_lng}) - pick a path that starts there"
         )
 
     cur.execute(

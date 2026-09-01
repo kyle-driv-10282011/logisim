@@ -395,7 +395,7 @@ function renderVehicleList() {
             (imageUrl ? `<img class="spec-thumb" src="${imageUrl}">` : "") +
             `<span>${vehicle.name}` +
             (vehicle.spec ? ` (${specLabel(vehicle.spec)})` : "") +
-            ` &middot; ${vehicle.current_location} ` +
+            ` &middot; ${coordLabel(vehicle.current_lat, vehicle.current_lng)} ` +
             `<span class="status-badge status-${vehicle.status}">${vehicle.status}</span></span></span>` +
             (vehicle.status === "READY"
                 ? `<button class="sell-button" data-id="${vehicle.id}">Sell</button>`
@@ -432,7 +432,7 @@ function renderAllVehicleList() {
         // selectTripVehicle() (path-select filtering for starting a
         // trip), clicking here doesn't change tabs or any other state.
         //
-        item.onclick = () => map.panTo(vehicle.current_position);
+        item.onclick = () => map.panTo([vehicle.current_lat, vehicle.current_lng]);
 
         const imageUrl = vehicle.spec ? specImageUrl(vehicle.spec.image) : null;
 
@@ -441,7 +441,7 @@ function renderAllVehicleList() {
             (imageUrl ? `<img class="spec-thumb" src="${imageUrl}">` : "") +
             `<span>${vehicle.name}` +
             (vehicle.spec ? ` (${specLabel(vehicle.spec)})` : "") +
-            ` &middot; ${vehicle.current_location} ` +
+            ` &middot; ${coordLabel(vehicle.current_lat, vehicle.current_lng)} ` +
             `<span class="status-badge status-${vehicle.status}">${vehicle.status}</span></span></span>`;
 
         list.appendChild(item);
@@ -476,7 +476,7 @@ function selectTripVehicle(vehicleId) {
 
     //
     // Jump to wherever the vehicle currently is (its settled
-    // current_position, not a live trip position - it's READY, not
+    // current_lat/current_lng, not a live trip position - it's READY, not
     // driving) when it's selected, not when deselecting.
     //
     if (selectedTripVehicleId !== null) {
@@ -484,7 +484,7 @@ function selectTripVehicle(vehicleId) {
         const vehicle = vehiclesById.get(selectedTripVehicleId);
 
         if (vehicle) {
-            map.panTo(vehicle.current_position);
+            map.panTo([vehicle.current_lat, vehicle.current_lng]);
         }
     }
 
@@ -497,8 +497,16 @@ function selectTripVehicle(vehicleId) {
 // A vehicle can only start a trip on a path whose origin is where it
 // currently is (enforced server-side too, in POST /api/trips) - so the
 // dropdown only offers paths matching the selected vehicle's
-// current_location, rather than every path that's ever been created.
+// current_lat/current_lng, rather than every path that's ever been created.
 //
+const COORD_MATCH_EPSILON = 0.0001; // matches the backend's ROUND_DECIMALS precision
+
+function coordsMatch(lat1, lng1, lat2, lng2) {
+
+    return Math.abs(lat1 - lat2) < COORD_MATCH_EPSILON && Math.abs(lng1 - lng2) < COORD_MATCH_EPSILON;
+}
+
+
 function renderPathSelectForTripVehicle() {
 
     const select = document.getElementById("path-select");
@@ -521,7 +529,7 @@ function renderPathSelectForTripVehicle() {
     select.disabled = false;
 
     const matching = [...pathsById.values()].filter((path) =>
-        path.origin.trim().toLowerCase() === vehicle.current_location.trim().toLowerCase()
+        coordsMatch(path.origin_lat, path.origin_lng, vehicle.current_lat, vehicle.current_lng)
     );
 
     for (const path of matching) {
@@ -539,7 +547,7 @@ function renderPathSelectForTripVehicle() {
     }
 
     hint.style.display = matching.length === 0 ? "" : "none";
-    hint.textContent = `No paths from ${vehicle.current_location} yet - create one in the Paths tab.`;
+    hint.textContent = `No paths from ${coordLabel(vehicle.current_lat, vehicle.current_lng)} yet - create one in the Paths tab.`;
 
     updateStartTripVisibility();
 }
@@ -691,7 +699,9 @@ async function addVehicle() {
 
             spec_id: Number(specId),
 
-            current_location: document.getElementById("vehicle-location").value
+            current_lat: Number(document.getElementById("vehicle-lat").value),
+
+            current_lng: Number(document.getElementById("vehicle-lng").value)
 
         })
 
@@ -708,9 +718,15 @@ async function addVehicle() {
 }
 
 
+function coordLabel(lat, lng) {
+
+    return `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+}
+
+
 function pathLabel(path) {
 
-    return `${path.origin}-${path.destination}`;
+    return `${coordLabel(path.origin_lat, path.origin_lng)} -> ${coordLabel(path.destination_lat, path.destination_lng)}`;
 }
 
 
@@ -1420,12 +1436,19 @@ function previewPath(path) {
 
 function swapOriginDestination() {
 
-    const originInput = document.getElementById("origin");
-    const destinationInput = document.getElementById("destination");
+    const originLatInput = document.getElementById("origin-lat");
+    const originLngInput = document.getElementById("origin-lng");
+    const destinationLatInput = document.getElementById("destination-lat");
+    const destinationLngInput = document.getElementById("destination-lng");
 
-    const temp = originInput.value;
-    originInput.value = destinationInput.value;
-    destinationInput.value = temp;
+    const tempLat = originLatInput.value;
+    const tempLng = originLngInput.value;
+
+    originLatInput.value = destinationLatInput.value;
+    originLngInput.value = destinationLngInput.value;
+
+    destinationLatInput.value = tempLat;
+    destinationLngInput.value = tempLng;
 }
 
 
@@ -1441,9 +1464,13 @@ async function createPath() {
 
         body: JSON.stringify({
 
-            origin: document.getElementById("origin").value,
+            origin_lat: Number(document.getElementById("origin-lat").value),
 
-            destination: document.getElementById("destination").value
+            origin_lng: Number(document.getElementById("origin-lng").value),
+
+            destination_lat: Number(document.getElementById("destination-lat").value),
+
+            destination_lng: Number(document.getElementById("destination-lng").value)
 
         })
 
