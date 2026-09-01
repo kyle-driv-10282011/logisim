@@ -1412,6 +1412,17 @@ function previewPath(path) {
 }
 
 
+function swapOriginDestination() {
+
+    const originInput = document.getElementById("origin");
+    const destinationInput = document.getElementById("destination");
+
+    const temp = originInput.value;
+    originInput.value = destinationInput.value;
+    destinationInput.value = temp;
+}
+
+
 async function createPath() {
 
     const response = await fetch(API + "/api/paths", {
