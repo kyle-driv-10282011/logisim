@@ -127,6 +127,7 @@ geocoded/routed once and reused by any number of trips.
 | `id`           | serial  | primary key                     |
 | `name`         | text    |                                  |
 | `current_location` | text | free text, matched case-insensitively against a path's `origin` — see [Vehicle location](#vehicle-location) below |
+| `current_position` | jsonb | `[lat, lon]` for `current_location` — geocoded once at creation, kept in sync by reusing a path's own route coordinates on arrival (no extra geocoding call). Lets the frontend center the map on a vehicle that isn't currently driving |
 | `spec_id`      | integer | FK `vehicle_specs(id)` — hauling specs (including type/brand/model) live on the spec, not duplicated per vehicle |
 | `sold`         | boolean | default `false`. Selling a vehicle sets this rather than deleting the row, so "All Vehicles" can show full history while "My Vehicles" filters to `sold = false` |
 | `sold_at`      | timestamp | nullable                      |
@@ -391,12 +392,25 @@ separate, already-existing concept (`GET /api/trips/active`,
 ever holds a settled place name, before or after a trip, never a
 point mid-route.
 
+`current_position` (`[lat, lon]`) travels alongside `current_location`
+so the frontend can center the map on a vehicle that isn't currently
+driving: geocoded once via `geocode()` when the vehicle is created
+(failing fast, like `create_path()`'s origin/destination, if the typed
+location doesn't resolve to a real place), then kept in sync by
+`settle_arrived_vehicles()` reusing the arrived path's own route
+endpoint (`route -> -1` — Postgres's negative JSONB array indexing)
+rather than geocoding again.
+
 The frontend's "Add Vehicle" form requires a starting location, and the
 path dropdown for starting a trip (`renderPathSelectForTripVehicle()` in
 `app.js`) only offers paths whose origin matches the selected vehicle's
 `current_location`, with a hint to create one in the Paths tab if none
 exist yet — mirroring the backend's own restriction rather than letting
-the user pick an invalid path and only find out on submit.
+the user pick an invalid path and only find out on submit. Clicking a
+vehicle (in My Vehicles, selecting it to start a trip, or in All
+Vehicles, which is otherwise read-only) pans the map to
+`current_position`; a `DRIVING` vehicle instead pans to its live trip
+position (`selectVehicle()`), same as before.
 
 ### Nearby city lookup
 
@@ -415,8 +429,8 @@ All endpoints are on the `backend` service, default `http://localhost:5000`.
 |---------------------------------|-------------|
 | `GET /api/settings`             | Current game clock: `{time_multiplier, game_time}` |
 | `PUT /api/settings`             | Change `time_multiplier`. Body: `{time_multiplier}` — re-anchors the game clock at its current value so it speeds up/slows down rather than jumping. 409 if any vehicle is currently in route |
-| `POST /api/vehicles`            | Create a vehicle. Body: `{name, spec_id, current_location}`. Response includes the resolved `spec` |
-| `GET /api/vehicles`             | List vehicles with computed `status` (`READY`/`DRIVING`/`SOLD`), each vehicle's `spec`, and `current_location` (settled first — see [Vehicle location](#vehicle-location)). Defaults to the current fleet (`sold = false`, "My Vehicles"); `?include_sold=true` returns full history ("All Vehicles") |
+| `POST /api/vehicles`            | Create a vehicle. Body: `{name, spec_id, current_location}`. Response includes the resolved `spec` and geocoded `current_position`. 400 if `current_location` doesn't geocode |
+| `GET /api/vehicles`             | List vehicles with computed `status` (`READY`/`DRIVING`/`SOLD`), each vehicle's `spec`, `current_location`, and `current_position` (settled first — see [Vehicle location](#vehicle-location)). Defaults to the current fleet (`sold = false`, "My Vehicles"); `?include_sold=true` returns full history ("All Vehicles") |
 | `POST /api/vehicles/{id}/sell`  | Mark a vehicle sold (soft-delete). 409 if already sold or currently on a trip |
 | `DELETE /api/vehicles/{id}`     | Permanently delete a vehicle (cascades its trips) — distinct from selling; not used by the frontend |
 | `POST /api/vehicle-specs`       | Create a hauling-spec catalog entry. Body: `{year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, image?}` |

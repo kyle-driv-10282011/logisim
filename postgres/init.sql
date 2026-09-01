@@ -67,6 +67,15 @@ CREATE TABLE vehicles (
     -- position/road-name fields for that).
     current_location TEXT NOT NULL,
 
+    -- [lat, lon] for current_location - geocoded once at creation (see
+    -- geocode() in app.py), then kept in sync with current_location by
+    -- reusing the arrived path's own route endpoint coordinates (no
+    -- extra geocoding call needed - see settle_arrived_vehicles()).
+    -- Lets the frontend center the map on a vehicle that isn't currently
+    -- driving (a driving vehicle's live position instead comes from its
+    -- active trip - see trips/derive_position()).
+    current_position JSONB NOT NULL,
+
     -- Hauling specs (year/brand/model/capacity/cost/mpg/image) live on the
     -- reusable spec, not duplicated per vehicle - same pattern as paths
     -- being reused across trips instead of storing route data per trip.

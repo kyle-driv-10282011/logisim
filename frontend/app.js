@@ -424,7 +424,15 @@ function renderAllVehicleList() {
 
         const item = document.createElement("div");
 
-        item.className = "vehicle-item list-row";
+        item.className = "vehicle-item list-row vehicle-row clickable";
+
+        //
+        // Just pans to wherever the vehicle currently is - unlike
+        // selectVehicle() (the In Route "follow" flow) or
+        // selectTripVehicle() (path-select filtering for starting a
+        // trip), clicking here doesn't change tabs or any other state.
+        //
+        item.onclick = () => map.panTo(vehicle.current_position);
 
         const imageUrl = vehicle.spec ? specImageUrl(vehicle.spec.image) : null;
 
@@ -465,6 +473,20 @@ async function sellVehicle(vehicleId) {
 function selectTripVehicle(vehicleId) {
 
     selectedTripVehicleId = selectedTripVehicleId === vehicleId ? null : vehicleId;
+
+    //
+    // Jump to wherever the vehicle currently is (its settled
+    // current_position, not a live trip position - it's READY, not
+    // driving) when it's selected, not when deselecting.
+    //
+    if (selectedTripVehicleId !== null) {
+
+        const vehicle = vehiclesById.get(selectedTripVehicleId);
+
+        if (vehicle) {
+            map.panTo(vehicle.current_position);
+        }
+    }
 
     renderVehicleList();
     renderPathSelectForTripVehicle();
@@ -692,6 +714,17 @@ function pathLabel(path) {
 }
 
 
+//
+// distances_miles is cumulative miles from the origin at every route
+// point (see road_route() in app.py) - its last entry is the path's
+// total distance, not a separately stored value.
+//
+function pathDistanceMiles(path) {
+
+    return path.distances_miles[path.distances_miles.length - 1];
+}
+
+
 async function loadPaths() {
 
     const response = await fetch(API + "/api/paths");
@@ -718,7 +751,7 @@ function renderPathList() {
         item.onclick = () => previewPath(path);
 
         item.innerHTML =
-            `<span>${pathLabel(path)}</span>` +
+            `<span>${pathLabel(path)} <span class="path-distance">(${Math.round(pathDistanceMiles(path))} mi)</span></span>` +
             `<button class="remove-path-button" data-id="${path.id}">Remove</button>`;
 
         list.appendChild(item);
@@ -1190,7 +1223,8 @@ function renderZoneEditor(path) {
 
     document.getElementById("zone-form").style.display = "none";
     document.getElementById("zone-editor").style.display = "";
-    document.getElementById("zone-editor-path-label").textContent = pathLabel(path);
+    document.getElementById("zone-editor-path-label").textContent =
+        `${pathLabel(path)} (${Math.round(pathDistanceMiles(path))} mi)`;
 
     renderRouteSections(path);
     renderZoneList(path);

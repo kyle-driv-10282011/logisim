@@ -172,19 +172,23 @@ def get_settings(conn, cur):
 def settle_arrived_vehicles(conn, cur, time_multiplier):
 
     #
-    # A vehicle's current_location only updates once its most recent trip
-    # has actually arrived (real elapsed time since started_at has passed
-    # the compressed playback duration - same condition list_vehicles()/
-    # active_trips() use to decide DRIVING vs not) - not the instant a
-    # trip is created, and not continuously while driving. A single bulk
-    # UPDATE covers every vehicle at once rather than looping per vehicle;
-    # IS DISTINCT FROM skips vehicles already settled at that destination
-    # so this is cheap to call on every read.
+    # A vehicle's current_location/current_position only updates once its
+    # most recent trip has actually arrived (real elapsed time since
+    # started_at has passed the compressed playback duration - same
+    # condition list_vehicles()/active_trips() use to decide DRIVING vs
+    # not) - not the instant a trip is created, and not continuously
+    # while driving. `p.route -> -1` (Postgres supports negative JSONB
+    # array indices) is the path's own destination coordinate - reusing
+    # it needs no extra geocoding call. A single bulk UPDATE covers every
+    # vehicle at once rather than looping per vehicle; IS DISTINCT FROM
+    # skips vehicles already settled at that destination so this is cheap
+    # to call on every read.
     #
     cur.execute(
         """
         UPDATE vehicles v
-        SET current_location = p.destination
+        SET current_location = p.destination,
+            current_position = p.route -> -1
         FROM trips t
         JOIN paths p ON p.id = t.path_id
         WHERE t.id = (
@@ -903,6 +907,14 @@ def update_settings(req: UpdateSettingsRequest):
 @app.post("/api/vehicles")
 def create_vehicle(req: CreateVehicleRequest):
 
+    #
+    # Geocoded up front (same as create_path()'s origin/destination) so a
+    # bad location name fails fast, before touching the DB - and so the
+    # frontend can center the map on a resting vehicle (current_position)
+    # without a live trip to derive a position from.
+    #
+    current_position = geocode(req.current_location)
+
     conn = db()
     cur = conn.cursor()
 
@@ -915,11 +927,11 @@ def create_vehicle(req: CreateVehicleRequest):
 
     cur.execute(
         """
-        INSERT INTO vehicles (name, spec_id, current_location)
-        VALUES (%s, %s, %s)
+        INSERT INTO vehicles (name, spec_id, current_location, current_position)
+        VALUES (%s, %s, %s, %s)
         RETURNING id
         """,
-        (req.name, req.spec_id, req.current_location)
+        (req.name, req.spec_id, req.current_location, json.dumps(current_position))
     )
 
     vehicle_id = cur.fetchone()[0]
@@ -940,6 +952,8 @@ def create_vehicle(req: CreateVehicleRequest):
         "spec": spec,
 
         "current_location": req.current_location,
+
+        "current_position": current_position,
 
         "status": "READY"
     }
@@ -1061,6 +1075,7 @@ def list_vehicles(include_sold: bool = False):
             v.name,
             v.spec_id,
             v.current_location,
+            v.current_position,
             v.sold,
             v.sold_at,
             CASE
@@ -1098,11 +1113,13 @@ def list_vehicles(include_sold: bool = False):
 
             "current_location": row[3],
 
-            "sold": row[4],
+            "current_position": row[4],
 
-            "sold_at": row[5],
+            "sold": row[5],
 
-            "status": row[6]
+            "sold_at": row[6],
+
+            "status": row[7]
         }
         for row in rows
     ]
