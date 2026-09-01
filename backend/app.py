@@ -169,6 +169,40 @@ def get_settings(conn, cur):
     return multiplier, game_time
 
 
+def settle_arrived_vehicles(conn, cur, time_multiplier):
+
+    #
+    # A vehicle's current_location only updates once its most recent trip
+    # has actually arrived (real elapsed time since started_at has passed
+    # the compressed playback duration - same condition list_vehicles()/
+    # active_trips() use to decide DRIVING vs not) - not the instant a
+    # trip is created, and not continuously while driving. A single bulk
+    # UPDATE covers every vehicle at once rather than looping per vehicle;
+    # IS DISTINCT FROM skips vehicles already settled at that destination
+    # so this is cheap to call on every read.
+    #
+    cur.execute(
+        """
+        UPDATE vehicles v
+        SET current_location = p.destination
+        FROM trips t
+        JOIN paths p ON p.id = t.path_id
+        WHERE t.id = (
+            SELECT t2.id FROM trips t2
+            WHERE t2.vehicle_id = v.id
+            ORDER BY t2.started_at DESC
+            LIMIT 1
+        )
+        AND t.vehicle_id = v.id
+        AND EXTRACT(EPOCH FROM (NOW() - t.started_at)) >= t.realized_duration_seconds / %s
+        AND v.current_location IS DISTINCT FROM p.destination
+        """,
+        (time_multiplier,)
+    )
+
+    conn.commit()
+
+
 def is_rush_hour(effective_dt):
 
     is_weekday = effective_dt.weekday() < 5
@@ -693,6 +727,14 @@ class CreateVehicleRequest(BaseModel):
     name: str
     spec_id: int
 
+    #
+    # Free text, matched case-insensitively against a path's `origin` -
+    # same convention as paths.origin/destination lookup, not geocoded
+    # (a vehicle's location is just a label to match trips against, not
+    # a point that needs coordinates).
+    #
+    current_location: str
+
 
 
 class UpdateSettingsRequest(BaseModel):
@@ -873,11 +915,11 @@ def create_vehicle(req: CreateVehicleRequest):
 
     cur.execute(
         """
-        INSERT INTO vehicles (name, spec_id)
-        VALUES (%s, %s)
+        INSERT INTO vehicles (name, spec_id, current_location)
+        VALUES (%s, %s, %s)
         RETURNING id
         """,
-        (req.name, req.spec_id)
+        (req.name, req.spec_id, req.current_location)
     )
 
     vehicle_id = cur.fetchone()[0]
@@ -896,6 +938,8 @@ def create_vehicle(req: CreateVehicleRequest):
         "name": req.name,
 
         "spec": spec,
+
+        "current_location": req.current_location,
 
         "status": "READY"
     }
@@ -1001,6 +1045,8 @@ def list_vehicles(include_sold: bool = False):
 
     time_multiplier, _ = get_settings(conn, cur)
 
+    settle_arrived_vehicles(conn, cur, time_multiplier)
+
     #
     # "My Vehicles" (the current fleet, include_sold=False - the default)
     # filters to sold = FALSE; "All Vehicles" (include_sold=True) is the
@@ -1014,6 +1060,7 @@ def list_vehicles(include_sold: bool = False):
             v.id,
             v.name,
             v.spec_id,
+            v.current_location,
             v.sold,
             v.sold_at,
             CASE
@@ -1049,11 +1096,13 @@ def list_vehicles(include_sold: bool = False):
 
             "spec": specs_by_id.get(row[2]),
 
-            "sold": row[3],
+            "current_location": row[3],
 
-            "sold_at": row[4],
+            "sold": row[4],
 
-            "status": row[5]
+            "sold_at": row[5],
+
+            "status": row[6]
         }
         for row in rows
     ]
@@ -1620,7 +1669,17 @@ def start_trip(req: StartTripRequest):
     conn = db()
     cur = conn.cursor()
 
-    cur.execute("SELECT sold FROM vehicles WHERE id=%s", (req.vehicle_id,))
+    time_multiplier, game_time = get_settings(conn, cur)
+
+    #
+    # Settle before reading current_location below - otherwise a vehicle
+    # whose previous trip just arrived (but hasn't been read since, e.g.
+    # GET /api/vehicles hasn't been polled yet) would still show its old,
+    # pre-arrival location here.
+    #
+    settle_arrived_vehicles(conn, cur, time_multiplier)
+
+    cur.execute("SELECT sold, current_location FROM vehicles WHERE id=%s", (req.vehicle_id,))
 
     vehicle_row = cur.fetchone()
 
@@ -1629,13 +1688,15 @@ def start_trip(req: StartTripRequest):
         conn.close()
         raise HTTPException(status_code=404, detail="Vehicle not found")
 
-    if vehicle_row[0]:
+    sold, vehicle_location = vehicle_row
+
+    if sold:
         cur.close()
         conn.close()
         raise HTTPException(status_code=409, detail="Vehicle has been sold")
 
     cur.execute(
-        "SELECT route, distances_miles, max_speeds_mph FROM paths WHERE id=%s",
+        "SELECT route, distances_miles, max_speeds_mph, origin FROM paths WHERE id=%s",
         (req.path_id,)
     )
 
@@ -1646,9 +1707,15 @@ def start_trip(req: StartTripRequest):
         conn.close()
         raise HTTPException(status_code=404, detail="Path not found")
 
-    route, distances_miles, max_speeds_mph = path_row
+    route, distances_miles, max_speeds_mph, origin = path_row
 
-    time_multiplier, game_time = get_settings(conn, cur)
+    if vehicle_location.strip().lower() != origin.strip().lower():
+        cur.close()
+        conn.close()
+        raise HTTPException(
+            status_code=409,
+            detail=f"Vehicle is currently in {vehicle_location}, not {origin} - pick a path that starts there"
+        )
 
     cur.execute(
         """

@@ -360,7 +360,7 @@ async function loadVehicles() {
 
     renderVehicleList();
     renderAllVehicleList();
-    updateStartTripVisibility();
+    renderPathSelectForTripVehicle();
 }
 
 
@@ -394,7 +394,8 @@ function renderVehicleList() {
             `<span class="spec-item-label">` +
             (imageUrl ? `<img class="spec-thumb" src="${imageUrl}">` : "") +
             `<span>${vehicle.name}` +
-            (vehicle.spec ? ` (${specLabel(vehicle.spec)})` : "") + ` ` +
+            (vehicle.spec ? ` (${specLabel(vehicle.spec)})` : "") +
+            ` &middot; ${vehicle.current_location} ` +
             `<span class="status-badge status-${vehicle.status}">${vehicle.status}</span></span></span>` +
             (vehicle.status === "READY"
                 ? `<button class="sell-button" data-id="${vehicle.id}">Sell</button>`
@@ -431,7 +432,8 @@ function renderAllVehicleList() {
             `<span class="spec-item-label">` +
             (imageUrl ? `<img class="spec-thumb" src="${imageUrl}">` : "") +
             `<span>${vehicle.name}` +
-            (vehicle.spec ? ` (${specLabel(vehicle.spec)})` : "") + ` ` +
+            (vehicle.spec ? ` (${specLabel(vehicle.spec)})` : "") +
+            ` &middot; ${vehicle.current_location} ` +
             `<span class="status-badge status-${vehicle.status}">${vehicle.status}</span></span></span>`;
 
         list.appendChild(item);
@@ -465,6 +467,58 @@ function selectTripVehicle(vehicleId) {
     selectedTripVehicleId = selectedTripVehicleId === vehicleId ? null : vehicleId;
 
     renderVehicleList();
+    renderPathSelectForTripVehicle();
+}
+
+
+//
+// A vehicle can only start a trip on a path whose origin is where it
+// currently is (enforced server-side too, in POST /api/trips) - so the
+// dropdown only offers paths matching the selected vehicle's
+// current_location, rather than every path that's ever been created.
+//
+function renderPathSelectForTripVehicle() {
+
+    const select = document.getElementById("path-select");
+    const hint = document.getElementById("path-select-hint");
+
+    const previousValue = select.value;
+    const vehicle = vehiclesById.get(selectedTripVehicleId);
+
+    select.innerHTML = '<option value="">Select a path...</option>';
+
+    if (!vehicle) {
+
+        select.disabled = true;
+        hint.style.display = "none";
+
+        updateStartTripVisibility();
+        return;
+    }
+
+    select.disabled = false;
+
+    const matching = [...pathsById.values()].filter((path) =>
+        path.origin.trim().toLowerCase() === vehicle.current_location.trim().toLowerCase()
+    );
+
+    for (const path of matching) {
+
+        const option = document.createElement("option");
+
+        option.value = path.id;
+        option.textContent = pathLabel(path);
+
+        select.appendChild(option);
+    }
+
+    if (matching.some((path) => String(path.id) === previousValue)) {
+        select.value = previousValue;
+    }
+
+    hint.style.display = matching.length === 0 ? "" : "none";
+    hint.textContent = `No paths from ${vehicle.current_location} yet - create one in the Paths tab.`;
+
     updateStartTripVisibility();
 }
 
@@ -613,7 +667,9 @@ async function addVehicle() {
 
             name: document.getElementById("vehicle-name").value,
 
-            spec_id: Number(specId)
+            spec_id: Number(specId),
+
+            current_location: document.getElementById("vehicle-location").value
 
         })
 
@@ -643,25 +699,8 @@ async function loadPaths() {
 
     pathsById = new Map(paths.map((path) => [path.id, path]));
 
-    const select = document.getElementById("path-select");
-    const previousValue = select.value;
-
-    select.innerHTML = '<option value="">Select a path...</option>';
-
-    for (const path of paths) {
-
-        const option = document.createElement("option");
-
-        option.value = path.id;
-        option.textContent = pathLabel(path);
-
-        select.appendChild(option);
-    }
-
-    select.value = previousValue;
-
     renderPathList();
-    updateStartTripVisibility();
+    renderPathSelectForTripVehicle();
 }
 
 
@@ -1433,8 +1472,6 @@ async function startTrip() {
     map.fitBounds(routeLine.getBounds());
 
     selectedTripVehicleId = null;
-    document.getElementById("path-select").value = "";
-    updateStartTripVisibility();
 
     loadVehicles();
 }

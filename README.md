@@ -126,6 +126,7 @@ geocoded/routed once and reused by any number of trips.
 |----------------|---------|----------------------------------|
 | `id`           | serial  | primary key                     |
 | `name`         | text    |                                  |
+| `current_location` | text | free text, matched case-insensitively against a path's `origin` — see [Vehicle location](#vehicle-location) below |
 | `spec_id`      | integer | FK `vehicle_specs(id)` — hauling specs (including type/brand/model) live on the spec, not duplicated per vehicle |
 | `sold`         | boolean | default `false`. Selling a vehicle sets this rather than deleting the row, so "All Vehicles" can show full history while "My Vehicles" filters to `sold = false` |
 | `sold_at`      | timestamp | nullable                      |
@@ -366,6 +367,37 @@ Zones are created and edited via the frontend by clicking directly on the
 route (or drawing a custom stretch by picking two points); see
 [Frontend](#frontend) below.
 
+### Vehicle location
+
+A vehicle has a persistent `current_location` (free text, e.g.
+"Minneapolis") rather than being usable from anywhere — set when it's
+created, and `POST /api/trips` rejects (409) starting a trip on a path
+whose `origin` doesn't match it case-insensitively. A vehicle can only
+leave from where it currently is; to send it somewhere new, create a
+path whose origin is that location.
+
+`current_location` is **not** updated the moment a trip starts, and not
+continuously while driving — it stays at the departure city until the
+trip actually arrives, at which point it becomes the path's
+`destination`. This happens lazily: `settle_arrived_vehicles()` in
+`app.py` runs a single bulk `UPDATE` (all vehicles at once, skipping any
+already settled at the right destination) at the top of `GET
+/api/vehicles` and `POST /api/trips`, based on the same real-elapsed-vs-
+compressed-duration comparison used to decide `DRIVING` status elsewhere
+— there's no scheduler/webhook, so it's computed whenever a request
+happens to ask. A driving vehicle's actual live position/road is a
+separate, already-existing concept (`GET /api/trips/active`,
+[Position and speed](#position-and-speed)) — `current_location` only
+ever holds a settled place name, before or after a trip, never a
+point mid-route.
+
+The frontend's "Add Vehicle" form requires a starting location, and the
+path dropdown for starting a trip (`renderPathSelectForTripVehicle()` in
+`app.js`) only offers paths whose origin matches the selected vehicle's
+`current_location`, with a hint to create one in the Paths tab if none
+exist yet — mirroring the backend's own restriction rather than letting
+the user pick an invalid path and only find out on submit.
+
 ### Nearby city lookup
 
 `GET /api/vehicles/{id}/city` reverse-geocodes the vehicle's current
@@ -383,8 +415,8 @@ All endpoints are on the `backend` service, default `http://localhost:5000`.
 |---------------------------------|-------------|
 | `GET /api/settings`             | Current game clock: `{time_multiplier, game_time}` |
 | `PUT /api/settings`             | Change `time_multiplier`. Body: `{time_multiplier}` — re-anchors the game clock at its current value so it speeds up/slows down rather than jumping. 409 if any vehicle is currently in route |
-| `POST /api/vehicles`            | Create a vehicle. Body: `{name, spec_id}`. Response includes the resolved `spec` |
-| `GET /api/vehicles`             | List vehicles with computed `status` (`READY`/`DRIVING`/`SOLD`) and each vehicle's `spec`. Defaults to the current fleet (`sold = false`, "My Vehicles"); `?include_sold=true` returns full history ("All Vehicles") |
+| `POST /api/vehicles`            | Create a vehicle. Body: `{name, spec_id, current_location}`. Response includes the resolved `spec` |
+| `GET /api/vehicles`             | List vehicles with computed `status` (`READY`/`DRIVING`/`SOLD`), each vehicle's `spec`, and `current_location` (settled first — see [Vehicle location](#vehicle-location)). Defaults to the current fleet (`sold = false`, "My Vehicles"); `?include_sold=true` returns full history ("All Vehicles") |
 | `POST /api/vehicles/{id}/sell`  | Mark a vehicle sold (soft-delete). 409 if already sold or currently on a trip |
 | `DELETE /api/vehicles/{id}`     | Permanently delete a vehicle (cascades its trips) — distinct from selling; not used by the frontend |
 | `POST /api/vehicle-specs`       | Create a hauling-spec catalog entry. Body: `{year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, image?}` |
@@ -397,7 +429,7 @@ All endpoints are on the `backend` service, default `http://localhost:5000`.
 | `POST /api/paths/{id}/zones`    | Add a road zone to a path. Body: `{start_miles, end_miles, speed_limit_mph, rush_hour_start?, rush_hour_end?, rush_hour_factor?}` |
 | `PUT /api/zones/{id}`           | Update an existing road zone. Same body as create |
 | `DELETE /api/zones/{id}`        | Delete a road zone |
-| `POST /api/trips`               | Start a trip. Body: `{vehicle_id, path_id, simulated_datetime?, traffic_bias?}`. 409 if the vehicle is already driving |
+| `POST /api/trips`               | Start a trip. Body: `{vehicle_id, path_id, simulated_datetime?, traffic_bias?}`. 409 if the vehicle is already driving, sold, or not at the path's origin |
 | `GET /api/trips/active`         | Poll all currently-active trips, each with live position/speed/road name |
 
 Every response is JSON. Any unhandled backend exception returns a generic
@@ -420,11 +452,14 @@ Five tabs in the side panel:
   alongside the rest of the static frontend, no separate upload endpoint.
 - **My Vehicles** — the current fleet (not sold). Add a vehicle by
   picking a template from a dropdown (required — templates must exist
-  first), pick a path and start a trip for a `READY` vehicle, or sell a
-  `READY` vehicle (soft-delete — it moves off this list but stays
-  visible in All Vehicles as `SOLD`).
+  first) and giving it a starting location, pick a path and start a trip
+  for a `READY` vehicle (the path dropdown only offers paths departing
+  from that vehicle's current location — see [Vehicle
+  location](#vehicle-location)), or sell a `READY` vehicle (soft-delete —
+  it moves off this list but stays visible in All Vehicles as `SOLD`).
 - **All Vehicles** — read-only history of every vehicle ever created,
-  sold or not, with its current status badge (`READY`/`DRIVING`/`SOLD`).
+  sold or not, with its current status badge (`READY`/`DRIVING`/`SOLD`)
+  and location.
 - **Paths** — create a path from an origin/destination, preview it on the
   map, remove existing paths. Previewing a path draws the *entire* route
   color-coded by effective speed limit (red &lt;45 mph, orange 45-64,

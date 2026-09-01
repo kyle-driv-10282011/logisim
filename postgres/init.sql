@@ -57,6 +57,16 @@ CREATE TABLE vehicles (
 
     name TEXT NOT NULL,
 
+    -- Where the vehicle currently is - matched case-insensitively against
+    -- a path's `origin` (same convention as paths.origin/destination
+    -- lookup) to restrict which paths a vehicle can start a trip on. Set
+    -- at creation, then updated to a trip's destination once that trip
+    -- arrives (settle_arrived_vehicles() in app.py) - not touched while
+    -- a trip is in progress, so it reflects the last place the vehicle
+    -- was confirmed to be, not a live position (see the `trips` live
+    -- position/road-name fields for that).
+    current_location TEXT NOT NULL,
+
     -- Hauling specs (year/brand/model/capacity/cost/mpg/image) live on the
     -- reusable spec, not duplicated per vehicle - same pattern as paths
     -- being reused across trips instead of storing route data per trip.
