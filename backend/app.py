@@ -355,11 +355,14 @@ reverse_geocode_limited = RateLimiter(geolocator.reverse, min_delay_seconds=1)
 
 
 #
-# Locations are entered as raw lat/lng, not geocoded from a place name.
-# Rounding to a fixed precision (~1m) before storing/comparing means two
-# independently-typed coordinates for "the same place" (e.g. a vehicle's
-# current_lat/lng and a path's origin_lat/lng) still compare equal despite
-# whatever float noise came in from the client.
+# The DB only ever stores lat/lng (see paths.origin_lat etc and
+# vehicles.current_lat/current_lng in init.sql) - an address is purely an
+# API-boundary convenience, geocoded to coordinates on the way in and
+# reverse-geocoded back to a label on the way out. Rounding to a fixed
+# precision (~1m) before storing/comparing means two independently-geocoded
+# coordinates for "the same place" (e.g. a vehicle's current_lat/lng and a
+# path's origin_lat/lng) still compare equal despite whatever float noise
+# came out of Nominatim.
 #
 ROUND_DECIMALS = 5
 
@@ -367,6 +370,35 @@ ROUND_DECIMALS = 5
 def round_coord(value):
 
     return round(value, ROUND_DECIMALS)
+
+
+def geocode(place):
+
+    location = geolocator.geocode(place)
+
+    if location is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not geocode location: {place}"
+        )
+
+    return (location.latitude, location.longitude)
+
+
+def coord_label(lat, lng):
+
+    return f"{lat}, {lng}"
+
+
+#
+# Reverse-geocoding the same rounded coordinates always used to mean the
+# same real-world place, so caching by (rounded lat, rounded lng) avoids
+# re-hitting Nominatim's rate-limited endpoint every time a vehicle/path
+# list is read - which, unlike the live-position "current city" lookup this
+# was originally written for, can revisit the same coordinates constantly
+# (e.g. every vehicle sitting at the same depot).
+#
+_reverse_geocode_cache = {}
 
 
 def road_route(origin_coords, destination_coords):
@@ -562,14 +594,20 @@ def derive_position(
 
 def reverse_geocode(position):
 
+    cache_key = (round_coord(position[0]), round_coord(position[1]))
+
+    if cache_key in _reverse_geocode_cache:
+        return _reverse_geocode_cache[cache_key]
+
     location = reverse_geocode_limited((position[0], position[1]), zoom=10, language="en")
 
     if location is None:
+        _reverse_geocode_cache[cache_key] = None
         return None
 
     address = location.raw.get("address", {})
 
-    return (
+    result = (
         address.get("city")
         or address.get("town")
         or address.get("village")
@@ -577,6 +615,10 @@ def reverse_geocode(position):
         or address.get("county")
         or location.address
     )
+
+    _reverse_geocode_cache[cache_key] = result
+
+    return result
 
 
 app = FastAPI()
@@ -731,12 +773,12 @@ class CreateVehicleRequest(BaseModel):
     spec_id: int
 
     #
-    # Matched (within ROUND_DECIMALS precision) against a path's
-    # origin_lat/origin_lng to decide which paths this vehicle can start
-    # a trip on.
+    # Free-text address, geocoded to current_lat/current_lng on the way in
+    # (see geocode() in app.py) - the DB only ever stores coordinates.
+    # Matching against a path's origin (to decide which paths this vehicle
+    # can start a trip on) is done on those coordinates, not this text.
     #
-    current_lat: float
-    current_lng: float
+    current_location: str
 
 
 
@@ -767,10 +809,12 @@ class CreateVehicleSpecRequest(BaseModel):
 
 class CreatePathRequest(BaseModel):
 
-    origin_lat: float
-    origin_lng: float
-    destination_lat: float
-    destination_lng: float
+    #
+    # Free-text addresses, geocoded to lat/lng on the way in (see geocode()
+    # in app.py) - the DB only ever stores coordinates.
+    #
+    origin: str
+    destination: str
 
 
 
@@ -908,8 +952,13 @@ def update_settings(req: UpdateSettingsRequest):
 @app.post("/api/vehicles")
 def create_vehicle(req: CreateVehicleRequest):
 
-    current_lat = round_coord(req.current_lat)
-    current_lng = round_coord(req.current_lng)
+    #
+    # Geocoded up front (same as create_path()'s origin/destination) so a
+    # bad location name fails fast, before touching the DB.
+    #
+    current_lat, current_lng = geocode(req.current_location)
+    current_lat = round_coord(current_lat)
+    current_lng = round_coord(current_lng)
 
     conn = db()
     cur = conn.cursor()
@@ -946,6 +995,8 @@ def create_vehicle(req: CreateVehicleRequest):
         "name": req.name,
 
         "spec": spec,
+
+        "current_location": req.current_location,
 
         "current_lat": current_lat,
 
@@ -1106,6 +1157,8 @@ def list_vehicles(include_sold: bool = False):
             "name": row[1],
 
             "spec": specs_by_id.get(row[2]),
+
+            "current_location": reverse_geocode((row[3], row[4])) or coord_label(row[3], row[4]),
 
             "current_lat": row[3],
 
@@ -1282,10 +1335,13 @@ def vehicle_city(id: int):
 @app.post("/api/paths")
 def create_path(req: CreatePathRequest):
 
-    origin_lat = round_coord(req.origin_lat)
-    origin_lng = round_coord(req.origin_lng)
-    destination_lat = round_coord(req.destination_lat)
-    destination_lng = round_coord(req.destination_lng)
+    origin_lat, origin_lng = geocode(req.origin)
+    destination_lat, destination_lng = geocode(req.destination)
+
+    origin_lat = round_coord(origin_lat)
+    origin_lng = round_coord(origin_lng)
+    destination_lat = round_coord(destination_lat)
+    destination_lng = round_coord(destination_lng)
 
     conn = db()
     cur = conn.cursor()
@@ -1318,9 +1374,13 @@ def create_path(req: CreatePathRequest):
 
             "id": existing[0],
 
+            "origin": reverse_geocode((existing[1], existing[2])) or coord_label(existing[1], existing[2]),
+
             "origin_lat": existing[1],
 
             "origin_lng": existing[2],
+
+            "destination": reverse_geocode((existing[3], existing[4])) or coord_label(existing[3], existing[4]),
 
             "destination_lat": existing[3],
 
@@ -1387,9 +1447,13 @@ def create_path(req: CreatePathRequest):
 
         "id": path_id,
 
+        "origin": req.origin,
+
         "origin_lat": origin_lat,
 
         "origin_lng": origin_lng,
+
+        "destination": req.destination,
 
         "destination_lat": destination_lat,
 
@@ -1437,9 +1501,13 @@ def list_paths():
 
             "id": row[0],
 
+            "origin": reverse_geocode((row[1], row[2])) or coord_label(row[1], row[2]),
+
             "origin_lat": row[1],
 
             "origin_lng": row[2],
+
+            "destination": reverse_geocode((row[3], row[4])) or coord_label(row[3], row[4]),
 
             "destination_lat": row[3],
 
@@ -1742,11 +1810,15 @@ def start_trip(req: StartTripRequest):
     route, distances_miles, max_speeds_mph, origin_lat, origin_lng = path_row
 
     if round_coord(vehicle_lat) != round_coord(origin_lat) or round_coord(vehicle_lng) != round_coord(origin_lng):
+
+        vehicle_location = reverse_geocode((vehicle_lat, vehicle_lng)) or coord_label(vehicle_lat, vehicle_lng)
+        origin_location = reverse_geocode((origin_lat, origin_lng)) or coord_label(origin_lat, origin_lng)
+
         cur.close()
         conn.close()
         raise HTTPException(
             status_code=409,
-            detail=f"Vehicle is currently at ({vehicle_lat}, {vehicle_lng}), not ({origin_lat}, {origin_lng}) - pick a path that starts there"
+            detail=f"Vehicle is currently in {vehicle_location}, not {origin_location} - pick a path that starts there"
         )
 
     cur.execute(

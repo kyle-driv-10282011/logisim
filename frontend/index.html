@@ -352,8 +352,7 @@
         <div class="panel-form">
             <input id="vehicle-name" placeholder="Name" value="Truck 1">
             <select id="vehicle-spec-select"></select>
-            <input id="vehicle-lat" type="number" step="any" placeholder="Starting latitude" value="44.9778">
-            <input id="vehicle-lng" type="number" step="any" placeholder="Starting longitude" value="-93.2650">
+            <input id="vehicle-location" placeholder="Starting location" value="Minneapolis">
             <button onclick="addVehicle()">Add Vehicle</button>
         </div>
 
@@ -379,11 +378,9 @@
     <div class="tab-content" id="tab-paths">
 
         <div class="panel-form">
-            <input id="origin-lat" type="number" step="any" placeholder="Origin latitude" value="44.9778">
-            <input id="origin-lng" type="number" step="any" placeholder="Origin longitude" value="-93.2650">
+            <input id="origin" placeholder="Origin" value="Minneapolis">
             <button id="swap-origin-destination-button" onclick="swapOriginDestination()" title="Swap origin and destination">&#8645; Swap</button>
-            <input id="destination-lat" type="number" step="any" placeholder="Destination latitude" value="41.8781">
-            <input id="destination-lng" type="number" step="any" placeholder="Destination longitude" value="-87.6298">
+            <input id="destination" placeholder="Destination" value="Chicago">
             <button onclick="createPath()">Create Path</button>
         </div>
 

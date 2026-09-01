@@ -395,7 +395,7 @@ function renderVehicleList() {
             (imageUrl ? `<img class="spec-thumb" src="${imageUrl}">` : "") +
             `<span>${vehicle.name}` +
             (vehicle.spec ? ` (${specLabel(vehicle.spec)})` : "") +
-            ` &middot; ${coordLabel(vehicle.current_lat, vehicle.current_lng)} ` +
+            ` &middot; ${vehicle.current_location} ` +
             `<span class="status-badge status-${vehicle.status}">${vehicle.status}</span></span></span>` +
             (vehicle.status === "READY"
                 ? `<button class="sell-button" data-id="${vehicle.id}">Sell</button>`
@@ -441,7 +441,7 @@ function renderAllVehicleList() {
             (imageUrl ? `<img class="spec-thumb" src="${imageUrl}">` : "") +
             `<span>${vehicle.name}` +
             (vehicle.spec ? ` (${specLabel(vehicle.spec)})` : "") +
-            ` &middot; ${coordLabel(vehicle.current_lat, vehicle.current_lng)} ` +
+            ` &middot; ${vehicle.current_location} ` +
             `<span class="status-badge status-${vehicle.status}">${vehicle.status}</span></span></span>`;
 
         list.appendChild(item);
@@ -547,7 +547,7 @@ function renderPathSelectForTripVehicle() {
     }
 
     hint.style.display = matching.length === 0 ? "" : "none";
-    hint.textContent = `No paths from ${coordLabel(vehicle.current_lat, vehicle.current_lng)} yet - create one in the Paths tab.`;
+    hint.textContent = `No paths from ${vehicle.current_location} yet - create one in the Paths tab.`;
 
     updateStartTripVisibility();
 }
@@ -699,9 +699,7 @@ async function addVehicle() {
 
             spec_id: Number(specId),
 
-            current_lat: Number(document.getElementById("vehicle-lat").value),
-
-            current_lng: Number(document.getElementById("vehicle-lng").value)
+            current_location: document.getElementById("vehicle-location").value
 
         })
 
@@ -718,15 +716,9 @@ async function addVehicle() {
 }
 
 
-function coordLabel(lat, lng) {
-
-    return `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
-}
-
-
 function pathLabel(path) {
 
-    return `${coordLabel(path.origin_lat, path.origin_lng)} -> ${coordLabel(path.destination_lat, path.destination_lng)}`;
+    return `${path.origin}-${path.destination}`;
 }
 
 
@@ -1436,19 +1428,12 @@ function previewPath(path) {
 
 function swapOriginDestination() {
 
-    const originLatInput = document.getElementById("origin-lat");
-    const originLngInput = document.getElementById("origin-lng");
-    const destinationLatInput = document.getElementById("destination-lat");
-    const destinationLngInput = document.getElementById("destination-lng");
+    const originInput = document.getElementById("origin");
+    const destinationInput = document.getElementById("destination");
 
-    const tempLat = originLatInput.value;
-    const tempLng = originLngInput.value;
-
-    originLatInput.value = destinationLatInput.value;
-    originLngInput.value = destinationLngInput.value;
-
-    destinationLatInput.value = tempLat;
-    destinationLngInput.value = tempLng;
+    const temp = originInput.value;
+    originInput.value = destinationInput.value;
+    destinationInput.value = temp;
 }
 
 
@@ -1464,13 +1449,9 @@ async function createPath() {
 
         body: JSON.stringify({
 
-            origin_lat: Number(document.getElementById("origin-lat").value),
+            origin: document.getElementById("origin").value,
 
-            origin_lng: Number(document.getElementById("origin-lng").value),
-
-            destination_lat: Number(document.getElementById("destination-lat").value),
-
-            destination_lng: Number(document.getElementById("destination-lng").value)
+            destination: document.getElementById("destination").value
 
         })
 
