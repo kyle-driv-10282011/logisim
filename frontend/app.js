@@ -142,6 +142,7 @@ let activeTripsById = new Map();   // vehicle_id -> trip (from the last poll)
 let activeVehicleIds = new Set();  // vehicle ids seen on the last poll
 let selectedVehicleId = null;      // vehicle id followed in the In Route tab
 let selectedTripVehicleId = null;  // vehicle id chosen (in the Vehicles tab) to start a trip
+let restingVehicleMarker = null;   // dot marking a clicked non-driving vehicle's resting location
 
 // Create the map
 map = L.map("map").setView([44.977, -93.265], 6);
@@ -154,6 +155,38 @@ L.tileLayer(
         attribution: "&copy; OpenStreetMap contributors"
     }
 ).addTo(map);
+
+
+//
+// A small dot marking where a non-driving (READY/SOLD) vehicle is
+// currently sitting - a driving vehicle already has its own live marker
+// from pollActiveTrips(), so this is only ever shown for one that doesn't.
+//
+function showRestingVehicleMarker(vehicle) {
+
+    clearRestingVehicleMarker();
+
+    restingVehicleMarker = L.circleMarker([vehicle.current_lat, vehicle.current_lng], {
+
+        radius: 8,
+        color: "#3388ff",
+        weight: 2,
+        fillColor: "#3388ff",
+        fillOpacity: 1
+
+    }).addTo(map);
+
+    restingVehicleMarker.bindTooltip(vehicle.name, { direction: "top", offset: [0, -10] });
+}
+
+
+function clearRestingVehicleMarker() {
+
+    if (restingVehicleMarker) {
+        map.removeLayer(restingVehicleMarker);
+        restingVehicleMarker = null;
+    }
+}
 
 
 function formatHMS(totalSeconds) {
@@ -447,9 +480,20 @@ function renderAllVehicleList() {
         // Just pans to wherever the vehicle currently is - unlike
         // selectVehicle() (the In Route "follow" flow) or
         // selectTripVehicle() (path-select filtering for starting a
-        // trip), clicking here doesn't change tabs or any other state.
+        // trip), clicking here doesn't change tabs or any other state. A
+        // driving vehicle already has its own live marker, so the resting
+        // dot is only for one that isn't.
         //
-        item.onclick = () => map.panTo([vehicle.current_lat, vehicle.current_lng]);
+        item.onclick = () => {
+
+            map.panTo([vehicle.current_lat, vehicle.current_lng]);
+
+            if (vehicle.status === "DRIVING") {
+                clearRestingVehicleMarker();
+            } else {
+                showRestingVehicleMarker(vehicle);
+            }
+        };
 
         const imageUrl = vehicle.spec ? specImageUrl(vehicle.spec.image) : null;
 
@@ -503,7 +547,11 @@ function selectTripVehicle(vehicleId) {
 
         if (vehicle) {
             map.panTo([vehicle.current_lat, vehicle.current_lng]);
+            showRestingVehicleMarker(vehicle);
         }
+
+    } else {
+        clearRestingVehicleMarker();
     }
 
     renderVehicleList();
@@ -583,6 +631,12 @@ function updateStartTripVisibility() {
 function selectVehicle(vehicleId) {
 
     selectedVehicleId = selectedVehicleId === vehicleId ? null : vehicleId;
+
+    //
+    // A driving vehicle gets its own live marker below - drop any resting
+    // dot left over from a previously clicked non-driving vehicle.
+    //
+    clearRestingVehicleMarker();
 
     //
     // Jump to the vehicle right away on selection; afterwards pollActiveTrips()
