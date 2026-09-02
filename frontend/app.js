@@ -237,6 +237,22 @@ function showTab(tab) {
         document.getElementById(`tab-${name}`).classList.toggle("active", name === tab);
         document.getElementById(`tab-button-${name}`).classList.toggle("active", name === tab);
     }
+
+    //
+    // Jumping to Paths with a vehicle focused (selectedVehicleId/
+    // selectedTripVehicleId - clearFocus() keeps these mutually exclusive)
+    // most likely means "make a path starting from that vehicle", so
+    // default Origin to where it is rather than leaving whatever was
+    // typed there before.
+    //
+    if (tab === "paths") {
+
+        const vehicle = vehiclesById.get(selectedVehicleId !== null ? selectedVehicleId : selectedTripVehicleId);
+
+        if (vehicle) {
+            document.getElementById("origin").value = vehicle.current_location;
+        }
+    }
 }
 
 
