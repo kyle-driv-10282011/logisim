@@ -343,7 +343,12 @@ def build_trip_schedule(distances_miles, max_speeds_mph, zones, traffic_base_dat
     return cumulative_seconds
 
 
-geolocator = Nominatim(user_agent="logisim-vehicle-sim")
+#
+# geopy defaults to a 1s timeout, which the public Nominatim instance
+# routinely blows past (GeocoderUnavailable/ReadTimeoutError) - give it the
+# same 10s budget road_route() already uses for OSRM.
+#
+geolocator = Nominatim(user_agent="logisim-vehicle-sim", timeout=10)
 
 #
 # Nominatim's public instance allows at most 1 request/second. This is only
