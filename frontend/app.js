@@ -189,6 +189,32 @@ function clearRestingVehicleMarker() {
 }
 
 
+//
+// Vehicles (In Route follow), vehicles (trip-start pick), and paths (zone
+// editor preview) all compete for the same map focus - clicking any one of
+// them should drop whatever the others had selected, rather than leaving
+// e.g. a followed driving vehicle still yanking the view back every poll
+// tick while a path is being previewed. Every click entry point below
+// calls this first, then applies its own selection on top.
+//
+function clearFocus() {
+
+    selectedVehicleId = null;
+    selectedTripVehicleId = null;
+
+    clearRestingVehicleMarker();
+}
+
+
+function renderFocusDependentViews() {
+
+    renderInRouteList();
+    renderVehicleList();
+    renderAllVehicleList();
+    renderPathSelectForTripVehicle();
+}
+
+
 function formatHMS(totalSeconds) {
 
     totalSeconds = Math.max(0, Math.round(totalSeconds));
@@ -480,19 +506,22 @@ function renderAllVehicleList() {
         // Just pans to wherever the vehicle currently is - unlike
         // selectVehicle() (the In Route "follow" flow) or
         // selectTripVehicle() (path-select filtering for starting a
-        // trip), clicking here doesn't change tabs or any other state. A
-        // driving vehicle already has its own live marker, so the resting
-        // dot is only for one that isn't.
+        // trip), clicking here doesn't change tabs. It still clears any
+        // other focus first though, same as those - a driving vehicle
+        // already has its own live marker, so the resting dot is only
+        // shown for one that isn't.
         //
         item.onclick = () => {
 
+            clearFocus();
+
             map.panTo([vehicle.current_lat, vehicle.current_lng]);
 
-            if (vehicle.status === "DRIVING") {
-                clearRestingVehicleMarker();
-            } else {
+            if (vehicle.status !== "DRIVING") {
                 showRestingVehicleMarker(vehicle);
             }
+
+            renderFocusDependentViews();
         };
 
         const imageUrl = vehicle.spec ? specImageUrl(vehicle.spec.image) : null;
@@ -534,28 +563,28 @@ async function sellVehicle(vehicleId) {
 
 function selectTripVehicle(vehicleId) {
 
-    selectedTripVehicleId = selectedTripVehicleId === vehicleId ? null : vehicleId;
+    const alreadySelected = selectedTripVehicleId === vehicleId;
+
+    clearFocus();
 
     //
     // Jump to wherever the vehicle currently is (its settled
     // current_lat/current_lng, not a live trip position - it's READY, not
     // driving) when it's selected, not when deselecting.
     //
-    if (selectedTripVehicleId !== null) {
+    if (!alreadySelected) {
 
-        const vehicle = vehiclesById.get(selectedTripVehicleId);
+        selectedTripVehicleId = vehicleId;
+
+        const vehicle = vehiclesById.get(vehicleId);
 
         if (vehicle) {
             map.panTo([vehicle.current_lat, vehicle.current_lng]);
             showRestingVehicleMarker(vehicle);
         }
-
-    } else {
-        clearRestingVehicleMarker();
     }
 
-    renderVehicleList();
-    renderPathSelectForTripVehicle();
+    renderFocusDependentViews();
 }
 
 
@@ -630,33 +659,32 @@ function updateStartTripVisibility() {
 
 function selectVehicle(vehicleId) {
 
-    selectedVehicleId = selectedVehicleId === vehicleId ? null : vehicleId;
+    const alreadySelected = selectedVehicleId === vehicleId;
 
-    //
-    // A driving vehicle gets its own live marker below - drop any resting
-    // dot left over from a previously clicked non-driving vehicle.
-    //
-    clearRestingVehicleMarker();
-
-    //
-    // Jump to the vehicle right away on selection; afterwards pollActiveTrips()
-    // keeps following it every tick without touching zoom.
-    //
-    const trip = activeTripsById.get(selectedVehicleId);
-
-    if (trip) {
-        map.panTo(trip.position);
-    }
+    clearFocus();
 
     currentCity = null;
 
-    if (selectedVehicleId !== null) {
+    if (!alreadySelected) {
+
+        selectedVehicleId = vehicleId;
+
+        //
+        // Jump to the vehicle right away on selection; afterwards
+        // pollActiveTrips() keeps following it every tick without touching
+        // zoom.
+        //
+        const trip = activeTripsById.get(vehicleId);
+
+        if (trip) {
+            map.panTo(trip.position);
+        }
+
         showTab("inroute");
         fetchCurrentCity();
     }
 
-    renderInRouteList();
-    renderVehicleList();
+    renderFocusDependentViews();
 }
 
 
@@ -1488,11 +1516,8 @@ async function removeZone(zoneId) {
 
 function previewPath(path) {
 
-    if (selectedVehicleId !== null) {
-        selectedVehicleId = null;
-        renderInRouteList();
-        renderVehicleList();
-    }
+    clearFocus();
+    renderFocusDependentViews();
 
     map.fitBounds(L.latLngBounds(path.route));
 
