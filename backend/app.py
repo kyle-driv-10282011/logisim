@@ -173,20 +173,19 @@ def get_settings(conn, cur):
 def settle_arrived_vehicles(conn, cur, time_multiplier):
 
     #
-    # A vehicle's current_lat/current_lng only updates once its most
-    # recent trip has actually arrived (real elapsed time since started_at
-    # has passed the compressed playback duration - same condition
-    # list_vehicles()/active_trips() use to decide DRIVING vs not) - not
-    # the instant a trip is created, and not continuously while driving.
-    # A single bulk UPDATE covers every vehicle at once rather than
-    # looping per vehicle; IS DISTINCT FROM skips vehicles already settled
-    # at that destination so this is cheap to call on every read.
+    # A vehicle's place only updates once its most recent trip has actually
+    # arrived (real elapsed time since started_at has passed the compressed
+    # playback duration - same condition list_vehicles()/active_trips() use
+    # to decide DRIVING vs not) - not the instant a trip is created, and not
+    # continuously while driving. A single bulk UPDATE covers every vehicle
+    # at once rather than looping per vehicle; IS DISTINCT FROM skips
+    # vehicles already settled at that destination so this is cheap to call
+    # on every read.
     #
     cur.execute(
         """
         UPDATE vehicles v
-        SET current_lat = p.destination_lat,
-            current_lng = p.destination_lng
+        SET place_id = p.destination_place_id
         FROM trips t
         JOIN paths p ON p.id = t.path_id
         WHERE t.id = (
@@ -197,7 +196,7 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
         )
         AND t.vehicle_id = v.id
         AND EXTRACT(EPOCH FROM (NOW() - t.started_at)) >= t.realized_duration_seconds / %s
-        AND (v.current_lat IS DISTINCT FROM p.destination_lat OR v.current_lng IS DISTINCT FROM p.destination_lng)
+        AND v.place_id IS DISTINCT FROM p.destination_place_id
         """,
         (time_multiplier,)
     )
@@ -361,14 +360,13 @@ reverse_geocode_limited = RateLimiter(geolocator.reverse, min_delay_seconds=1)
 
 
 #
-# The DB only ever stores lat/lng (see paths.origin_lat etc and
-# vehicles.current_lat/current_lng in init.sql) - an address is purely an
-# API-boundary convenience, geocoded to coordinates on the way in and
-# reverse-geocoded back to a label on the way out. Rounding to a fixed
-# precision (~1m) before storing/comparing means two independently-geocoded
-# coordinates for "the same place" (e.g. a vehicle's current_lat/lng and a
-# path's origin_lat/lng) still compare equal despite whatever float noise
-# came out of Nominatim.
+# Coordinates only ever live on the places table (see init.sql) - vehicles
+# and paths reference a place by id (place_id / origin_place_id /
+# destination_place_id) rather than duplicating lat/lng themselves.
+# Rounding to a fixed precision (~1m) before storing/comparing in
+# find_or_create_place() means two independently-geocoded results for "the
+# same place" still resolve to one row despite whatever float noise came
+# out of Nominatim.
 #
 ROUND_DECIMALS = 5
 
@@ -412,11 +410,6 @@ def geocode_full(place):
     return (location.latitude, location.longitude, location.address)
 
 
-def coord_label(lat, lng):
-
-    return f"{lat}, {lng}"
-
-
 #
 # Every free-text location box in the app (vehicle starting location, path
 # origin/destination) funnels through here instead of calling
@@ -425,6 +418,14 @@ def coord_label(lat, lng):
 # piling up near-duplicates. Takes the request's own cursor so the place
 # insert commits atomically with whatever row (vehicle/path) is being
 # created alongside it, rather than opening a second connection.
+#
+# Returns (place_id, lat, lng): vehicles/paths store the id as a foreign
+# key (see vehicles.place_id, paths.origin_place_id/destination_place_id
+# in init.sql) rather than duplicating lat/lng themselves, so a place's
+# description/address/coordinates live in exactly one row no matter how
+# many vehicles or paths point at it. The lat/lng are handed back too
+# since callers like create_path() need real coordinates for road_route()
+# regardless of the id.
 #
 def find_or_create_place(cur, description):
 
@@ -435,25 +436,28 @@ def find_or_create_place(cur, description):
 
     cur.execute("SELECT id FROM places WHERE lat = %s AND lng = %s", (lat, lng))
 
-    if cur.fetchone() is None:
-        cur.execute(
-            "INSERT INTO places (description, address, lat, lng) VALUES (%s, %s, %s, %s)",
-            (description, address, lat, lng)
-        )
+    existing = cur.fetchone()
 
-    return lat, lng
+    if existing is not None:
+        return existing[0], lat, lng
+
+    cur.execute(
+        "INSERT INTO places (description, address, lat, lng) VALUES (%s, %s, %s, %s) RETURNING id",
+        (description, address, lat, lng)
+    )
+
+    return cur.fetchone()[0], lat, lng
 
 
 #
 # Reverse-geocoding the same rounded coordinates always used to mean the
 # same real-world place, so caching by (rounded lat, rounded lng) avoids
-# re-hitting Nominatim's rate-limited endpoint every time a vehicle/path
-# list is read - which, unlike the live-position "current city" lookup this
-# was originally written for, can revisit the same coordinates constantly
-# (e.g. every vehicle sitting at the same depot).
+# re-hitting Nominatim's rate-limited endpoint on every poll of the same
+# driving vehicle's live position (vehicle_city() below is the only
+# remaining caller - a settled vehicle/path's location comes from its
+# saved place row instead, see find_or_create_place()).
 #
 _reverse_geocode_cache = {}
-_full_address_cache = {}
 
 
 def road_route(origin_coords, destination_coords):
@@ -680,32 +684,6 @@ def reverse_geocode(position):
     return result
 
 
-#
-# Same idea as reverse_geocode() above, but at street-level zoom and
-# returning Nominatim's full formatted address rather than just the
-# city/town field - reverse_geocode()'s city-only label is ambiguous
-# between same-named cities in different states, which is fine for the
-# "nearby city" display but not for prefilling a path's Origin, where
-# the user needs to see which of several same-named cities a vehicle is
-# actually sitting in. Cached separately since it's a different zoom
-# level (and thus a different Nominatim call) than reverse_geocode().
-#
-def full_address(position):
-
-    cache_key = (round_coord(position[0]), round_coord(position[1]))
-
-    if cache_key in _full_address_cache:
-        return _full_address_cache[cache_key]
-
-    location = reverse_geocode_limited((position[0], position[1]), zoom=18, language="en")
-
-    result = location.address if location is not None else None
-
-    _full_address_cache[cache_key] = result
-
-    return result
-
-
 app = FastAPI()
 
 
@@ -871,6 +849,37 @@ def fetch_zones_for_paths(cur, path_ids):
     return zones_by_path
 
 
+def place_dict(row):
+
+    return {
+
+        "id": row[0],
+
+        "description": row[1],
+
+        "address": row[2],
+
+        "lat": row[3],
+
+        "lng": row[4]
+    }
+
+
+def fetch_places_by_id(cur, place_ids):
+
+    place_ids = list(set(place_ids))
+
+    if not place_ids:
+        return {}
+
+    cur.execute(
+        "SELECT id, description, address, lat, lng FROM places WHERE id = ANY(%s)",
+        (place_ids,)
+    )
+
+    return {row[0]: place_dict(row) for row in cur.fetchall()}
+
+
 
 class CreateVehicleRequest(BaseModel):
 
@@ -883,11 +892,11 @@ class CreateVehicleRequest(BaseModel):
     spec_id: int
 
     #
-    # Free-text address or place description, resolved to current_lat/
-    # current_lng on the way in (see find_or_create_place() in app.py) -
-    # the DB only ever stores coordinates. Matching against a path's
-    # origin (to decide which paths this vehicle can start a trip on) is
-    # done on those coordinates, not this text.
+    # Free-text address or place description, resolved to a place row on
+    # the way in (see find_or_create_place() in app.py) - the vehicle
+    # stores that place's id, not its own copy of the coordinates.
+    # Matching against a path's origin (to decide which paths this vehicle
+    # can start a trip on) is done by comparing place ids, not this text.
     #
     current_location: str
 
@@ -928,9 +937,9 @@ class CreateVehicleSpecRequest(BaseModel):
 class CreatePathRequest(BaseModel):
 
     #
-    # Free-text addresses or place descriptions, resolved to lat/lng on
-    # the way in (see find_or_create_place() in app.py) - the DB only
-    # ever stores coordinates.
+    # Free-text addresses or place descriptions, resolved to a place row
+    # on the way in (see find_or_create_place() in app.py) - the path
+    # stores each place's id, not its own copy of the coordinates.
     #
     origin: str
     destination: str
@@ -1099,7 +1108,7 @@ def create_vehicle(req: CreateVehicleRequest):
     # destination) so a bad location name fails fast, before the vehicle
     # row is inserted.
     #
-    current_lat, current_lng = find_or_create_place(cur, req.current_location)
+    place_id, current_lat, current_lng = find_or_create_place(cur, req.current_location)
 
     #
     # "<year> <brand> <model> <n>" instead of a user-typed name, e.g.
@@ -1116,11 +1125,11 @@ def create_vehicle(req: CreateVehicleRequest):
 
     cur.execute(
         """
-        INSERT INTO vehicles (name, spec_id, current_lat, current_lng, starting_mileage)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO vehicles (name, spec_id, place_id, starting_mileage)
+        VALUES (%s, %s, %s, %s)
         RETURNING id
         """,
-        (name, req.spec_id, current_lat, current_lng, req.starting_mileage)
+        (name, req.spec_id, place_id, req.starting_mileage)
     )
 
     vehicle_id = cur.fetchone()[0]
@@ -1277,8 +1286,7 @@ def list_vehicles(include_sold: bool = False):
             v.id,
             v.name,
             v.spec_id,
-            v.current_lat,
-            v.current_lng,
+            v.place_id,
             v.starting_mileage,
             v.sold,
             v.sold_at,
@@ -1310,6 +1318,7 @@ def list_vehicles(include_sold: bool = False):
     rows = cur.fetchall()
 
     specs_by_id = fetch_specs_by_id(cur, [row[2] for row in rows])
+    places_by_id = fetch_places_by_id(cur, [row[3] for row in rows])
 
     cur.close()
     conn.close()
@@ -1323,21 +1332,27 @@ def list_vehicles(include_sold: bool = False):
 
             "spec": specs_by_id.get(row[2]),
 
-            "current_location": reverse_geocode((row[3], row[4])) or coord_label(row[3], row[4]),
+            #
+            # A single source of truth for a vehicle's location text/
+            # coordinates - the place row itself - rather than an
+            # independent reverse_geocode() call that could drift from
+            # whatever the Places tab shows for the same spot.
+            #
+            "current_location": places_by_id[row[3]]["description"],
 
-            "current_lat": row[3],
+            "current_lat": places_by_id[row[3]]["lat"],
 
-            "current_lng": row[4],
+            "current_lng": places_by_id[row[3]]["lng"],
 
-            "starting_mileage": row[5],
+            "starting_mileage": row[4],
 
-            "total_miles_traveled": row[5] + row[9],
+            "total_miles_traveled": row[4] + row[8],
 
-            "sold": row[6],
+            "sold": row[5],
 
-            "sold_at": row[7],
+            "sold_at": row[6],
 
-            "status": row[8]
+            "status": row[7]
         }
         for row in rows
     ]
@@ -1502,9 +1517,11 @@ def vehicle_city(id: int):
 
 #
 # Unlike vehicle_city() above (a driving vehicle's live mid-trip position),
-# this is for a settled vehicle sitting at current_lat/current_lng - used to
-# prefill the Paths tab's Origin field with a disambiguated address when a
-# vehicle is selected (see showTab() in app.js).
+# this is for a settled vehicle sitting at its place - used to prefill the
+# Paths tab's Origin field with a disambiguated address when a vehicle is
+# selected (see showTab() in app.js). The place's address was already
+# resolved once at creation (geocode_full(), via find_or_create_place()),
+# so this is a plain join - no fresh geocoding call needed.
 #
 @app.get("/api/vehicles/{id}/address")
 def vehicle_address(id: int):
@@ -1512,7 +1529,10 @@ def vehicle_address(id: int):
     conn = db()
     cur = conn.cursor()
 
-    cur.execute("SELECT current_lat, current_lng FROM vehicles WHERE id=%s", (id,))
+    cur.execute(
+        "SELECT p.address FROM vehicles v JOIN places p ON p.id = v.place_id WHERE v.id=%s",
+        (id,)
+    )
 
     row = cur.fetchone()
 
@@ -1522,25 +1542,7 @@ def vehicle_address(id: int):
     if row is None:
         raise HTTPException(status_code=404, detail="Vehicle not found")
 
-    current_lat, current_lng = row
-
-    return {"address": full_address((current_lat, current_lng)) or coord_label(current_lat, current_lng)}
-
-
-def place_dict(row):
-
-    return {
-
-        "id": row[0],
-
-        "description": row[1],
-
-        "address": row[2],
-
-        "lat": row[3],
-
-        "lng": row[4]
-    }
+    return {"address": row[0]}
 
 
 #
@@ -1570,9 +1572,9 @@ def create_place(req: CreatePlaceRequest):
     conn = db()
     cur = conn.cursor()
 
-    lat, lng = find_or_create_place(cur, req.description)
+    place_id, _, _ = find_or_create_place(cur, req.description)
 
-    cur.execute("SELECT id, description, address, lat, lng FROM places WHERE lat=%s AND lng=%s", (lat, lng))
+    cur.execute("SELECT id, description, address, lat, lng FROM places WHERE id=%s", (place_id,))
 
     place = place_dict(cur.fetchone())
 
@@ -1590,19 +1592,32 @@ def delete_place(id: int):
     conn = db()
     cur = conn.cursor()
 
-    cur.execute("DELETE FROM places WHERE id=%s", (id,))
+    try:
 
-    deleted = cur.rowcount > 0
+        cur.execute("DELETE FROM places WHERE id=%s RETURNING id", (id,))
 
-    conn.commit()
+        deleted = cur.fetchone()
+
+        conn.commit()
+
+    except psycopg2.errors.ForeignKeyViolation:
+
+        conn.rollback()
+        cur.close()
+        conn.close()
+
+        raise HTTPException(
+            status_code=409,
+            detail="Place is still in use by a vehicle or path"
+        )
 
     cur.close()
     conn.close()
 
-    if not deleted:
+    if deleted is None:
         raise HTTPException(status_code=404, detail="Place not found")
 
-    return {"ok": True}
+    return {"deleted": id}
 
 
 
@@ -1612,22 +1627,21 @@ def create_path(req: CreatePathRequest):
     conn = db()
     cur = conn.cursor()
 
-    origin_lat, origin_lng = find_or_create_place(cur, req.origin)
-    destination_lat, destination_lng = find_or_create_place(cur, req.destination)
+    origin_place_id, origin_lat, origin_lng = find_or_create_place(cur, req.origin)
+    destination_place_id, destination_lat, destination_lng = find_or_create_place(cur, req.destination)
 
     #
-    # Same origin/destination coordinates is the same path - return the
-    # existing one instead of re-routing and inserting a duplicate.
+    # Same origin/destination place is the same path - return the existing
+    # one instead of re-routing and inserting a duplicate.
     #
     cur.execute(
         """
-        SELECT id, origin_lat, origin_lng, destination_lat, destination_lng,
+        SELECT id, origin_place_id, destination_place_id,
             route, distances_miles, max_speeds_mph, road_names, road_name_boundary_miles
         FROM paths
-        WHERE origin_lat = %s AND origin_lng = %s
-            AND destination_lat = %s AND destination_lng = %s
+        WHERE origin_place_id = %s AND destination_place_id = %s
         """,
-        (origin_lat, origin_lng, destination_lat, destination_lng)
+        (origin_place_id, destination_place_id)
     )
 
     existing = cur.fetchone()
@@ -1635,6 +1649,7 @@ def create_path(req: CreatePathRequest):
     if existing is not None:
 
         zones = fetch_zones_for_paths(cur, [existing[0]]).get(existing[0], [])
+        places_by_id = fetch_places_by_id(cur, [existing[1], existing[2]])
 
         #
         # Nothing new for the path itself, but find_or_create_place() above
@@ -1650,27 +1665,27 @@ def create_path(req: CreatePathRequest):
 
             "id": existing[0],
 
-            "origin": reverse_geocode((existing[1], existing[2])) or coord_label(existing[1], existing[2]),
+            "origin": places_by_id[existing[1]]["description"],
 
-            "origin_lat": existing[1],
+            "origin_lat": places_by_id[existing[1]]["lat"],
 
-            "origin_lng": existing[2],
+            "origin_lng": places_by_id[existing[1]]["lng"],
 
-            "destination": reverse_geocode((existing[3], existing[4])) or coord_label(existing[3], existing[4]),
+            "destination": places_by_id[existing[2]]["description"],
 
-            "destination_lat": existing[3],
+            "destination_lat": places_by_id[existing[2]]["lat"],
 
-            "destination_lng": existing[4],
+            "destination_lng": places_by_id[existing[2]]["lng"],
 
-            "route": existing[5],
+            "route": existing[3],
 
-            "distances_miles": existing[6],
+            "distances_miles": existing[4],
 
-            "max_speeds_mph": existing[7],
+            "max_speeds_mph": existing[5],
 
-            "road_names": existing[8],
+            "road_names": existing[6],
 
-            "road_name_boundary_miles": existing[9],
+            "road_name_boundary_miles": existing[7],
 
             "zones": zones
         }
@@ -1683,10 +1698,8 @@ def create_path(req: CreatePathRequest):
         """
         INSERT INTO paths
         (
-            origin_lat,
-            origin_lng,
-            destination_lat,
-            destination_lng,
+            origin_place_id,
+            destination_place_id,
             route,
             distances_miles,
             max_speeds_mph,
@@ -1695,15 +1708,13 @@ def create_path(req: CreatePathRequest):
         )
 
         VALUES
-        (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        (%s,%s,%s,%s,%s,%s,%s)
 
         RETURNING id
         """,
         (
-            origin_lat,
-            origin_lng,
-            destination_lat,
-            destination_lng,
+            origin_place_id,
+            destination_place_id,
             json.dumps(route),
             json.dumps(distances_miles),
             json.dumps(max_speeds_mph),
@@ -1758,7 +1769,7 @@ def list_paths():
 
     cur.execute(
         """
-        SELECT id, origin_lat, origin_lng, destination_lat, destination_lng,
+        SELECT id, origin_place_id, destination_place_id,
             route, distances_miles, max_speeds_mph, road_names, road_name_boundary_miles
         FROM paths
         ORDER BY id
@@ -1768,6 +1779,7 @@ def list_paths():
     rows = cur.fetchall()
 
     zones_by_path = fetch_zones_for_paths(cur, [row[0] for row in rows])
+    places_by_id = fetch_places_by_id(cur, [row[1] for row in rows] + [row[2] for row in rows])
 
     cur.close()
     conn.close()
@@ -1777,27 +1789,27 @@ def list_paths():
 
             "id": row[0],
 
-            "origin": reverse_geocode((row[1], row[2])) or coord_label(row[1], row[2]),
+            "origin": places_by_id[row[1]]["description"],
 
-            "origin_lat": row[1],
+            "origin_lat": places_by_id[row[1]]["lat"],
 
-            "origin_lng": row[2],
+            "origin_lng": places_by_id[row[1]]["lng"],
 
-            "destination": reverse_geocode((row[3], row[4])) or coord_label(row[3], row[4]),
+            "destination": places_by_id[row[2]]["description"],
 
-            "destination_lat": row[3],
+            "destination_lat": places_by_id[row[2]]["lat"],
 
-            "destination_lng": row[4],
+            "destination_lng": places_by_id[row[2]]["lng"],
 
-            "route": row[5],
+            "route": row[3],
 
-            "distances_miles": row[6],
+            "distances_miles": row[4],
 
-            "max_speeds_mph": row[7],
+            "max_speeds_mph": row[5],
 
-            "road_names": row[8],
+            "road_names": row[6],
 
-            "road_name_boundary_miles": row[9],
+            "road_name_boundary_miles": row[7],
 
             "zones": zones_by_path.get(row[0], [])
         }
@@ -2048,14 +2060,14 @@ def start_trip(req: StartTripRequest):
     time_multiplier, game_time = get_settings(conn, cur)
 
     #
-    # Settle before reading current_lat/current_lng below - otherwise a
-    # vehicle whose previous trip just arrived (but hasn't been read since,
-    # e.g. GET /api/vehicles hasn't been polled yet) would still show its
-    # old, pre-arrival location here.
+    # Settle before reading place_id below - otherwise a vehicle whose
+    # previous trip just arrived (but hasn't been read since, e.g. GET
+    # /api/vehicles hasn't been polled yet) would still show its old,
+    # pre-arrival location here.
     #
     settle_arrived_vehicles(conn, cur, time_multiplier)
 
-    cur.execute("SELECT sold, current_lat, current_lng FROM vehicles WHERE id=%s", (req.vehicle_id,))
+    cur.execute("SELECT sold, place_id FROM vehicles WHERE id=%s", (req.vehicle_id,))
 
     vehicle_row = cur.fetchone()
 
@@ -2064,7 +2076,7 @@ def start_trip(req: StartTripRequest):
         conn.close()
         raise HTTPException(status_code=404, detail="Vehicle not found")
 
-    sold, vehicle_lat, vehicle_lng = vehicle_row
+    sold, vehicle_place_id = vehicle_row
 
     if sold:
         cur.close()
@@ -2072,7 +2084,7 @@ def start_trip(req: StartTripRequest):
         raise HTTPException(status_code=409, detail="Vehicle has been sold")
 
     cur.execute(
-        "SELECT route, distances_miles, max_speeds_mph, origin_lat, origin_lng FROM paths WHERE id=%s",
+        "SELECT route, distances_miles, max_speeds_mph, origin_place_id FROM paths WHERE id=%s",
         (req.path_id,)
     )
 
@@ -2083,12 +2095,13 @@ def start_trip(req: StartTripRequest):
         conn.close()
         raise HTTPException(status_code=404, detail="Path not found")
 
-    route, distances_miles, max_speeds_mph, origin_lat, origin_lng = path_row
+    route, distances_miles, max_speeds_mph, origin_place_id = path_row
 
-    if round_coord(vehicle_lat) != round_coord(origin_lat) or round_coord(vehicle_lng) != round_coord(origin_lng):
+    if vehicle_place_id != origin_place_id:
 
-        vehicle_location = reverse_geocode((vehicle_lat, vehicle_lng)) or coord_label(vehicle_lat, vehicle_lng)
-        origin_location = reverse_geocode((origin_lat, origin_lng)) or coord_label(origin_lat, origin_lng)
+        places_by_id = fetch_places_by_id(cur, [vehicle_place_id, origin_place_id])
+        vehicle_location = places_by_id[vehicle_place_id]["description"]
+        origin_location = places_by_id[origin_place_id]["description"]
 
         cur.close()
         conn.close()

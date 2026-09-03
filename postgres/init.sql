@@ -65,10 +65,10 @@ CREATE TABLE places (
     -- normalized label to show alongside the free-text description.
     address TEXT NOT NULL,
 
-    -- Rounded to ROUND_DECIMALS (app.py), same as vehicles.current_lat/lng
-    -- and paths.origin_lat/lng, so a place resolving to the same
+    -- Rounded to ROUND_DECIMALS (app.py) so a place resolving to the same
     -- coordinates as an existing one is reused instead of duplicated
-    -- (find_or_create_place() in app.py).
+    -- (find_or_create_place() in app.py). The only lat/lng in the schema -
+    -- vehicles and paths reference a place by id instead of copying these.
     lat DOUBLE PRECISION NOT NULL,
 
     lng DOUBLE PRECISION NOT NULL,
@@ -83,17 +83,17 @@ CREATE TABLE vehicles (
 
     name TEXT NOT NULL,
 
-    -- Where the vehicle currently is, matched (within ROUND_DECIMALS
-    -- precision - see app.py) against a path's origin_lat/origin_lng to
+    -- Where the vehicle currently is - a foreign key rather than its own
+    -- copy of lat/lng, so the same place is never described three
+    -- different ways (a name here, an address there, coordinates
+    -- somewhere else). Matched against a path's origin_place_id to
     -- restrict which paths a vehicle can start a trip on. Set at creation,
-    -- then updated to a trip's destination coordinates once that trip
-    -- arrives (settle_arrived_vehicles() in app.py) - not touched while
-    -- a trip is in progress, so it reflects the last place the vehicle
-    -- was confirmed to be, not a live position (see the `trips` live
+    -- then updated to a trip's destination place once that trip arrives
+    -- (settle_arrived_vehicles() in app.py) - not touched while a trip is
+    -- in progress, so it reflects the last place the vehicle was
+    -- confirmed to be, not a live position (see the `trips` live
     -- position/road-name fields for that).
-    current_lat DOUBLE PRECISION NOT NULL,
-
-    current_lng DOUBLE PRECISION NOT NULL,
+    place_id INTEGER NOT NULL REFERENCES places(id),
 
     -- Odometer reading at the moment this vehicle was added to the fleet
     -- (e.g. a used vehicle bought with miles already on it). The vehicle's
@@ -120,13 +120,13 @@ CREATE TABLE paths (
 
     id SERIAL PRIMARY KEY,
 
-    origin_lat DOUBLE PRECISION NOT NULL,
+    -- Same normalization as vehicles.place_id above - a path's origin and
+    -- destination are places, referenced by id, not their own lat/lng
+    -- copies. Deduping an equivalent path (create_path() in app.py) is
+    -- now a plain id comparison instead of a rounded-float one.
+    origin_place_id INTEGER NOT NULL REFERENCES places(id),
 
-    origin_lng DOUBLE PRECISION NOT NULL,
-
-    destination_lat DOUBLE PRECISION NOT NULL,
-
-    destination_lng DOUBLE PRECISION NOT NULL,
+    destination_place_id INTEGER NOT NULL REFERENCES places(id),
 
     route JSONB NOT NULL,
 

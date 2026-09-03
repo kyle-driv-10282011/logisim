@@ -64,7 +64,7 @@ to an empty value) on a machine with unrestricted direct internet access.
 
 ## Data model
 
-Six tables, defined in `postgres/init.sql`. **There is no migration
+Seven tables, defined in `postgres/init.sql`. **There is no migration
 tooling** — `init.sql` only runs the first time a Postgres container starts
 against an empty volume. Changing the schema after that (adding a column,
 etc.) requires either:
@@ -125,10 +125,13 @@ geocoded/routed once and reused by any number of trips.
 The saved-places bank behind the Places tab: every location a vehicle's
 starting location or a path's origin/destination has ever resolved to via
 `find_or_create_place()` in `app.py`, plus whatever's added directly on
-that tab. Deduped by rounded `lat`/`lng` (same `ROUND_DECIMALS` precision
-as `vehicles.current_lat`/`current_lng` and `paths.origin_lat`/etc.) so
+that tab. `vehicles` and `paths` reference a place by id rather than
+storing their own copy of its coordinates (see their tables below) — a
+place's description/address/lat/lng live in exactly one row no matter how
+many vehicles or paths point at it. Deduped by rounded `lat`/`lng` so
 typing the same description twice, or two descriptions that resolve to
-the same spot, reuses one row.
+the same spot, reuses one row rather than creating a near-duplicate place
+with a different name.
 
 | Column        | Type    | Notes                          |
 |---------------|---------|----------------------------------|
@@ -149,8 +152,7 @@ without giving up the ability to type a brand-new description.
 |----------------|---------|----------------------------------|
 | `id`           | serial  | primary key                     |
 | `name`         | text    | server-generated as `"<year> <brand> <model> <n>"` from the vehicle's spec (see `create_vehicle()` in `app.py`) — not user-typed |
-| `current_location` | text | free text, matched case-insensitively against a path's `origin` — see [Vehicle location](#vehicle-location) below |
-| `current_position` | jsonb | `[lat, lon]` for `current_location` — geocoded once at creation, kept in sync by reusing a path's own route coordinates on arrival (no extra geocoding call). Lets the frontend center the map on a vehicle that isn't currently driving |
+| `place_id`     | integer | FK `places(id)` — where the vehicle currently is, matched against a path's `origin_place_id` to decide which paths it can start a trip on. Set at creation, then repointed at a trip's `destination_place_id` once that trip arrives (`settle_arrived_vehicles()`) — see [Vehicle location](#vehicle-location) below |
 | `spec_id`      | integer | FK `vehicle_specs(id)` — hauling specs (including type/brand/model) live on the spec, not duplicated per vehicle |
 | `sold`         | boolean | default `false`. Selling a vehicle sets this rather than deleting the row, so "All Vehicles" can show full history while "My Vehicles" filters to `sold = false` |
 | `sold_at`      | timestamp | nullable                      |
@@ -163,14 +165,15 @@ column besides `sold` itself.
 ### `paths`
 
 A path is a specific origin → destination route, geocoded and routed once
-and reused for any number of trips. Looking up an existing path is
-case-insensitive on `origin`/`destination` — creating "minneapolis" →
-"Chicago" twice returns the same row rather than re-geocoding/re-routing.
+and reused for any number of trips. Looking up an existing path is a
+plain `origin_place_id`/`destination_place_id` comparison — creating
+"minneapolis" → "Chicago" twice resolves both to the same two places and
+returns the existing row rather than re-routing.
 
 | Column                  | Type              | Notes |
 |-------------------------|-------------------|-------|
 | `id`                    | serial            | primary key |
-| `origin` / `destination`| text              | as typed by the user |
+| `origin_place_id` / `destination_place_id` | integer | FK `places(id)` each |
 | `route`                 | jsonb             | `[[lat, lon], ...]` — full-resolution polyline from OSRM |
 | `distances_miles`       | jsonb             | cumulative miles from the origin at each `route` point — a fixed geometric property of the path, independent of any traffic model (see [Position and speed](#position-and-speed)) |
 | `max_speeds_mph`        | jsonb             | OSRM's own per-segment speed (real distance ÷ duration), converted to mph — the free-flow input to the traffic model |
@@ -393,36 +396,34 @@ route (or drawing a custom stretch by picking two points); see
 
 ### Vehicle location
 
-A vehicle has a persistent `current_location` (free text, e.g.
-"Minneapolis") rather than being usable from anywhere — set when it's
-created, and `POST /api/trips` rejects (409) starting a trip on a path
-whose `origin` doesn't match it case-insensitively. A vehicle can only
-leave from where it currently is; to send it somewhere new, create a
-path whose origin is that location.
+A vehicle has a persistent `place_id` rather than being usable from
+anywhere — set when it's created, and `POST /api/trips` rejects (409)
+starting a trip on a path whose `origin_place_id` isn't the same place. A
+vehicle can only leave from where it currently is; to send it somewhere
+new, create a path whose origin is that location.
 
-`current_location` is **not** updated the moment a trip starts, and not
-continuously while driving — it stays at the departure city until the
-trip actually arrives, at which point it becomes the path's
-`destination`. This happens lazily: `settle_arrived_vehicles()` in
-`app.py` runs a single bulk `UPDATE` (all vehicles at once, skipping any
-already settled at the right destination) at the top of `GET
+`place_id` is **not** updated the moment a trip starts, and not
+continuously while driving — it stays at the departure place until the
+trip actually arrives, at which point it's repointed at the path's
+`destination_place_id`. This happens lazily: `settle_arrived_vehicles()`
+in `app.py` runs a single bulk `UPDATE` (all vehicles at once, skipping
+any already settled at the right destination) at the top of `GET
 /api/vehicles` and `POST /api/trips`, based on the same real-elapsed-vs-
 compressed-duration comparison used to decide `DRIVING` status elsewhere
 — there's no scheduler/webhook, so it's computed whenever a request
 happens to ask. A driving vehicle's actual live position/road is a
 separate, already-existing concept (`GET /api/trips/active`,
-[Position and speed](#position-and-speed)) — `current_location` only
-ever holds a settled place name, before or after a trip, never a
-point mid-route.
+[Position and speed](#position-and-speed)) — `place_id` only ever points
+at a settled place, before or after a trip, never a point mid-route.
 
-`current_position` (`[lat, lon]`) travels alongside `current_location`
-so the frontend can center the map on a vehicle that isn't currently
-driving: resolved once via `find_or_create_place()` when the vehicle is
-created (failing fast, like `create_path()`'s origin/destination, if the
-typed location doesn't resolve to a real place), then kept in sync by
-`settle_arrived_vehicles()` reusing the arrived path's own route
-endpoint (`route -> -1` — Postgres's negative JSONB array indexing)
-rather than geocoding again.
+Both the vehicle's own `current_location`/`current_lat`/`current_lng` in
+API responses and a path's `origin`/`origin_lat`/`origin_lng` (and the
+`destination` equivalents) are derived by joining to that place row
+rather than stored redundantly anywhere else — so the location text a
+vehicle shows in "My Vehicles" and the entry it corresponds to in the
+Places tab are guaranteed to read the same, instead of two independently
+-resolved labels for the same spot drifting apart (a name here, an
+address there, coordinates somewhere else).
 
 Both a vehicle's starting location and a path's origin/destination accept
 either a real address or a plain description of a place — e.g. "Target
@@ -443,8 +444,8 @@ exist yet — mirroring the backend's own restriction rather than letting
 the user pick an invalid path and only find out on submit. Clicking a
 vehicle (in My Vehicles, selecting it to start a trip, or in All
 Vehicles, which is otherwise read-only) pans the map to
-`current_position`; a `DRIVING` vehicle instead pans to its live trip
-position (`selectVehicle()`), same as before.
+`current_lat`/`current_lng`; a `DRIVING` vehicle instead pans to its live
+trip position (`selectVehicle()`), same as before.
 
 ### Nearby city lookup
 
@@ -463,18 +464,18 @@ All endpoints are on the `backend` service, default `http://localhost:5000`.
 |---------------------------------|-------------|
 | `GET /api/settings`             | Current game clock: `{time_multiplier, game_time}` |
 | `PUT /api/settings`             | Change `time_multiplier`. Body: `{time_multiplier}` — re-anchors the game clock at its current value so it speeds up/slows down rather than jumping. 409 if any vehicle is currently in route |
-| `POST /api/vehicles`            | Create a vehicle. Body: `{spec_id, current_location, starting_mileage?}` — `name` is server-generated (`"<year> <brand> <model> <n>"`), not part of the request. Response includes the generated `name`, resolved `spec`, and resolved `current_position`. 400 if `current_location` doesn't resolve |
-| `GET /api/vehicles`             | List vehicles with computed `status` (`READY`/`DRIVING`/`SOLD`), each vehicle's `spec`, `current_location`, and `current_position` (settled first — see [Vehicle location](#vehicle-location)). Defaults to the current fleet (`sold = false`, "My Vehicles"); `?include_sold=true` returns full history ("All Vehicles") |
+| `POST /api/vehicles`            | Create a vehicle. Body: `{spec_id, current_location, starting_mileage?}` — `name` is server-generated (`"<year> <brand> <model> <n>"`), not part of the request. Response includes the generated `name`, resolved `spec`, and resolved `current_lat`/`current_lng`. 400 if `current_location` doesn't resolve |
+| `GET /api/vehicles`             | List vehicles with computed `status` (`READY`/`DRIVING`/`SOLD`), each vehicle's `spec`, and `current_location`/`current_lat`/`current_lng` derived from its place (settled first — see [Vehicle location](#vehicle-location)). Defaults to the current fleet (`sold = false`, "My Vehicles"); `?include_sold=true` returns full history ("All Vehicles") |
 | `POST /api/vehicles/{id}/sell`  | Mark a vehicle sold (soft-delete). 409 if already sold or currently on a trip |
 | `DELETE /api/vehicles/{id}`     | Permanently delete a vehicle (cascades its trips) — distinct from selling; not used by the frontend |
 | `POST /api/vehicle-specs`       | Create a hauling-spec catalog entry. Body: `{year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, image?}` |
 | `GET /api/vehicle-specs`        | List all vehicle specs |
 | `DELETE /api/vehicle-specs/{id}`| Delete a spec. 409 if any vehicle still references it |
 | `GET /api/vehicles/{id}/city`   | Nearest place name to the vehicle's current position, if driving |
-| `GET /api/vehicles/{id}/address`| Full street address of a settled vehicle's `current_position` — used to prefill the Paths tab's Origin field (see [Vehicle location](#vehicle-location)) |
+| `GET /api/vehicles/{id}/address`| A settled vehicle's place's saved `address` — used to prefill the Paths tab's Origin field (see [Vehicle location](#vehicle-location)) |
 | `POST /api/places`              | Resolve a free-text description or address to a saved place (or return the existing match — see [`places`](#places)). Body: `{description}`. 400 if it doesn't resolve |
 | `GET /api/places`               | List all saved places |
-| `DELETE /api/places/{id}`       | Delete a saved place |
+| `DELETE /api/places/{id}`       | Delete a saved place. 409 if still referenced by a vehicle or path |
 | `POST /api/paths`               | Resolve + route an origin/destination (or return the existing match). Body: `{origin, destination}`. Response includes `zones` |
 | `GET /api/paths`                | List all created paths, each with its `zones` |
 | `DELETE /api/paths/{id}`        | Delete a path (cascades its trips and zones) |
