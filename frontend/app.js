@@ -215,6 +215,29 @@ function renderFocusDependentViews() {
 }
 
 
+//
+// Generic click-to-spinner wrapper for every button in the app: disables
+// the button and shows a spinner (see button.spinning in index.html) for
+// as long as fn takes to settle, sync or async alike. Promise.resolve()
+// .then(fn) defers the call to a microtask, so a purely synchronous fn
+// resolves before the browser ever paints the spinning class - no flash
+// for instant actions like tab switches, only for ones that actually wait
+// on a fetch.
+//
+function withSpinner(button, fn) {
+
+    button.classList.add("spinning");
+    button.disabled = true;
+
+    return Promise.resolve()
+        .then(fn)
+        .finally(() => {
+            button.classList.remove("spinning");
+            button.disabled = false;
+        });
+}
+
+
 function formatHMS(totalSeconds) {
 
     totalSeconds = Math.max(0, Math.round(totalSeconds));
@@ -372,7 +395,7 @@ function renderSpecList() {
 
         button.onclick = (event) => {
             event.stopPropagation();
-            removeSpec(Number(button.dataset.id));
+            withSpinner(button, () => removeSpec(Number(button.dataset.id)));
         };
     }
 }
@@ -533,7 +556,7 @@ function renderVehicleList() {
 
         button.onclick = (event) => {
             event.stopPropagation();
-            sellVehicle(Number(button.dataset.id));
+            withSpinner(button, () => sellVehicle(Number(button.dataset.id)));
         };
     }
 }
@@ -920,7 +943,7 @@ function renderPathList() {
 
         button.onclick = (event) => {
             event.stopPropagation();
-            removePath(Number(button.dataset.id));
+            withSpinner(button, () => removePath(Number(button.dataset.id)));
         };
     }
 }
@@ -1352,7 +1375,7 @@ function renderZoneList(path) {
 
         button.onclick = (event) => {
             event.stopPropagation();
-            removeZone(Number(button.dataset.id));
+            withSpinner(button, () => removeZone(Number(button.dataset.id)));
         };
     }
 }
@@ -1529,7 +1552,7 @@ async function saveZone() {
 function deleteSelectedZone() {
 
     if (selectedSection && selectedSection.zoneId !== null) {
-        removeZone(selectedSection.zoneId);
+        return removeZone(selectedSection.zoneId);
     }
 }
 

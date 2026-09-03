@@ -163,6 +163,39 @@
             padding: 2px 8px;
         }
 
+        /*
+         * The ::after ring uses currentColor for its visible arc, so it
+         * automatically matches each button's own text color (white on the
+         * blue active tab button, dark on plain ones) without per-button
+         * overrides. Hiding via visibility rather than color keeps that
+         * color available to currentColor while still blanking the label -
+         * and visibility is overridable per-element, so the pseudo-element
+         * can opt back in despite the inherited hidden button text.
+         */
+        button.spinning {
+            visibility: hidden;
+            position: relative;
+        }
+
+        button.spinning::after {
+            content: "";
+            visibility: visible;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 12px;
+            height: 12px;
+            margin: -6px 0 0 -6px;
+            border: 2px solid currentColor;
+            border-top-color: transparent;
+            border-radius: 50%;
+            animation: button-spin 0.6s linear infinite;
+        }
+
+        @keyframes button-spin {
+            to { transform: rotate(360deg); }
+        }
+
         .vehicle-item.selected {
             border-color: #3388ff;
             background: #eaf2ff;
@@ -292,7 +325,7 @@
         <div id="time-multiplier-control">
             <label for="time-multiplier-input">Time x</label>
             <input id="time-multiplier-input" type="number" min="0.1" step="1">
-            <button id="time-multiplier-set-button" onclick="setTimeMultiplier()">Set</button>
+            <button id="time-multiplier-set-button" onclick="withSpinner(this, setTimeMultiplier)">Set</button>
         </div>
     </div>
 </div>
@@ -300,11 +333,11 @@
 <div id="vehicle-panel">
 
     <div class="tab-bar">
-        <button class="tab-button" id="tab-button-templates" onclick="showTab('templates')">Templates</button>
-        <button class="tab-button active" id="tab-button-myvehicles" onclick="showTab('myvehicles')">My Vehicles</button>
-        <button class="tab-button" id="tab-button-allvehicles" onclick="showTab('allvehicles')">All Vehicles</button>
-        <button class="tab-button" id="tab-button-paths" onclick="showTab('paths')">Paths</button>
-        <button class="tab-button" id="tab-button-inroute" onclick="showTab('inroute')">In Route</button>
+        <button class="tab-button" id="tab-button-templates" onclick="withSpinner(this, () => showTab('templates'))">Templates</button>
+        <button class="tab-button active" id="tab-button-myvehicles" onclick="withSpinner(this, () => showTab('myvehicles'))">My Vehicles</button>
+        <button class="tab-button" id="tab-button-allvehicles" onclick="withSpinner(this, () => showTab('allvehicles'))">All Vehicles</button>
+        <button class="tab-button" id="tab-button-paths" onclick="withSpinner(this, () => showTab('paths'))">Paths</button>
+        <button class="tab-button" id="tab-button-inroute" onclick="withSpinner(this, () => showTab('inroute'))">In Route</button>
     </div>
 
     <div class="tab-content" id="tab-templates">
@@ -340,7 +373,7 @@
                 <label for="spec-image">Image filename (frontend/images/...)</label>
                 <input id="spec-image" placeholder="Image filename (frontend/images/...)" value="2026-Chevy-Express.png">
 
-                <button onclick="addSpec()">Add Template</button>
+                <button onclick="withSpinner(this, addSpec)">Add Template</button>
             </div>
 
         </div>
@@ -354,7 +387,7 @@
             <select id="vehicle-spec-select"></select>
             <input id="vehicle-location" placeholder="Starting location" value="Minneapolis">
             <input id="vehicle-starting-mileage" type="number" min="0" step="1" placeholder="Starting mileage" value="0">
-            <button onclick="addVehicle()">Add Vehicle</button>
+            <button onclick="withSpinner(this, addVehicle)">Add Vehicle</button>
         </div>
 
         <div id="vehicle-list"></div>
@@ -364,7 +397,7 @@
                 <option value="">Select a path...</option>
             </select>
             <div id="path-select-hint" style="display:none"></div>
-            <button id="start-trip-button" onclick="startTrip()" style="display:none">Start Trip</button>
+            <button id="start-trip-button" onclick="withSpinner(this, startTrip)" style="display:none">Start Trip</button>
         </div>
 
     </div>
@@ -380,9 +413,9 @@
 
         <div class="panel-form">
             <input id="origin" placeholder="Origin" value="Minneapolis">
-            <button id="swap-origin-destination-button" onclick="swapOriginDestination()" title="Swap origin and destination">&#8645; Swap</button>
+            <button id="swap-origin-destination-button" onclick="withSpinner(this, swapOriginDestination)" title="Swap origin and destination">&#8645; Swap</button>
             <input id="destination" placeholder="Destination" value="Chicago">
-            <button onclick="createPath()">Create Path</button>
+            <button onclick="withSpinner(this, createPath)">Create Path</button>
         </div>
 
         <div id="path-list"></div>
@@ -402,7 +435,7 @@
 
             <div id="zone-list"></div>
 
-            <button id="draw-zone-button" onclick="startZoneDraw()">Draw a custom zone</button>
+            <button id="draw-zone-button" onclick="withSpinner(this, startZoneDraw)">Draw a custom zone</button>
 
             <div id="zone-draw-hint" style="display:none">
                 Click the start point, then the end point, of the road chunk on the map.
@@ -424,9 +457,9 @@
                 <label>Rush hour severity (0-1, lower = worse)</label>
                 <input id="zone-rush-factor" type="number" min="0" max="1" step="0.05" value="0.6">
 
-                <button onclick="saveZone()">Save</button>
-                <button onclick="cancelZoneForm()">Cancel</button>
-                <button id="zone-delete-button" onclick="deleteSelectedZone()" style="display:none">Delete Zone</button>
+                <button onclick="withSpinner(this, saveZone)">Save</button>
+                <button onclick="withSpinner(this, cancelZoneForm)">Cancel</button>
+                <button id="zone-delete-button" onclick="withSpinner(this, deleteSelectedZone)" style="display:none">Delete Zone</button>
 
             </div>
 
