@@ -404,6 +404,7 @@ def coord_label(lat, lng):
 # (e.g. every vehicle sitting at the same depot).
 #
 _reverse_geocode_cache = {}
+_full_address_cache = {}
 
 
 def road_route(origin_coords, destination_coords):
@@ -626,6 +627,32 @@ def reverse_geocode(position):
     )
 
     _reverse_geocode_cache[cache_key] = result
+
+    return result
+
+
+#
+# Same idea as reverse_geocode() above, but at street-level zoom and
+# returning Nominatim's full formatted address rather than just the
+# city/town field - reverse_geocode()'s city-only label is ambiguous
+# between same-named cities in different states, which is fine for the
+# "nearby city" display but not for prefilling a path's Origin, where
+# the user needs to see which of several same-named cities a vehicle is
+# actually sitting in. Cached separately since it's a different zoom
+# level (and thus a different Nominatim call) than reverse_geocode().
+#
+def full_address(position):
+
+    cache_key = (round_coord(position[0]), round_coord(position[1]))
+
+    if cache_key in _full_address_cache:
+        return _full_address_cache[cache_key]
+
+    location = reverse_geocode_limited((position[0], position[1]), zoom=18, language="en")
+
+    result = location.address if location is not None else None
+
+    _full_address_cache[cache_key] = result
 
     return result
 
@@ -1392,6 +1419,33 @@ def vehicle_city(id: int):
     )
 
     return {"city": reverse_geocode(derived["position"])}
+
+
+#
+# Unlike vehicle_city() above (a driving vehicle's live mid-trip position),
+# this is for a settled vehicle sitting at current_lat/current_lng - used to
+# prefill the Paths tab's Origin field with a disambiguated address when a
+# vehicle is selected (see showTab() in app.js).
+#
+@app.get("/api/vehicles/{id}/address")
+def vehicle_address(id: int):
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("SELECT current_lat, current_lng FROM vehicles WHERE id=%s", (id,))
+
+    row = cur.fetchone()
+
+    cur.close()
+    conn.close()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Vehicle not found")
+
+    current_lat, current_lng = row
+
+    return {"address": full_address((current_lat, current_lng)) or coord_label(current_lat, current_lng)}
 
 
 

@@ -250,8 +250,41 @@ function showTab(tab) {
         const vehicle = vehiclesById.get(selectedVehicleId !== null ? selectedVehicleId : selectedTripVehicleId);
 
         if (vehicle) {
+
+            // current_location is just a city name, which is ambiguous
+            // between same-named cities in different states - fill it in
+            // right away so Origin isn't left blank, then swap in the full
+            // street address once it resolves (reverse-geocoding is rate
+            // limited on the backend, so this can take a moment).
             document.getElementById("origin").value = vehicle.current_location;
+
+            fillOriginWithFullAddress(vehicle.id);
         }
+    }
+}
+
+
+async function fillOriginWithFullAddress(vehicleId) {
+
+    const response = await fetch(API + "/api/vehicles/" + vehicleId + "/address");
+
+    if (!response.ok) {
+        return;
+    }
+
+    const data = await response.json();
+
+    //
+    // Ignore a stale response if the user switched tabs or vehicles, or
+    // edited Origin by hand, while this was in flight.
+    //
+    const stillFocused = vehicleId === (selectedVehicleId !== null ? selectedVehicleId : selectedTripVehicleId);
+    const origin = document.getElementById("origin");
+
+    if (stillFocused && document.getElementById("tab-paths").classList.contains("active")
+        && origin.value === vehiclesById.get(vehicleId).current_location) {
+
+        origin.value = data.address;
     }
 }
 
