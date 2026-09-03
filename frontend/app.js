@@ -144,9 +144,10 @@ let activeVehicleIds = new Set();  // vehicle ids seen on the last poll
 let selectedVehicleId = null;      // vehicle id followed in the In Route tab
 let selectedTripVehicleId = null;  // vehicle id chosen (in the Vehicles tab) to start a trip
 let selectedSpecId = null;         // spec id highlighted in the Templates tab
-let selectedPlaceId = null;        // place id highlighted in the Places tab
+let selectedPlaceId = null;        // place id focused in the Places tab
 let selectedPathId = null;         // path id currently previewed in the Paths tab
 let restingVehicleMarker = null;   // dot marking a clicked non-driving vehicle's resting location
+let placeMarker = null;            // dot marking a clicked place's location
 
 // Create the map
 map = L.map("map").setView([44.977, -93.265], 6);
@@ -194,19 +195,57 @@ function clearRestingVehicleMarker() {
 
 
 //
-// Vehicles (In Route follow), vehicles (trip-start pick), and paths (zone
-// editor preview) all compete for the same map focus - clicking any one of
-// them should drop whatever the others had selected, rather than leaving
-// e.g. a followed driving vehicle still yanking the view back every poll
-// tick while a path is being previewed. Every click entry point below
-// calls this first, then applies its own selection on top.
+// Same idea as showRestingVehicleMarker(), a different color so a place pin
+// doesn't get mistaken for a vehicle sitting there.
+//
+function showPlaceMarker(place) {
+
+    clearPlaceMarker();
+
+    placeMarker = L.circleMarker([place.lat, place.lng], {
+
+        radius: 8,
+        color: "#f08c00",
+        weight: 2,
+        fillColor: "#f08c00",
+        fillOpacity: 1
+
+    }).addTo(map);
+
+    placeMarker.bindTooltip(place.description, { direction: "top", offset: [0, -10] });
+}
+
+
+function clearPlaceMarker() {
+
+    if (placeMarker) {
+        map.removeLayer(placeMarker);
+        placeMarker = null;
+    }
+}
+
+
+//
+// Vehicles (In Route follow), vehicles (trip-start pick), paths (zone
+// editor preview), and places all compete for the same map focus -
+// clicking any one of them should drop whatever the others had selected,
+// rather than leaving e.g. a followed driving vehicle still yanking the
+// view back every poll tick while a place is being looked at. Every click
+// entry point below calls this first, then applies its own selection on
+// top. Re-renders the place list too, since unlike the others its
+// "selected" highlight has no other trigger to refresh it when cleared
+// from here.
 //
 function clearFocus() {
 
     selectedVehicleId = null;
     selectedTripVehicleId = null;
+    selectedPlaceId = null;
 
     clearRestingVehicleMarker();
+    clearPlaceMarker();
+
+    renderPlaceList();
 }
 
 
@@ -542,13 +581,30 @@ function renderPlaceList() {
 
 
 //
-// Same as selectSpec() - just a highlight, click again to clear, at most
-// one place selected at a time.
+// Unlike selectSpec() - a place has an actual location, so selecting one
+// also claims the shared map focus (see clearFocus()) the way selecting a
+// vehicle or previewing a path does: pan to it and drop a marker, clearing
+// whatever the others had.
 //
 function selectPlace(placeId) {
 
-    selectedPlaceId = selectedPlaceId === placeId ? null : placeId;
+    const alreadySelected = selectedPlaceId === placeId;
 
+    clearFocus();
+
+    if (!alreadySelected) {
+
+        selectedPlaceId = placeId;
+
+        const place = placesById.get(placeId);
+
+        if (place) {
+            map.panTo([place.lat, place.lng]);
+            showPlaceMarker(place);
+        }
+    }
+
+    renderFocusDependentViews();
     renderPlaceList();
 }
 
@@ -722,16 +778,25 @@ function renderAllVehicleList() {
         // Just pans to wherever the vehicle currently is - unlike
         // selectVehicle() (the In Route "follow" flow) or
         // selectTripVehicle() (path-select filtering for starting a
-        // trip), clicking here doesn't change tabs. It still clears any
-        // other focus first though, same as those - a driving vehicle
-        // already has its own live marker, so the resting dot is only
-        // shown for one that isn't.
+        // trip), clicking here doesn't change tabs or keep following it
+        // every poll tick, just a one-time pan. It still clears any other
+        // focus first though, same as those - a driving vehicle already
+        // has its own live marker (see pollActiveTrips()), so the resting
+        // dot is only shown for one that isn't.
+        //
+        // A DRIVING vehicle's current_lat/current_lng is its settled
+        // pre-trip location (see current_location in README's "Vehicle
+        // location"), not where it actually is right now - pan to its
+        // live trip position instead, when the active-trips poll has
+        // already picked it up.
         //
         item.onclick = () => {
 
             clearFocus();
 
-            map.panTo([vehicle.current_lat, vehicle.current_lng]);
+            const trip = vehicle.status === "DRIVING" ? activeTripsById.get(vehicle.id) : null;
+
+            map.panTo(trip ? trip.position : [vehicle.current_lat, vehicle.current_lng]);
 
             if (vehicle.status !== "DRIVING") {
                 showRestingVehicleMarker(vehicle);
