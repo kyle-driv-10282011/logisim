@@ -334,10 +334,30 @@
 
     <div class="tab-bar">
         <button class="tab-button" id="tab-button-templates" onclick="withSpinner(this, () => showTab('templates'))">Templates</button>
+        <button class="tab-button" id="tab-button-places" onclick="withSpinner(this, () => showTab('places'))">Places</button>
         <button class="tab-button active" id="tab-button-myvehicles" onclick="withSpinner(this, () => showTab('myvehicles'))">My Vehicles</button>
         <button class="tab-button" id="tab-button-allvehicles" onclick="withSpinner(this, () => showTab('allvehicles'))">All Vehicles</button>
         <button class="tab-button" id="tab-button-paths" onclick="withSpinner(this, () => showTab('paths'))">Paths</button>
         <button class="tab-button" id="tab-button-inroute" onclick="withSpinner(this, () => showTab('inroute'))">In Route</button>
+    </div>
+
+    <!--
+        Shared by every free-text location box (vehicle starting location,
+        path origin/destination) - suggests previously-saved places without
+        forcing a dropdown, so typing a brand-new description still works.
+    -->
+    <datalist id="places-list"></datalist>
+
+    <div class="tab-content" id="tab-places">
+
+        <b>Places</b>
+        <div id="place-list"></div>
+
+        <div class="panel-form">
+            <input id="place-description" placeholder="A description (Target near Minneapolis) or an address">
+            <button onclick="withSpinner(this, addPlace)">Add Place</button>
+        </div>
+
     </div>
 
     <div class="tab-content" id="tab-templates">
@@ -383,9 +403,8 @@
     <div class="tab-content active" id="tab-myvehicles">
 
         <div class="panel-form">
-            <input id="vehicle-name" placeholder="Name" value="Truck 1">
             <select id="vehicle-spec-select"></select>
-            <input id="vehicle-location" placeholder="Starting location" value="Minneapolis">
+            <input id="vehicle-location" list="places-list" placeholder="A description (Target near Minneapolis) or an address" value="Minneapolis">
             <input id="vehicle-starting-mileage" type="number" min="0" step="1" placeholder="Starting mileage" value="0">
             <button onclick="withSpinner(this, addVehicle)">Add Vehicle</button>
         </div>
@@ -412,9 +431,9 @@
     <div class="tab-content" id="tab-paths">
 
         <div class="panel-form">
-            <input id="origin" placeholder="Origin" value="Minneapolis">
+            <input id="origin" list="places-list" placeholder="Origin" value="Minneapolis">
             <button id="swap-origin-destination-button" onclick="withSpinner(this, swapOriginDestination)" title="Swap origin and destination">&#8645; Swap</button>
-            <input id="destination" placeholder="Destination" value="Chicago">
+            <input id="destination" list="places-list" placeholder="Destination" value="Chicago">
             <button onclick="withSpinner(this, createPath)">Create Path</button>
         </div>
 

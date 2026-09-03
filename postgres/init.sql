@@ -51,6 +51,32 @@ CREATE TABLE vehicle_specs (
 );
 
 
+CREATE TABLE places (
+
+    id SERIAL PRIMARY KEY,
+
+    -- Free text as the user typed it - a legit address, or a description
+    -- like "Target near Minneapolis" (see PLACE_IN_PATTERN in app.py for
+    -- the "in"/"near" normalization applied before geocoding it).
+    description TEXT NOT NULL,
+
+    -- Nominatim's own formatted address for that description, resolved
+    -- once at creation (geocode_full() in app.py) so the saved place has a
+    -- normalized label to show alongside the free-text description.
+    address TEXT NOT NULL,
+
+    -- Rounded to ROUND_DECIMALS (app.py), same as vehicles.current_lat/lng
+    -- and paths.origin_lat/lng, so a place resolving to the same
+    -- coordinates as an existing one is reused instead of duplicated
+    -- (find_or_create_place() in app.py).
+    lat DOUBLE PRECISION NOT NULL,
+
+    lng DOUBLE PRECISION NOT NULL,
+
+    created TIMESTAMP DEFAULT NOW()
+);
+
+
 CREATE TABLE vehicles (
 
     id SERIAL PRIMARY KEY,

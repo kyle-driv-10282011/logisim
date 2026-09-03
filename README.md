@@ -64,7 +64,7 @@ to an empty value) on a machine with unrestricted direct internet access.
 
 ## Data model
 
-Five tables, defined in `postgres/init.sql`. **There is no migration
+Six tables, defined in `postgres/init.sql`. **There is no migration
 tooling** — `init.sql` only runs the first time a Postgres container starts
 against an empty volume. Changing the schema after that (adding a column,
 etc.) requires either:
@@ -120,12 +120,35 @@ geocoded/routed once and reused by any number of trips.
 | `image`                | text    | nullable; a filename under `frontend/images/` (e.g. `"2026-Chevy-Express.png"`), not a URL — the frontend resolves it against its own origin |
 | `created`              | timestamp | default `NOW()`                |
 
+### `places`
+
+The saved-places bank behind the Places tab: every location a vehicle's
+starting location or a path's origin/destination has ever resolved to via
+`find_or_create_place()` in `app.py`, plus whatever's added directly on
+that tab. Deduped by rounded `lat`/`lng` (same `ROUND_DECIMALS` precision
+as `vehicles.current_lat`/`current_lng` and `paths.origin_lat`/etc.) so
+typing the same description twice, or two descriptions that resolve to
+the same spot, reuses one row.
+
+| Column        | Type    | Notes                          |
+|---------------|---------|----------------------------------|
+| `id`          | serial  | primary key                     |
+| `description` | text    | free text as typed — an address, or a description like "Target near Minneapolis" |
+| `address`     | text    | Nominatim's own formatted address for `description`, resolved once at creation |
+| `lat` / `lng` | double precision | rounded to `ROUND_DECIMALS`     |
+| `created`     | timestamp | default `NOW()`                |
+
+Every free-text location box in the frontend (vehicle starting location,
+path origin/destination) has a `<datalist>` of these places wired to it via
+its `list` attribute, so a saved place can be picked back up by name
+without giving up the ability to type a brand-new description.
+
 ### `vehicles`
 
 | Column         | Type    | Notes                          |
 |----------------|---------|----------------------------------|
 | `id`           | serial  | primary key                     |
-| `name`         | text    |                                  |
+| `name`         | text    | server-generated as `"<year> <brand> <model> <n>"` from the vehicle's spec (see `create_vehicle()` in `app.py`) — not user-typed |
 | `current_location` | text | free text, matched case-insensitively against a path's `origin` — see [Vehicle location](#vehicle-location) below |
 | `current_position` | jsonb | `[lat, lon]` for `current_location` — geocoded once at creation, kept in sync by reusing a path's own route coordinates on arrival (no extra geocoding call). Lets the frontend center the map on a vehicle that isn't currently driving |
 | `spec_id`      | integer | FK `vehicle_specs(id)` — hauling specs (including type/brand/model) live on the spec, not duplicated per vehicle |
@@ -394,12 +417,23 @@ point mid-route.
 
 `current_position` (`[lat, lon]`) travels alongside `current_location`
 so the frontend can center the map on a vehicle that isn't currently
-driving: geocoded once via `geocode()` when the vehicle is created
-(failing fast, like `create_path()`'s origin/destination, if the typed
-location doesn't resolve to a real place), then kept in sync by
+driving: resolved once via `find_or_create_place()` when the vehicle is
+created (failing fast, like `create_path()`'s origin/destination, if the
+typed location doesn't resolve to a real place), then kept in sync by
 `settle_arrived_vehicles()` reusing the arrived path's own route
 endpoint (`route -> -1` — Postgres's negative JSONB array indexing)
 rather than geocoding again.
+
+Both a vehicle's starting location and a path's origin/destination accept
+either a real address or a plain description of a place — e.g. "Target
+near Minneapolis" — and both go through `find_or_create_place()`, which
+also normalizes " in "/" near " into a comma (`PLACE_IN_PATTERN`) before
+handing the text to Nominatim, since its search is a plain token match
+rather than a natural-language parser and drops results entirely if either
+word is present. Every resolved location is saved to the [`places`](
+#places) table so it can be picked back up later from the Places tab or
+any location box's autocomplete, instead of being geocoded fresh (and
+possibly landing on a different result) each time it's typed again.
 
 The frontend's "Add Vehicle" form requires a starting location, and the
 path dropdown for starting a trip (`renderPathSelectForTripVehicle()` in
@@ -429,7 +463,7 @@ All endpoints are on the `backend` service, default `http://localhost:5000`.
 |---------------------------------|-------------|
 | `GET /api/settings`             | Current game clock: `{time_multiplier, game_time}` |
 | `PUT /api/settings`             | Change `time_multiplier`. Body: `{time_multiplier}` — re-anchors the game clock at its current value so it speeds up/slows down rather than jumping. 409 if any vehicle is currently in route |
-| `POST /api/vehicles`            | Create a vehicle. Body: `{name, spec_id, current_location}`. Response includes the resolved `spec` and geocoded `current_position`. 400 if `current_location` doesn't geocode |
+| `POST /api/vehicles`            | Create a vehicle. Body: `{spec_id, current_location, starting_mileage?}` — `name` is server-generated (`"<year> <brand> <model> <n>"`), not part of the request. Response includes the generated `name`, resolved `spec`, and resolved `current_position`. 400 if `current_location` doesn't resolve |
 | `GET /api/vehicles`             | List vehicles with computed `status` (`READY`/`DRIVING`/`SOLD`), each vehicle's `spec`, `current_location`, and `current_position` (settled first — see [Vehicle location](#vehicle-location)). Defaults to the current fleet (`sold = false`, "My Vehicles"); `?include_sold=true` returns full history ("All Vehicles") |
 | `POST /api/vehicles/{id}/sell`  | Mark a vehicle sold (soft-delete). 409 if already sold or currently on a trip |
 | `DELETE /api/vehicles/{id}`     | Permanently delete a vehicle (cascades its trips) — distinct from selling; not used by the frontend |
@@ -437,7 +471,11 @@ All endpoints are on the `backend` service, default `http://localhost:5000`.
 | `GET /api/vehicle-specs`        | List all vehicle specs |
 | `DELETE /api/vehicle-specs/{id}`| Delete a spec. 409 if any vehicle still references it |
 | `GET /api/vehicles/{id}/city`   | Nearest place name to the vehicle's current position, if driving |
-| `POST /api/paths`               | Geocode + route an origin/destination (or return the existing match). Body: `{origin, destination}`. Response includes `zones` |
+| `GET /api/vehicles/{id}/address`| Full street address of a settled vehicle's `current_position` — used to prefill the Paths tab's Origin field (see [Vehicle location](#vehicle-location)) |
+| `POST /api/places`              | Resolve a free-text description or address to a saved place (or return the existing match — see [`places`](#places)). Body: `{description}`. 400 if it doesn't resolve |
+| `GET /api/places`               | List all saved places |
+| `DELETE /api/places/{id}`       | Delete a saved place |
+| `POST /api/paths`               | Resolve + route an origin/destination (or return the existing match). Body: `{origin, destination}`. Response includes `zones` |
 | `GET /api/paths`                | List all created paths, each with its `zones` |
 | `DELETE /api/paths/{id}`        | Delete a path (cascades its trips and zones) |
 | `POST /api/paths/{id}/zones`    | Add a road zone to a path. Body: `{start_miles, end_miles, speed_limit_mph, rush_hour_start?, rush_hour_end?, rush_hour_factor?}` |

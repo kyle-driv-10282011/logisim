@@ -394,7 +394,7 @@ def round_coord(value):
 PLACE_IN_PATTERN = re.compile(r"\s+(?:in|near)\s+", re.IGNORECASE)
 
 
-def geocode(place):
+def geocode_full(place):
 
     normalized_place = PLACE_IN_PATTERN.sub(", ", place)
 
@@ -409,12 +409,39 @@ def geocode(place):
             detail=f"Could not geocode location: {place}"
         )
 
-    return (location.latitude, location.longitude)
+    return (location.latitude, location.longitude, location.address)
 
 
 def coord_label(lat, lng):
 
     return f"{lat}, {lng}"
+
+
+#
+# Every free-text location box in the app (vehicle starting location, path
+# origin/destination) funnels through here instead of calling
+# geocode_full() directly, so typing the same description twice - or two
+# descriptions that resolve to the same spot - reuses one row rather than
+# piling up near-duplicates. Takes the request's own cursor so the place
+# insert commits atomically with whatever row (vehicle/path) is being
+# created alongside it, rather than opening a second connection.
+#
+def find_or_create_place(cur, description):
+
+    lat, lng, address = geocode_full(description)
+
+    lat = round_coord(lat)
+    lng = round_coord(lng)
+
+    cur.execute("SELECT id FROM places WHERE lat = %s AND lng = %s", (lat, lng))
+
+    if cur.fetchone() is None:
+        cur.execute(
+            "INSERT INTO places (description, address, lat, lng) VALUES (%s, %s, %s, %s)",
+            (description, address, lat, lng)
+        )
+
+    return lat, lng
 
 
 #
@@ -847,14 +874,20 @@ def fetch_zones_for_paths(cur, path_ids):
 
 class CreateVehicleRequest(BaseModel):
 
-    name: str
+    #
+    # No user-supplied name - create_vehicle() derives "<year> <brand>
+    # <model> <n>" from the spec plus how many vehicles already exist on
+    # it, so fleet vehicles are named consistently instead of whatever a
+    # user happens to type (e.g. "2026 Chevy Express 1").
+    #
     spec_id: int
 
     #
-    # Free-text address, geocoded to current_lat/current_lng on the way in
-    # (see geocode() in app.py) - the DB only ever stores coordinates.
-    # Matching against a path's origin (to decide which paths this vehicle
-    # can start a trip on) is done on those coordinates, not this text.
+    # Free-text address or place description, resolved to current_lat/
+    # current_lng on the way in (see find_or_create_place() in app.py) -
+    # the DB only ever stores coordinates. Matching against a path's
+    # origin (to decide which paths this vehicle can start a trip on) is
+    # done on those coordinates, not this text.
     #
     current_location: str
 
@@ -895,11 +928,24 @@ class CreateVehicleSpecRequest(BaseModel):
 class CreatePathRequest(BaseModel):
 
     #
-    # Free-text addresses, geocoded to lat/lng on the way in (see geocode()
-    # in app.py) - the DB only ever stores coordinates.
+    # Free-text addresses or place descriptions, resolved to lat/lng on
+    # the way in (see find_or_create_place() in app.py) - the DB only
+    # ever stores coordinates.
     #
     origin: str
     destination: str
+
+
+
+class CreatePlaceRequest(BaseModel):
+
+    #
+    # Same free-text a vehicle/path location box accepts - an address, or
+    # a description like "Target near Minneapolis". Resolved the same way
+    # (find_or_create_place()), so pre-adding a place here and typing that
+    # same description into one of those boxes later reuses this row.
+    #
+    description: str
 
 
 
@@ -1037,23 +1083,36 @@ def update_settings(req: UpdateSettingsRequest):
 @app.post("/api/vehicles")
 def create_vehicle(req: CreateVehicleRequest):
 
-    #
-    # Geocoded up front (same as create_path()'s origin/destination) so a
-    # bad location name fails fast, before touching the DB.
-    #
-    current_lat, current_lng = geocode(req.current_location)
-    current_lat = round_coord(current_lat)
-    current_lng = round_coord(current_lng)
-
     conn = db()
     cur = conn.cursor()
 
-    cur.execute("SELECT id FROM vehicle_specs WHERE id=%s", (req.spec_id,))
+    specs_by_id = fetch_specs_by_id(cur, [req.spec_id])
+    spec = specs_by_id.get(req.spec_id)
 
-    if cur.fetchone() is None:
+    if spec is None:
         cur.close()
         conn.close()
         raise HTTPException(status_code=404, detail="Vehicle spec not found")
+
+    #
+    # Geocoded/resolved up front (same as create_path()'s origin/
+    # destination) so a bad location name fails fast, before the vehicle
+    # row is inserted.
+    #
+    current_lat, current_lng = find_or_create_place(cur, req.current_location)
+
+    #
+    # "<year> <brand> <model> <n>" instead of a user-typed name, e.g.
+    # "2026 Chevy Express 1" then "... 2" for the next one on that same
+    # spec. Counts every vehicle ever created on this spec (sold ones
+    # included) so numbers stay unique across "My Vehicles" and "All
+    # Vehicles" rather than getting reused after a sale.
+    #
+    cur.execute("SELECT COUNT(*) FROM vehicles WHERE spec_id=%s", (req.spec_id,))
+
+    vehicle_number = cur.fetchone()[0] + 1
+
+    name = f"{spec['year']} {spec['brand']} {spec['model']} {vehicle_number}"
 
     cur.execute(
         """
@@ -1061,12 +1120,10 @@ def create_vehicle(req: CreateVehicleRequest):
         VALUES (%s, %s, %s, %s, %s)
         RETURNING id
         """,
-        (req.name, req.spec_id, current_lat, current_lng, req.starting_mileage)
+        (name, req.spec_id, current_lat, current_lng, req.starting_mileage)
     )
 
     vehicle_id = cur.fetchone()[0]
-
-    spec = fetch_specs_by_id(cur, [req.spec_id])[req.spec_id]
 
     conn.commit()
 
@@ -1077,7 +1134,7 @@ def create_vehicle(req: CreateVehicleRequest):
 
         "id": vehicle_id,
 
-        "name": req.name,
+        "name": name,
 
         "spec": spec,
 
@@ -1470,20 +1527,93 @@ def vehicle_address(id: int):
     return {"address": full_address((current_lat, current_lng)) or coord_label(current_lat, current_lng)}
 
 
+def place_dict(row):
+
+    return {
+
+        "id": row[0],
+
+        "description": row[1],
+
+        "address": row[2],
+
+        "lat": row[3],
+
+        "lng": row[4]
+    }
+
+
+#
+# The saved-places bank (Places tab): every location a vehicle/path box has
+# ever resolved via find_or_create_place(), plus whatever's added directly
+# here, so a description only needs to be typed - and geocoded - once.
+#
+@app.get("/api/places")
+def list_places():
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("SELECT id, description, address, lat, lng FROM places ORDER BY description")
+
+    rows = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    return [place_dict(row) for row in rows]
+
+
+@app.post("/api/places")
+def create_place(req: CreatePlaceRequest):
+
+    conn = db()
+    cur = conn.cursor()
+
+    lat, lng = find_or_create_place(cur, req.description)
+
+    cur.execute("SELECT id, description, address, lat, lng FROM places WHERE lat=%s AND lng=%s", (lat, lng))
+
+    place = place_dict(cur.fetchone())
+
+    conn.commit()
+
+    cur.close()
+    conn.close()
+
+    return place
+
+
+@app.delete("/api/places/{id}")
+def delete_place(id: int):
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("DELETE FROM places WHERE id=%s", (id,))
+
+    deleted = cur.rowcount > 0
+
+    conn.commit()
+
+    cur.close()
+    conn.close()
+
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Place not found")
+
+    return {"ok": True}
+
+
 
 @app.post("/api/paths")
 def create_path(req: CreatePathRequest):
 
-    origin_lat, origin_lng = geocode(req.origin)
-    destination_lat, destination_lng = geocode(req.destination)
-
-    origin_lat = round_coord(origin_lat)
-    origin_lng = round_coord(origin_lng)
-    destination_lat = round_coord(destination_lat)
-    destination_lng = round_coord(destination_lng)
-
     conn = db()
     cur = conn.cursor()
+
+    origin_lat, origin_lng = find_or_create_place(cur, req.origin)
+    destination_lat, destination_lng = find_or_create_place(cur, req.destination)
 
     #
     # Same origin/destination coordinates is the same path - return the
@@ -1505,6 +1635,13 @@ def create_path(req: CreatePathRequest):
     if existing is not None:
 
         zones = fetch_zones_for_paths(cur, [existing[0]]).get(existing[0], [])
+
+        #
+        # Nothing new for the path itself, but find_or_create_place() above
+        # may have inserted new places rows - commit those rather than
+        # rolling them back on close.
+        #
+        conn.commit()
 
         cur.close()
         conn.close()

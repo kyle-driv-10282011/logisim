@@ -138,6 +138,7 @@ let specsById = new Map();         // spec_id -> vehicle spec (from GET /api/veh
 let pathsById = new Map();         // path_id -> path (from GET /api/paths)
 let vehiclesById = new Map();      // vehicle_id -> vehicle - current fleet, not sold (from GET /api/vehicles)
 let allVehiclesById = new Map();   // vehicle_id -> vehicle - full history, sold or not (from GET /api/vehicles?include_sold=true)
+let placesById = new Map();        // place_id -> place (from GET /api/places)
 let activeTripsById = new Map();   // vehicle_id -> trip (from the last poll)
 let activeVehicleIds = new Set();  // vehicle ids seen on the last poll
 let selectedVehicleId = null;      // vehicle id followed in the In Route tab
@@ -255,7 +256,7 @@ function formatHMS(totalSeconds) {
 
 function showTab(tab) {
 
-    for (const name of ["templates", "myvehicles", "allvehicles", "paths", "inroute"]) {
+    for (const name of ["templates", "places", "myvehicles", "allvehicles", "paths", "inroute"]) {
 
         document.getElementById(`tab-${name}`).classList.toggle("active", name === tab);
         document.getElementById(`tab-button-${name}`).classList.toggle("active", name === tab);
@@ -462,6 +463,110 @@ async function removeSpec(specId) {
     }
 
     loadSpecs();
+}
+
+
+async function loadPlaces() {
+
+    const response = await fetch(API + "/api/places");
+    const places = await response.json();
+
+    placesById = new Map(places.map((place) => [place.id, place]));
+
+    //
+    // A plain <datalist>, not a <select> - every free-text location box
+    // (vehicle starting location, path origin/destination) keeps accepting
+    // a brand-new description, this just suggests ones already saved.
+    //
+    const datalist = document.getElementById("places-list");
+
+    datalist.innerHTML = places
+        .map((place) => `<option value="${place.description}">${place.address}</option>`)
+        .join("");
+
+    renderPlaceList();
+}
+
+
+function renderPlaceList() {
+
+    const list = document.getElementById("place-list");
+
+    list.innerHTML = "";
+
+    for (const place of placesById.values()) {
+
+        const item = document.createElement("div");
+
+        item.className = "vehicle-item list-row";
+
+        item.innerHTML =
+            `<span class="spec-item-label"><span>${place.description}` +
+            `<div class="spec-item-details">${place.address}</div></span></span>` +
+            `<button class="remove-place-button" data-id="${place.id}">Delete</button>`;
+
+        list.appendChild(item);
+    }
+
+    for (const button of list.querySelectorAll(".remove-place-button")) {
+
+        button.onclick = (event) => {
+            event.stopPropagation();
+            withSpinner(button, () => removePlace(Number(button.dataset.id)));
+        };
+    }
+}
+
+
+async function addPlace() {
+
+    const descriptionInput = document.getElementById("place-description");
+
+    const response = await fetch(API + "/api/places", {
+
+        method: "POST",
+
+        headers: {
+            "Content-Type": "application/json"
+        },
+
+        body: JSON.stringify({
+            description: descriptionInput.value
+        })
+
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+        alert(data.detail || "Could not add place");
+        return;
+    }
+
+    descriptionInput.value = "";
+
+    loadPlaces();
+}
+
+
+async function removePlace(placeId) {
+
+    const place = placesById.get(placeId);
+
+    if (!confirm(`Delete place "${place ? place.description : placeId}"?`)) {
+        return;
+    }
+
+    const response = await fetch(API + "/api/places/" + placeId, { method: "DELETE" });
+
+    if (!response.ok) {
+
+        const data = await response.json();
+        alert(data.detail || "Could not delete place");
+        return;
+    }
+
+    loadPlaces();
 }
 
 
@@ -867,8 +972,6 @@ async function addVehicle() {
 
         body: JSON.stringify({
 
-            name: document.getElementById("vehicle-name").value,
-
             spec_id: Number(specId),
 
             current_location: document.getElementById("vehicle-location").value,
@@ -887,6 +990,7 @@ async function addVehicle() {
     }
 
     loadVehicles();
+    loadPlaces();
 }
 
 
@@ -1638,6 +1742,7 @@ async function createPath() {
     previewPath(path);
 
     await loadPaths();
+    loadPlaces();
 
     document.getElementById("path-select").value = path.id;
     updateStartTripVisibility();
@@ -1888,6 +1993,7 @@ function updateSimClock() {
 
 loadSpecs().then(loadVehicles);
 loadPaths();
+loadPlaces();
 
 loadSettings();
 
