@@ -1630,6 +1630,11 @@ async function createPath() {
 
     const path = await response.json();
 
+    if (!response.ok) {
+        alert(path.detail || "Could not create path");
+        return;
+    }
+
     previewPath(path);
 
     await loadPaths();

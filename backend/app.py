@@ -13,6 +13,7 @@ import json
 import bisect
 import logging
 import random
+import re
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -377,9 +378,30 @@ def round_coord(value):
     return round(value, ROUND_DECIMALS)
 
 
+#
+# Nominatim's search is a plain token match against its address/POI index,
+# not a natural-language parser - "target, brooklyn park, mn" finds the
+# store fine, but "target IN brooklyn park, mn" or "starbucks NEAR
+# minneapolis" (how a person would actually type it) return nothing,
+# because "in"/"near" aren't tokens that appear anywhere in the indexed
+# address. Swapping either for a comma before searching turns that
+# phrasing into the same query Nominatim already handles, without changing
+# behavior for input that has neither word (plain addresses, city names)
+# or a place that's legitimately named with one of them outside this
+# pattern (word-boundary + surrounding spaces keeps "Union" or "Indiana"
+# untouched).
+#
+PLACE_IN_PATTERN = re.compile(r"\s+(?:in|near)\s+", re.IGNORECASE)
+
+
 def geocode(place):
 
-    location = geolocator.geocode(place)
+    normalized_place = PLACE_IN_PATTERN.sub(", ", place)
+
+    location = geolocator.geocode(normalized_place)
+
+    if location is None and normalized_place != place:
+        location = geolocator.geocode(place)
 
     if location is None:
         raise HTTPException(
