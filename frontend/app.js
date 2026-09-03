@@ -143,6 +143,9 @@ let activeTripsById = new Map();   // vehicle_id -> trip (from the last poll)
 let activeVehicleIds = new Set();  // vehicle ids seen on the last poll
 let selectedVehicleId = null;      // vehicle id followed in the In Route tab
 let selectedTripVehicleId = null;  // vehicle id chosen (in the Vehicles tab) to start a trip
+let selectedSpecId = null;         // spec id highlighted in the Templates tab
+let selectedPlaceId = null;        // place id highlighted in the Places tab
+let selectedPathId = null;         // path id currently previewed in the Paths tab
 let restingVehicleMarker = null;   // dot marking a clicked non-driving vehicle's resting location
 
 // Create the map
@@ -375,7 +378,8 @@ function renderSpecList() {
 
         const item = document.createElement("div");
 
-        item.className = "vehicle-item list-row";
+        item.className = "vehicle-item list-row" + (spec.id === selectedSpecId ? " selected" : "");
+        item.onclick = () => selectSpec(spec.id);
 
         const imageUrl = specImageUrl(spec.image);
 
@@ -399,6 +403,20 @@ function renderSpecList() {
             withSpinner(button, () => removeSpec(Number(button.dataset.id)));
         };
     }
+}
+
+
+//
+// Clicking a spec just highlights it (click again to clear) - there's no
+// other view tied to it, unlike selectVehicle()/previewPath() which also
+// drive the map. Toggling one selection off clears any other one, so at
+// most one spec is ever highlighted at a time.
+//
+function selectSpec(specId) {
+
+    selectedSpecId = selectedSpecId === specId ? null : specId;
+
+    renderSpecList();
 }
 
 
@@ -462,6 +480,10 @@ async function removeSpec(specId) {
         return;
     }
 
+    if (selectedSpecId === specId) {
+        selectedSpecId = null;
+    }
+
     loadSpecs();
 }
 
@@ -498,7 +520,8 @@ function renderPlaceList() {
 
         const item = document.createElement("div");
 
-        item.className = "vehicle-item list-row";
+        item.className = "vehicle-item list-row" + (place.id === selectedPlaceId ? " selected" : "");
+        item.onclick = () => selectPlace(place.id);
 
         item.innerHTML =
             `<span class="spec-item-label"><span>${place.description}` +
@@ -515,6 +538,18 @@ function renderPlaceList() {
             withSpinner(button, () => removePlace(Number(button.dataset.id)));
         };
     }
+}
+
+
+//
+// Same as selectSpec() - just a highlight, click again to clear, at most
+// one place selected at a time.
+//
+function selectPlace(placeId) {
+
+    selectedPlaceId = selectedPlaceId === placeId ? null : placeId;
+
+    renderPlaceList();
 }
 
 
@@ -564,6 +599,10 @@ async function removePlace(placeId) {
         const data = await response.json();
         alert(data.detail || "Could not delete place");
         return;
+    }
+
+    if (selectedPlaceId === placeId) {
+        selectedPlaceId = null;
     }
 
     loadPlaces();
@@ -1033,7 +1072,7 @@ function renderPathList() {
 
         const item = document.createElement("div");
 
-        item.className = "vehicle-item list-row";
+        item.className = "vehicle-item list-row" + (path.id === selectedPathId ? " selected" : "");
         item.onclick = () => previewPath(path);
 
         item.innerHTML =
@@ -1073,6 +1112,10 @@ async function removePath(pathId) {
 
         document.getElementById("zone-form").style.display = "none";
         document.getElementById("zone-editor").style.display = "none";
+    }
+
+    if (selectedPathId === pathId) {
+        selectedPathId = null;
     }
 
     loadPaths();
@@ -1694,6 +1737,9 @@ function previewPath(path) {
 
     clearFocus();
     renderFocusDependentViews();
+
+    selectedPathId = path.id;
+    renderPathList();
 
     map.fitBounds(L.latLngBounds(path.route));
 
