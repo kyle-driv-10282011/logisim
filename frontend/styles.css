@@ -1,0 +1,95 @@
+/*
+ * Shared across every page (index.html, templates.html, ...) - generic
+ * list/button/badge components, not page-specific layout. Each page keeps
+ * its own <style> block for anything that only makes sense on that page
+ * (the map/sidebar chrome on index.html, for instance).
+ */
+
+body {
+    margin: 0;
+    font-family: Arial;
+}
+
+.panel-form {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 12px;
+}
+
+.vehicle-item {
+    padding: 8px;
+    margin-bottom: 6px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.vehicle-item:hover {
+    background: #f5f5f5;
+}
+
+.vehicle-item.selected {
+    border-color: #3388ff;
+    background: #eaf2ff;
+}
+
+.list-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.spec-thumb {
+    width: 32px;
+    height: 32px;
+    object-fit: contain;
+    border-radius: 3px;
+    background: #f0f0f0;
+    flex-shrink: 0;
+}
+
+.spec-item-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.spec-item-details {
+    font-size: 11px;
+    color: #555;
+}
+
+/*
+ * The ::after ring uses currentColor for its visible arc, so it
+ * automatically matches each button's own text color (white on the blue
+ * active tab button, dark on plain ones) without per-button overrides.
+ * Hiding via visibility rather than color keeps that color available to
+ * currentColor while still blanking the label - and visibility is
+ * overridable per-element, so the pseudo-element can opt back in despite
+ * the inherited hidden button text.
+ */
+button.spinning {
+    visibility: hidden;
+    position: relative;
+}
+
+button.spinning::after {
+    content: "";
+    visibility: visible;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 12px;
+    height: 12px;
+    margin: -6px 0 0 -6px;
+    border: 2px solid currentColor;
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: button-spin 0.6s linear infinite;
+}
+
+@keyframes button-spin {
+    to { transform: rotate(360deg); }
+}

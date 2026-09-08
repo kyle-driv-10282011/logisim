@@ -143,7 +143,6 @@ let activeTripsById = new Map();   // vehicle_id -> trip (from the last poll)
 let activeVehicleIds = new Set();  // vehicle ids seen on the last poll
 let selectedVehicleId = null;      // vehicle id followed in the In Route tab
 let selectedTripVehicleId = null;  // vehicle id chosen (in the Vehicles tab) to start a trip
-let selectedSpecId = null;         // spec id highlighted in the Templates tab
 let selectedPlaceId = null;        // place id focused in the Places tab
 let selectedPathId = null;         // path id currently previewed in the Paths tab
 let restingVehicleMarker = null;   // dot marking a clicked non-driving vehicle's resting location
@@ -298,7 +297,7 @@ function formatHMS(totalSeconds) {
 
 function showTab(tab) {
 
-    for (const name of ["templates", "places", "myvehicles", "allvehicles", "paths", "inroute"]) {
+    for (const name of ["places", "myvehicles", "allvehicles", "paths", "inroute"]) {
 
         document.getElementById(`tab-${name}`).classList.toggle("active", name === tab);
         document.getElementById(`tab-button-${name}`).classList.toggle("active", name === tab);
@@ -401,129 +400,8 @@ async function loadSpecs() {
         select.value = previousValue;
     }
 
-    renderSpecList();
     renderVehicleList();
     renderInRouteList();
-}
-
-
-function renderSpecList() {
-
-    const list = document.getElementById("spec-list");
-
-    list.innerHTML = "";
-
-    for (const spec of specsById.values()) {
-
-        const item = document.createElement("div");
-
-        item.className = "vehicle-item list-row" + (spec.id === selectedSpecId ? " selected" : "");
-        item.onclick = () => selectSpec(spec.id);
-
-        const imageUrl = specImageUrl(spec.image);
-
-        item.innerHTML =
-            `<span class="spec-item-label">` +
-            (imageUrl ? `<img class="spec-thumb" src="${imageUrl}">` : "") +
-            `<span>${specLabel(spec)}` +
-            `<div class="spec-item-details">` +
-            `${spec.person_capacity} people &middot; ${spec.cargo_capacity_cuft} cu ft &middot; ` +
-            `$${Math.round(spec.cost).toLocaleString()} &middot; ${spec.mpg} mpg` +
-            `</div></span></span>` +
-            `<button class="remove-spec-button" data-id="${spec.id}">Delete</button>`;
-
-        list.appendChild(item);
-    }
-
-    for (const button of list.querySelectorAll(".remove-spec-button")) {
-
-        button.onclick = (event) => {
-            event.stopPropagation();
-            withSpinner(button, () => removeSpec(Number(button.dataset.id)));
-        };
-    }
-}
-
-
-//
-// Clicking a spec just highlights it (click again to clear) - there's no
-// other view tied to it, unlike selectVehicle()/previewPath() which also
-// drive the map. Toggling one selection off clears any other one, so at
-// most one spec is ever highlighted at a time.
-//
-function selectSpec(specId) {
-
-    selectedSpecId = selectedSpecId === specId ? null : specId;
-
-    renderSpecList();
-}
-
-
-async function addSpec() {
-
-    const response = await fetch(API + "/api/vehicle-specs", {
-
-        method: "POST",
-
-        headers: {
-            "Content-Type": "application/json"
-        },
-
-        body: JSON.stringify({
-
-            year: Number(document.getElementById("spec-year").value),
-
-            brand: document.getElementById("spec-brand").value,
-
-            model: document.getElementById("spec-model").value,
-
-            person_capacity: Number(document.getElementById("spec-person-capacity").value),
-
-            cargo_capacity_cuft: Number(document.getElementById("spec-cargo-capacity").value),
-
-            cost: Number(document.getElementById("spec-cost").value),
-
-            mpg: Number(document.getElementById("spec-mpg").value),
-
-            image: document.getElementById("spec-image").value || null
-
-        })
-
-    });
-
-    const data = await response.json();
-
-    if (!response.ok) {
-        alert(data.detail || "Could not add spec");
-        return;
-    }
-
-    loadSpecs();
-}
-
-
-async function removeSpec(specId) {
-
-    const spec = specsById.get(specId);
-
-    if (!confirm(`Delete spec "${spec ? specLabel(spec) : specId}"?`)) {
-        return;
-    }
-
-    const response = await fetch(API + "/api/vehicle-specs/" + specId, { method: "DELETE" });
-
-    if (!response.ok) {
-
-        const data = await response.json();
-        alert(data.detail || "Could not delete spec");
-        return;
-    }
-
-    if (selectedSpecId === specId) {
-        selectedSpecId = null;
-    }
-
-    loadSpecs();
 }
 
 
@@ -581,10 +459,10 @@ function renderPlaceList() {
 
 
 //
-// Unlike selectSpec() - a place has an actual location, so selecting one
-// also claims the shared map focus (see clearFocus()) the way selecting a
-// vehicle or previewing a path does: pan to it and drop a marker, clearing
-// whatever the others had.
+// A place has an actual location, so selecting one claims the shared map
+// focus (see clearFocus()) the way selecting a vehicle or previewing a
+// path does: pan to it and drop a marker, clearing whatever the others
+// had.
 //
 function selectPlace(placeId) {
 

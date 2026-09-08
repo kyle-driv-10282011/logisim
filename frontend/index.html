@@ -7,12 +7,9 @@
       href="https://unpkg.com/maplibre-gl/dist/maplibre-gl.css"
       rel="stylesheet" />
 
-    <style>
-        body {
-            margin:0;
-            font-family: Arial;
-        }
+    <link rel="stylesheet" href="styles.css">
 
+    <style>
         #app {
             display: flex;
             height: 100vh;
@@ -115,32 +112,6 @@
             display: block;
         }
 
-        .panel-form {
-            display: flex;
-            flex-direction: column;
-            gap: 6px;
-            margin-bottom: 12px;
-        }
-
-        .vehicle-item {
-            padding: 8px;
-            margin-bottom: 6px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            cursor: pointer;
-        }
-
-        .vehicle-item:hover {
-            background: #f5f5f5;
-        }
-
-        .list-row {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 8px;
-        }
-
         .vehicle-row {
             cursor: default;
         }
@@ -161,44 +132,6 @@
         .remove-path-button {
             font-size: 11px;
             padding: 2px 8px;
-        }
-
-        /*
-         * The ::after ring uses currentColor for its visible arc, so it
-         * automatically matches each button's own text color (white on the
-         * blue active tab button, dark on plain ones) without per-button
-         * overrides. Hiding via visibility rather than color keeps that
-         * color available to currentColor while still blanking the label -
-         * and visibility is overridable per-element, so the pseudo-element
-         * can opt back in despite the inherited hidden button text.
-         */
-        button.spinning {
-            visibility: hidden;
-            position: relative;
-        }
-
-        button.spinning::after {
-            content: "";
-            visibility: visible;
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            width: 12px;
-            height: 12px;
-            margin: -6px 0 0 -6px;
-            border: 2px solid currentColor;
-            border-top-color: transparent;
-            border-radius: 50%;
-            animation: button-spin 0.6s linear infinite;
-        }
-
-        @keyframes button-spin {
-            to { transform: rotate(360deg); }
-        }
-
-        .vehicle-item.selected {
-            border-color: #3388ff;
-            background: #eaf2ff;
         }
 
         .status-badge {
@@ -232,40 +165,6 @@
             padding-top: 10px;
             border-top: 1px solid #ccc;
             font-size: 13px;
-        }
-
-        #spec-editor {
-            margin-top: 16px;
-            padding-top: 10px;
-            border-top: 1px solid #ccc;
-            font-size: 13px;
-        }
-
-        #spec-editor label {
-            display: block;
-            font-size: 11px;
-            color: #555;
-            margin-top: 6px;
-        }
-
-        .spec-thumb {
-            width: 32px;
-            height: 32px;
-            object-fit: contain;
-            border-radius: 3px;
-            background: #f0f0f0;
-            flex-shrink: 0;
-        }
-
-        .spec-item-label {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-
-        .spec-item-details {
-            font-size: 11px;
-            color: #555;
         }
 
         .path-distance {
@@ -333,7 +232,7 @@
 <div id="vehicle-panel">
 
     <div class="tab-bar">
-        <button class="tab-button" id="tab-button-templates" onclick="withSpinner(this, () => showTab('templates'))">Templates</button>
+        <a class="tab-button" href="templates.html" style="text-decoration:none;color:inherit;text-align:center;">Templates</a>
         <button class="tab-button" id="tab-button-places" onclick="withSpinner(this, () => showTab('places'))">Places</button>
         <button class="tab-button active" id="tab-button-myvehicles" onclick="withSpinner(this, () => showTab('myvehicles'))">My Vehicles</button>
         <button class="tab-button" id="tab-button-allvehicles" onclick="withSpinner(this, () => showTab('allvehicles'))">All Vehicles</button>
@@ -356,46 +255,6 @@
         <div class="panel-form">
             <input id="place-description" placeholder="A description (Target near Minneapolis) or an address">
             <button onclick="withSpinner(this, addPlace)">Add Place</button>
-        </div>
-
-    </div>
-
-    <div class="tab-content" id="tab-templates">
-
-        <div id="spec-editor">
-
-            <b>Vehicle Templates</b>
-
-            <div id="spec-list"></div>
-
-            <div class="panel-form">
-                <label for="spec-year">Year</label>
-                <input id="spec-year" type="number" placeholder="Year" value="2026">
-
-                <label for="spec-brand">Brand</label>
-                <input id="spec-brand" placeholder="Brand" value="Chevy">
-
-                <label for="spec-model">Model</label>
-                <input id="spec-model" placeholder="Model" value="Express">
-
-                <label for="spec-person-capacity">Person capacity</label>
-                <input id="spec-person-capacity" type="number" min="1" placeholder="Person capacity" value="2">
-
-                <label for="spec-cargo-capacity">Cargo capacity (cu ft)</label>
-                <input id="spec-cargo-capacity" type="number" min="0" step="0.1" placeholder="Cargo capacity (cu ft)" value="240">
-
-                <label for="spec-cost">Cost ($)</label>
-                <input id="spec-cost" type="number" min="0" step="0.01" placeholder="Cost ($)" value="45000">
-
-                <label for="spec-mpg">MPG</label>
-                <input id="spec-mpg" type="number" min="0" step="0.1" placeholder="MPG" value="18">
-
-                <label for="spec-image">Image filename (frontend/images/...)</label>
-                <input id="spec-image" placeholder="Image filename (frontend/images/...)" value="2026-Chevy-Express.png">
-
-                <button onclick="withSpinner(this, addSpec)">Add Template</button>
-            </div>
-
         </div>
 
     </div>
