@@ -879,6 +879,27 @@ async function fetchCurrentCity() {
 }
 
 
+//
+// Gas used so far on the current trip is derived client-side, the same way
+// vehicleTotalMiles() derives live odometer - trip.distance_miles (from
+// GET /api/trips/active's derive_position()) divided by the vehicle's own
+// spec.mpg, rather than a value stored/computed on the backend. Returns
+// null when the vehicle or its spec (and so its mpg) isn't known yet.
+//
+function tripGallonsUsed(trip, vehicle) {
+
+    const mpg = vehicle && vehicle.spec ? vehicle.spec.mpg : null;
+
+    return mpg ? trip.distance_miles / mpg : null;
+}
+
+
+function formatGallons(gallons) {
+
+    return gallons.toFixed(2);
+}
+
+
 function renderInRouteList() {
 
     const list = document.getElementById("inroute-list");
@@ -894,9 +915,14 @@ function renderInRouteList() {
         item.className = "vehicle-item" + (trip.vehicle_id === selectedVehicleId ? " selected" : "");
         item.onclick = () => selectVehicle(trip.vehicle_id);
 
+        const gallonsUsed = tripGallonsUsed(trip, vehicle);
+
         item.innerHTML =
             `${vehicle ? vehicle.name : trip.vehicle_name} ` +
-            `<span class="status-badge status-${trip.status}">${trip.status}</span>`;
+            `<span class="status-badge status-${trip.status}">${trip.status}</span>` +
+            (gallonsUsed !== null
+                ? ` <span class="gas-badge">&#9981; ${formatGallons(gallonsUsed)} gal</span>`
+                : "");
 
         list.appendChild(item);
     }
@@ -917,6 +943,8 @@ function renderInRouteList() {
 
     const spec = vehicle ? vehicle.spec : null;
 
+    const gallonsUsed = tripGallonsUsed(trip, vehicle);
+
     details.innerHTML =
         `<b>${vehicle ? vehicle.name : trip.vehicle_name}</b><br>` +
         (spec
@@ -928,6 +956,8 @@ function renderInRouteList() {
         cityLine +
         `Position: ${trip.position[0].toFixed(4)}, ${trip.position[1].toFixed(4)}<br>` +
         (trip.road_name ? `Road: ${trip.road_name}<br>` : "") +
+        `Distance so far: ${trip.distance_miles.toFixed(1)} mi<br>` +
+        (gallonsUsed !== null ? `Gas used: ${formatGallons(gallonsUsed)} gal<br>` : "") +
         (trip.status === "ARRIVED"
             ? "Arrived"
             : `Speed: ${Math.round(trip.speed_mph)} mph<br>` +
