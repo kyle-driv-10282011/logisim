@@ -143,6 +143,7 @@ let activeTripsById = new Map();   // vehicle_id -> trip (from the last poll)
 let activeVehicleIds = new Set();  // vehicle ids seen on the last poll
 let selectedVehicleId = null;      // vehicle id followed in the In Route tab
 let selectedTripVehicleId = null;  // vehicle id chosen (in the Vehicles tab) to start a trip
+let selectedSpecId = null;         // spec id highlighted in the Templates tab (purely visual, no map focus)
 let selectedPlaceId = null;        // place id focused in the Places tab
 let selectedPathId = null;         // path id currently previewed in the Paths tab
 let restingVehicleMarker = null;   // dot marking a clicked non-driving vehicle's resting location
@@ -299,13 +300,60 @@ function formatHMS(totalSeconds) {
 }
 
 
+//
+// The tab bar collapses into a dropdown (too many tabs to fit as a row in
+// the 280px sidebar) - this is its label text, keyed the same way as the
+// tab/tab-button element ids showTab() below already toggles "active" on.
+//
+const TAB_LABELS = {
+    templates: "Templates",
+    places: "Places",
+    myvehicles: "My Vehicles",
+    allvehicles: "All Vehicles",
+    paths: "Paths",
+    inroute: "In Route",
+    gasprices: "Gas Prices"
+};
+
+
+function toggleTabMenu() {
+
+    document.getElementById("tab-menu").classList.toggle("open");
+}
+
+
+function closeTabMenu() {
+
+    document.getElementById("tab-menu").classList.remove("open");
+}
+
+
+//
+// Clicking anywhere outside the open dropdown closes it, the usual
+// expectation for this kind of menu - a click on the toggle button or an
+// item inside the list is still "inside" tab-menu, so this only fires for
+// a genuine click elsewhere (the map, another panel).
+//
+document.addEventListener("click", (event) => {
+
+    const menu = document.getElementById("tab-menu");
+
+    if (menu.classList.contains("open") && !menu.contains(event.target)) {
+        closeTabMenu();
+    }
+});
+
+
 function showTab(tab) {
 
-    for (const name of ["places", "myvehicles", "allvehicles", "paths", "inroute", "gasprices"]) {
+    for (const name of ["templates", "places", "myvehicles", "allvehicles", "paths", "inroute", "gasprices"]) {
 
         document.getElementById(`tab-${name}`).classList.toggle("active", name === tab);
         document.getElementById(`tab-button-${name}`).classList.toggle("active", name === tab);
     }
+
+    document.getElementById("tab-menu-current").textContent = TAB_LABELS[tab];
+    closeTabMenu();
 
     //
     // Jumping to Paths with a vehicle focused (selectedVehicleId/
@@ -406,6 +454,126 @@ async function loadSpecs() {
 
     renderVehicleList();
     renderInRouteList();
+    renderSpecList();
+}
+
+
+function renderSpecList() {
+
+    const list = document.getElementById("spec-list");
+
+    list.innerHTML = "";
+
+    for (const spec of specsById.values()) {
+
+        const item = document.createElement("div");
+
+        item.className = "vehicle-item list-row" + (spec.id === selectedSpecId ? " selected" : "");
+        item.onclick = () => selectSpec(spec.id);
+
+        const imageUrl = specImageUrl(spec.image);
+
+        item.innerHTML =
+            `<span class="spec-item-label">` +
+            (imageUrl ? `<img class="spec-thumb" src="${imageUrl}">` : "") +
+            `<span>${specLabel(spec)}` +
+            `<div class="spec-item-details">` +
+            `${spec.person_capacity} people &middot; ${spec.cargo_capacity_cuft} cu ft &middot; ` +
+            `$${Math.round(spec.cost).toLocaleString()} &middot; ${spec.mpg} mpg` +
+            `</div></span></span>` +
+            `<button class="remove-spec-button" data-id="${spec.id}">Delete</button>`;
+
+        list.appendChild(item);
+    }
+
+    for (const button of list.querySelectorAll(".remove-spec-button")) {
+
+        button.onclick = (event) => {
+            event.stopPropagation();
+            withSpinner(button, () => removeSpec(Number(button.dataset.id)));
+        };
+    }
+}
+
+
+//
+// Clicking a spec just highlights it (click again to clear) - purely a
+// visual focus like the Places tab's own selection, not tied to the map
+// (a template has no location).
+//
+function selectSpec(specId) {
+
+    selectedSpecId = selectedSpecId === specId ? null : specId;
+
+    renderSpecList();
+}
+
+
+async function addSpec() {
+
+    const response = await fetch(API + "/api/vehicle-specs", {
+
+        method: "POST",
+
+        headers: {
+            "Content-Type": "application/json"
+        },
+
+        body: JSON.stringify({
+
+            year: Number(document.getElementById("spec-year").value),
+
+            brand: document.getElementById("spec-brand").value,
+
+            model: document.getElementById("spec-model").value,
+
+            person_capacity: Number(document.getElementById("spec-person-capacity").value),
+
+            cargo_capacity_cuft: Number(document.getElementById("spec-cargo-capacity").value),
+
+            cost: Number(document.getElementById("spec-cost").value),
+
+            mpg: Number(document.getElementById("spec-mpg").value),
+
+            image: document.getElementById("spec-image").value || null
+
+        })
+
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+        alert(data.detail || "Could not add spec");
+        return;
+    }
+
+    loadSpecs();
+}
+
+
+async function removeSpec(specId) {
+
+    const spec = specsById.get(specId);
+
+    if (!confirm(`Delete spec "${spec ? specLabel(spec) : specId}"?`)) {
+        return;
+    }
+
+    const response = await fetch(API + "/api/vehicle-specs/" + specId, { method: "DELETE" });
+
+    if (!response.ok) {
+
+        const data = await response.json();
+        alert(data.detail || "Could not delete spec");
+        return;
+    }
+
+    if (selectedSpecId === specId) {
+        selectedSpecId = null;
+    }
+
+    loadSpecs();
 }
 
 

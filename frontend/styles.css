@@ -1,8 +1,7 @@
 /*
- * Shared across every page (index.html, templates.html, ...) - generic
- * list/button/badge components, not page-specific layout. Each page keeps
- * its own <style> block for anything that only makes sense on that page
- * (the map/sidebar chrome on index.html, for instance).
+ * Generic list/button/badge components used across index.html's tabs, kept
+ * separate from the page-specific layout (map/sidebar chrome, ...) that
+ * stays in index.html's own <style> block.
  */
 
 body {

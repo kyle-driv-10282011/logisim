@@ -512,8 +512,9 @@ a normal FastAPI exception handler and still carry CORS headers).
 
 ## Frontend
 
-Plain JS + Leaflet, no build step (`frontend/app.js`, `frontend/index.html`).
-Five tabs in the side panel:
+Plain JS + Leaflet, no build step, a single page (`frontend/app.js`,
+`frontend/index.html`). Seven tabs, collapsed into a dropdown menu in the
+side panel since they don't all fit as a row:
 
 - **Templates** — the hauling-spec catalog. Create specs
   (year/brand/model/person capacity/cargo capacity/cost/MPG/image) and

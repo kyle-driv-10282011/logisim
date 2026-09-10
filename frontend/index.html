@@ -93,25 +93,86 @@
             box-sizing: border-box;
         }
 
-        .tab-bar {
-            display: flex;
-            gap: 4px;
+        .tab-menu {
+            position: relative;
             margin-bottom: 12px;
         }
 
-        .tab-button {
-            flex: 1;
-            padding: 6px 2px;
-            font-size: 11px;
-            border: 1px solid #ccc;
-            background: #f0f0f0;
+        .tab-menu-toggle {
+            width: 100%;
+            box-sizing: border-box;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 10px;
+            font-size: 12px;
+            font-weight: bold;
+            border: 1px solid #3388ff;
+            border-radius: 4px;
+            background: #3388ff;
+            color: white;
             cursor: pointer;
         }
 
+        .tab-menu-arrow {
+            font-size: 10px;
+            transition: transform 0.15s ease;
+        }
+
+        .tab-menu.open .tab-menu-arrow {
+            transform: rotate(180deg);
+        }
+
+        /*
+         * Positioned absolutely (not pushed inline) so opening the menu
+         * doesn't shove the active tab's content down and back up again -
+         * it overlays on top, closing as soon as a tab is picked.
+         */
+        .tab-menu-list {
+            display: none;
+            flex-direction: column;
+            position: absolute;
+            top: calc(100% + 2px);
+            left: 0;
+            right: 0;
+            z-index: 1000;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            background: white;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }
+
+        .tab-menu.open .tab-menu-list {
+            display: flex;
+        }
+
+        .tab-button {
+            flex: none;
+            width: 100%;
+            box-sizing: border-box;
+            text-align: left;
+            padding: 8px 10px;
+            font-size: 12px;
+            border: none;
+            border-bottom: 1px solid #eee;
+            background: white;
+            color: #222;
+            cursor: pointer;
+        }
+
+        .tab-menu-list .tab-button:last-child {
+            border-bottom: none;
+        }
+
+        .tab-button:hover {
+            background: #f5f5f5;
+        }
+
         .tab-button.active {
-            background: #3388ff;
-            border-color: #3388ff;
-            color: white;
+            background: #eaf2ff;
+            color: #3388ff;
+            font-weight: bold;
         }
 
         .tab-content {
@@ -183,7 +244,8 @@
             color: #555;
         }
 
-        #zone-editor label {
+        #zone-editor label,
+        #tab-templates label {
             display: block;
             font-size: 11px;
             color: #555;
@@ -243,14 +305,20 @@
 
 <div id="vehicle-panel">
 
-    <div class="tab-bar">
-        <a class="tab-button" href="templates.html" style="text-decoration:none;color:inherit;text-align:center;">Templates</a>
-        <button class="tab-button" id="tab-button-places" onclick="withSpinner(this, () => showTab('places'))">Places</button>
-        <button class="tab-button active" id="tab-button-myvehicles" onclick="withSpinner(this, () => showTab('myvehicles'))">My Vehicles</button>
-        <button class="tab-button" id="tab-button-allvehicles" onclick="withSpinner(this, () => showTab('allvehicles'))">All Vehicles</button>
-        <button class="tab-button" id="tab-button-paths" onclick="withSpinner(this, () => showTab('paths'))">Paths</button>
-        <button class="tab-button" id="tab-button-inroute" onclick="withSpinner(this, () => showTab('inroute'))">In Route</button>
-        <button class="tab-button" id="tab-button-gasprices" onclick="withSpinner(this, () => showTab('gasprices'))">Gas Prices</button>
+    <div class="tab-menu" id="tab-menu">
+        <button class="tab-menu-toggle" id="tab-menu-toggle" onclick="toggleTabMenu()">
+            <span id="tab-menu-current">My Vehicles</span>
+            <span class="tab-menu-arrow">&#9662;</span>
+        </button>
+        <div class="tab-menu-list" id="tab-menu-list">
+            <button class="tab-button" id="tab-button-templates" onclick="withSpinner(this, () => showTab('templates'))">Templates</button>
+            <button class="tab-button" id="tab-button-places" onclick="withSpinner(this, () => showTab('places'))">Places</button>
+            <button class="tab-button active" id="tab-button-myvehicles" onclick="withSpinner(this, () => showTab('myvehicles'))">My Vehicles</button>
+            <button class="tab-button" id="tab-button-allvehicles" onclick="withSpinner(this, () => showTab('allvehicles'))">All Vehicles</button>
+            <button class="tab-button" id="tab-button-paths" onclick="withSpinner(this, () => showTab('paths'))">Paths</button>
+            <button class="tab-button" id="tab-button-inroute" onclick="withSpinner(this, () => showTab('inroute'))">In Route</button>
+            <button class="tab-button" id="tab-button-gasprices" onclick="withSpinner(this, () => showTab('gasprices'))">Gas Prices</button>
+        </div>
     </div>
 
     <!--
@@ -259,6 +327,42 @@
         forcing a dropdown, so typing a brand-new description still works.
     -->
     <datalist id="places-list"></datalist>
+
+    <div class="tab-content" id="tab-templates">
+
+        <b>Vehicle Templates</b>
+
+        <div id="spec-list"></div>
+
+        <div class="panel-form">
+            <label for="spec-year">Year</label>
+            <input id="spec-year" type="number" placeholder="Year" value="2026">
+
+            <label for="spec-brand">Brand</label>
+            <input id="spec-brand" placeholder="Brand" value="Chevy">
+
+            <label for="spec-model">Model</label>
+            <input id="spec-model" placeholder="Model" value="Express">
+
+            <label for="spec-person-capacity">Person capacity</label>
+            <input id="spec-person-capacity" type="number" min="1" placeholder="Person capacity" value="2">
+
+            <label for="spec-cargo-capacity">Cargo capacity (cu ft)</label>
+            <input id="spec-cargo-capacity" type="number" min="0" step="0.1" placeholder="Cargo capacity (cu ft)" value="240">
+
+            <label for="spec-cost">Cost ($)</label>
+            <input id="spec-cost" type="number" min="0" step="0.01" placeholder="Cost ($)" value="45000">
+
+            <label for="spec-mpg">MPG</label>
+            <input id="spec-mpg" type="number" min="0" step="0.1" placeholder="MPG" value="18">
+
+            <label for="spec-image">Image filename (frontend/images/...)</label>
+            <input id="spec-image" placeholder="Image filename (frontend/images/...)" value="2026-Chevy-Express.png">
+
+            <button onclick="withSpinner(this, addSpec)">Add Template</button>
+        </div>
+
+    </div>
 
     <div class="tab-content" id="tab-places">
 
