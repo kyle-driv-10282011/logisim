@@ -1021,6 +1021,21 @@ function vehicleTotalMiles(vehicle) {
 }
 
 
+//
+// Same scope as vehicleTotalMiles() (starting_mileage + settled trips +
+// whatever the current live trip has covered so far) divided by the
+// vehicle's own spec.mpg, rather than the In Route tab's tripGallonsUsed()
+// (which only covers the *current* trip) - this badge is meant to mirror
+// the "X mi" total already shown here, not a single trip's usage.
+//
+function vehicleGallonsUsed(vehicle) {
+
+    const mpg = vehicle.spec ? vehicle.spec.mpg : null;
+
+    return mpg ? vehicleTotalMiles(vehicle) / mpg : null;
+}
+
+
 function renderVehicleList() {
 
     const list = document.getElementById("vehicle-list");
@@ -1046,6 +1061,7 @@ function renderVehicleList() {
         }
 
         const imageUrl = vehicle.spec ? specImageUrl(vehicle.spec.image) : null;
+        const gallonsUsed = vehicleGallonsUsed(vehicle);
 
         item.innerHTML =
             `<span class="spec-item-label">` +
@@ -1053,8 +1069,11 @@ function renderVehicleList() {
             `<span>${vehicle.name}` +
             (vehicle.spec ? ` (${specLabel(vehicle.spec)})` : "") +
             ` &middot; ${vehicle.current_location} ` +
-            `&middot; ${Math.round(vehicleTotalMiles(vehicle)).toLocaleString()} mi ` +
-            `<span class="status-badge status-${vehicle.status}">${vehicle.status}</span></span></span>` +
+            `<span class="miles-badge">${Math.round(vehicleTotalMiles(vehicle)).toLocaleString()} mi</span>` +
+            (gallonsUsed !== null
+                ? ` <span class="gas-badge">&#9981; ${formatGallons(gallonsUsed)} gal</span>`
+                : "") +
+            ` <span class="status-badge status-${vehicle.status}">${vehicle.status}</span></span></span>` +
             (vehicle.status === "READY"
                 ? `<button class="sell-button" data-id="${vehicle.id}">Sell</button>`
                 : "");
