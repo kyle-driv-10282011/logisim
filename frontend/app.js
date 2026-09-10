@@ -1021,21 +1021,6 @@ function vehicleTotalMiles(vehicle) {
 }
 
 
-//
-// Same scope as vehicleTotalMiles() (starting_mileage + settled trips +
-// whatever the current live trip has covered so far) divided by the
-// vehicle's own spec.mpg, rather than the In Route tab's tripGallonsUsed()
-// (which only covers the *current* trip) - this badge is meant to mirror
-// the "X mi" total already shown here, not a single trip's usage.
-//
-function vehicleGallonsUsed(vehicle) {
-
-    const mpg = vehicle.spec ? vehicle.spec.mpg : null;
-
-    return mpg ? vehicleTotalMiles(vehicle) / mpg : null;
-}
-
-
 function renderVehicleList() {
 
     const list = document.getElementById("vehicle-list");
@@ -1061,7 +1046,16 @@ function renderVehicleList() {
         }
 
         const imageUrl = vehicle.spec ? specImageUrl(vehicle.spec.image) : null;
-        const gallonsUsed = vehicleGallonsUsed(vehicle);
+
+        //
+        // Trip-scoped, not the vehicle's lifetime odometer (that's what
+        // vehicleTotalMiles() is for, still used elsewhere) - these badges
+        // mirror the In Route tab's own per-trip miles/gallons, so they
+        // only render at all while this vehicle actually has an active
+        // trip (activeTripsById), and show nothing otherwise.
+        //
+        const trip = activeTripsById.get(vehicle.id);
+        const gallonsUsed = trip ? tripGallonsUsed(trip, vehicle) : null;
 
         item.innerHTML =
             `<span class="spec-item-label">` +
@@ -1069,11 +1063,14 @@ function renderVehicleList() {
             `<span>${vehicle.name}` +
             (vehicle.spec ? ` (${specLabel(vehicle.spec)})` : "") +
             ` &middot; ${vehicle.current_location} ` +
-            `<span class="miles-badge">${Math.round(vehicleTotalMiles(vehicle)).toLocaleString()} mi</span>` +
-            (gallonsUsed !== null
-                ? ` <span class="gas-badge">&#9981; ${formatGallons(gallonsUsed)} gal</span>`
+            (trip
+                ? `<span class="miles-badge">${Math.round(trip.distance_miles).toLocaleString()} mi</span>` +
+                  (gallonsUsed !== null
+                      ? ` <span class="gas-badge">&#9981; ${formatGallons(gallonsUsed)} gal</span>`
+                      : "") +
+                  " "
                 : "") +
-            ` <span class="status-badge status-${vehicle.status}">${vehicle.status}</span></span></span>` +
+            `<span class="status-badge status-${vehicle.status}">${vehicle.status}</span></span></span>` +
             (vehicle.status === "READY"
                 ? `<button class="sell-button" data-id="${vehicle.id}">Sell</button>`
                 : "");
