@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -11,6 +11,8 @@ import psycopg2
 import requests
 import json
 import bisect
+import csv
+import io
 import logging
 import random
 import re
@@ -751,6 +753,16 @@ def run_migrations():
 
     cur.execute("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS starting_mileage DOUBLE PRECISION NOT NULL DEFAULT 0")
 
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS gas_prices (
+            place_id INTEGER PRIMARY KEY REFERENCES places(id) ON DELETE CASCADE,
+            price_per_gallon DOUBLE PRECISION NOT NULL,
+            updated TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+        """
+    )
+
     conn.commit()
 
     cur.close()
@@ -865,6 +877,46 @@ def place_dict(row):
     }
 
 
+def gas_price_dict(row):
+
+    return {
+
+        "place_id": row[0],
+
+        "price_per_gallon": row[1],
+
+        "updated": row[2],
+
+        "description": row[3],
+
+        "lat": row[4],
+
+        "lng": row[5]
+    }
+
+
+GAS_PRICE_COLUMNS = "g.place_id, g.price_per_gallon, g.updated, p.description, p.lat, p.lng"
+
+
+def upsert_gas_price_row(cur, place_id, price_per_gallon):
+
+    #
+    # One current price per place, not a history - re-submitting for a
+    # place that already has one (single POST, or a re-uploaded CSV/JSON
+    # row referencing the same place) refreshes it in place instead of
+    # accumulating stale duplicates.
+    #
+    cur.execute(
+        """
+        INSERT INTO gas_prices (place_id, price_per_gallon, updated)
+        VALUES (%s, %s, NOW())
+        ON CONFLICT (place_id) DO UPDATE
+        SET price_per_gallon = EXCLUDED.price_per_gallon, updated = NOW()
+        """,
+        (place_id, price_per_gallon)
+    )
+
+
 def fetch_places_by_id(cur, place_ids):
 
     place_ids = list(set(place_ids))
@@ -955,6 +1007,20 @@ class CreatePlaceRequest(BaseModel):
     # same description into one of those boxes later reuses this row.
     #
     description: str
+
+
+
+class CreateGasPriceRequest(BaseModel):
+
+    #
+    # Same free-text a place/vehicle/path location box accepts - resolved
+    # via find_or_create_place() the same way, so pricing a place already
+    # known to the app (or typing the same description again) reuses that
+    # place's row rather than creating a near-duplicate.
+    #
+    description: str
+
+    price_per_gallon: float
 
 
 
@@ -1618,6 +1684,172 @@ def delete_place(id: int):
         raise HTTPException(status_code=404, detail="Place not found")
 
     return {"deleted": id}
+
+
+
+#
+# Gas prices are keyed by place (see gas_prices in init.sql) - the map
+# overlay this feeds shows one marker per priced place, not a history of
+# price changes there.
+#
+@app.get("/api/gas-prices")
+def list_gas_prices():
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute(
+        f"SELECT {GAS_PRICE_COLUMNS} FROM gas_prices g JOIN places p ON p.id = g.place_id ORDER BY g.updated DESC"
+    )
+
+    rows = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    return [gas_price_dict(row) for row in rows]
+
+
+@app.post("/api/gas-prices")
+def upsert_gas_price(req: CreateGasPriceRequest):
+
+    if req.price_per_gallon <= 0:
+        raise HTTPException(status_code=400, detail="price_per_gallon must be positive")
+
+    conn = db()
+    cur = conn.cursor()
+
+    place_id, _, _ = find_or_create_place(cur, req.description)
+
+    upsert_gas_price_row(cur, place_id, req.price_per_gallon)
+
+    cur.execute(
+        f"SELECT {GAS_PRICE_COLUMNS} FROM gas_prices g JOIN places p ON p.id = g.place_id WHERE g.place_id = %s",
+        (place_id,)
+    )
+
+    result = gas_price_dict(cur.fetchone())
+
+    conn.commit()
+
+    cur.close()
+    conn.close()
+
+    return result
+
+
+@app.delete("/api/gas-prices/{place_id}")
+def delete_gas_price(place_id: int):
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("DELETE FROM gas_prices WHERE place_id=%s RETURNING place_id", (place_id,))
+
+    deleted = cur.fetchone()
+
+    conn.commit()
+
+    cur.close()
+    conn.close()
+
+    if deleted is None:
+        raise HTTPException(status_code=404, detail="Gas price not found for that place")
+
+    return {"deleted": place_id}
+
+
+#
+# Bulk import via a CSV or JSON file (".json" filename -> JSON, otherwise
+# CSV). Each row/object needs a description/address (a "description",
+# "address", or "location" column/key) and a price ("price_per_gallon" or
+# "price"). Reuses find_or_create_place()/upsert_gas_price_row() from the
+# single-entry endpoint above, so a re-uploaded file just refreshes
+# existing prices rather than duplicating them.
+#
+# Each row commits independently (rather than one commit for the whole
+# batch) so a bad row's rollback can't wipe out earlier good rows already
+# written to the same connection's open transaction - a hand-edited
+# CSV/JSON is likely to have at least one typo, and that shouldn't cost the
+# rows that parsed fine.
+#
+@app.post("/api/gas-prices/upload")
+async def upload_gas_prices(file: UploadFile = File(...)):
+
+    raw = await file.read()
+
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="File must be UTF-8 text (CSV or JSON)")
+
+    if (file.filename or "").lower().endswith(".json"):
+
+        try:
+            entries = json.loads(text)
+        except json.JSONDecodeError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
+
+        if not isinstance(entries, list):
+            raise HTTPException(
+                status_code=400,
+                detail="JSON must be a list of {description, price_per_gallon} objects"
+            )
+
+    else:
+
+        entries = list(csv.DictReader(io.StringIO(text)))
+
+    conn = db()
+    cur = conn.cursor()
+
+    created = 0
+    errors = []
+
+    for index, entry in enumerate(entries):
+
+        description = None
+
+        try:
+
+            if not isinstance(entry, dict):
+                raise ValueError("row is not an object/record")
+
+            description = entry.get("description") or entry.get("address") or entry.get("location")
+
+            if not description:
+                raise ValueError("missing description/address/location")
+
+            price_raw = entry.get("price_per_gallon")
+            price_raw = price_raw if price_raw is not None else entry.get("price")
+
+            price = float(price_raw)
+
+            if price <= 0:
+                raise ValueError("price_per_gallon must be positive")
+
+            place_id, _, _ = find_or_create_place(cur, description)
+
+            upsert_gas_price_row(cur, place_id, price)
+
+            conn.commit()
+
+            created += 1
+
+        except Exception as e:
+
+            conn.rollback()
+
+            errors.append({
+                "row": index,
+                "description": description,
+                "error": getattr(e, "detail", str(e))
+            })
+
+    cur.close()
+    conn.close()
+
+    return {"created": created, "errors": errors}
 
 
 

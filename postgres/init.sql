@@ -77,6 +77,22 @@ CREATE TABLE places (
 );
 
 
+CREATE TABLE gas_prices (
+
+    -- One row per place, not a price history - place_id doubling as the
+    -- primary key means adding a price for a place that already has one
+    -- (typing it again, or a re-uploaded CSV/JSON row) updates it in place
+    -- via upsert (see POST /api/gas-prices in app.py) instead of piling up
+    -- stale duplicates. Mirrors the settings table's single-current-value
+    -- pattern rather than trips' append-only history.
+    place_id INTEGER PRIMARY KEY REFERENCES places(id) ON DELETE CASCADE,
+
+    price_per_gallon DOUBLE PRECISION NOT NULL,
+
+    updated TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+
 CREATE TABLE vehicles (
 
     id SERIAL PRIMARY KEY,

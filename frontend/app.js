@@ -148,6 +148,10 @@ let selectedPathId = null;         // path id currently previewed in the Paths t
 let restingVehicleMarker = null;   // dot marking a clicked non-driving vehicle's resting location
 let placeMarker = null;            // dot marking a clicked place's location
 
+let gasPricesByPlaceId = new Map(); // place_id -> gas price row (from GET /api/gas-prices)
+const gasPriceMarkers = new Map();  // place_id -> persistent Leaflet circleMarker (the map overlay itself)
+let gasPriceOverlayVisible = true;  // toggled by the "Show on map" checkbox in the Gas Prices tab
+
 // Create the map
 map = L.map("map").setView([44.977, -93.265], 6);
 
@@ -297,7 +301,7 @@ function formatHMS(totalSeconds) {
 
 function showTab(tab) {
 
-    for (const name of ["places", "myvehicles", "allvehicles", "paths", "inroute"]) {
+    for (const name of ["places", "myvehicles", "allvehicles", "paths", "inroute", "gasprices"]) {
 
         document.getElementById(`tab-${name}`).classList.toggle("active", name === tab);
         document.getElementById(`tab-button-${name}`).classList.toggle("active", name === tab);
@@ -539,6 +543,266 @@ async function removePlace(placeId) {
         selectedPlaceId = null;
     }
 
+    loadPlaces();
+}
+
+
+//
+// Interpolates green (cheapest currently loaded) -> orange (mid) -> red
+// (priciest) rather than a fixed dollar scale, so the color spread stays
+// meaningful whether prices span cents or dollars. A single price (or all
+// equal) just renders mid-color - there's nothing to contrast it against.
+//
+function gasPriceColor(price, allPrices) {
+
+    const min = Math.min(...allPrices);
+    const max = Math.max(...allPrices);
+
+    if (allPrices.length <= 1 || max === min) {
+        return "#f08c00";
+    }
+
+    const t = (price - min) / (max - min);
+
+    return t < 0.5
+        ? interpolateColor("#2f9e44", "#f08c00", t / 0.5)
+        : interpolateColor("#f08c00", "#e03131", (t - 0.5) / 0.5);
+}
+
+
+function interpolateColor(hexA, hexB, t) {
+
+    const a = hexToRgb(hexA);
+    const b = hexToRgb(hexB);
+
+    const r = Math.round(a[0] + (b[0] - a[0]) * t);
+    const g = Math.round(a[1] + (b[1] - a[1]) * t);
+    const bl = Math.round(a[2] + (b[2] - a[2]) * t);
+
+    return `rgb(${r}, ${g}, ${bl})`;
+}
+
+
+function hexToRgb(hex) {
+
+    const n = parseInt(hex.slice(1), 16);
+
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+
+async function loadGasPrices() {
+
+    const response = await fetch(API + "/api/gas-prices");
+    const gasPrices = await response.json();
+
+    gasPricesByPlaceId = new Map(gasPrices.map((gasPrice) => [gasPrice.place_id, gasPrice]));
+
+    renderGasPriceMarkers();
+    renderGasPriceList();
+}
+
+
+//
+// Unlike showPlaceMarker() (one marker for whatever's currently selected),
+// every known gas price gets its own always-on marker - this *is* the map
+// overlay, not a selection highlight. Diffs against the existing
+// gasPriceMarkers layer (add/update in place/remove) the same way
+// pollActiveTrips() diffs tripLayers, rather than tearing down and
+// rebuilding every marker on each refresh.
+//
+function renderGasPriceMarkers() {
+
+    const seen = new Set();
+    const allPrices = [...gasPricesByPlaceId.values()].map((gasPrice) => gasPrice.price_per_gallon);
+
+    for (const gasPrice of gasPricesByPlaceId.values()) {
+
+        seen.add(gasPrice.place_id);
+
+        const color = gasPriceColor(gasPrice.price_per_gallon, allPrices);
+        const label = `${gasPrice.description}: $${gasPrice.price_per_gallon.toFixed(2)}/gal`;
+
+        let marker = gasPriceMarkers.get(gasPrice.place_id);
+
+        if (!marker) {
+
+            marker = L.circleMarker([gasPrice.lat, gasPrice.lng], {
+
+                radius: 7,
+                weight: 2,
+                fillOpacity: 0.9
+
+            });
+
+            marker.bindTooltip("", { direction: "top", offset: [0, -8] });
+
+            gasPriceMarkers.set(gasPrice.place_id, marker);
+        }
+
+        marker.setLatLng([gasPrice.lat, gasPrice.lng]);
+        marker.setStyle({ color, fillColor: color });
+        marker.setTooltipContent(label);
+
+        if (gasPriceOverlayVisible && !map.hasLayer(marker)) {
+            marker.addTo(map);
+        }
+    }
+
+    for (const [placeId, marker] of gasPriceMarkers) {
+
+        if (!seen.has(placeId)) {
+
+            map.removeLayer(marker);
+            gasPriceMarkers.delete(placeId);
+        }
+    }
+}
+
+
+function toggleGasPriceOverlay() {
+
+    gasPriceOverlayVisible = document.getElementById("gasprice-toggle").checked;
+
+    for (const marker of gasPriceMarkers.values()) {
+
+        if (gasPriceOverlayVisible) {
+            marker.addTo(map);
+        } else {
+            map.removeLayer(marker);
+        }
+    }
+}
+
+
+function renderGasPriceList() {
+
+    const list = document.getElementById("gasprice-list");
+
+    list.innerHTML = "";
+
+    const sorted = [...gasPricesByPlaceId.values()].sort((a, b) => a.price_per_gallon - b.price_per_gallon);
+
+    for (const gasPrice of sorted) {
+
+        const item = document.createElement("div");
+
+        item.className = "vehicle-item list-row";
+        item.style.cursor = "pointer";
+        item.onclick = () => map.panTo([gasPrice.lat, gasPrice.lng]);
+
+        item.innerHTML =
+            `<span class="spec-item-label"><span>${gasPrice.description}` +
+            `<div class="spec-item-details">$${gasPrice.price_per_gallon.toFixed(2)}/gal</div></span></span>` +
+            `<button class="remove-gasprice-button" data-id="${gasPrice.place_id}">Delete</button>`;
+
+        list.appendChild(item);
+    }
+
+    for (const button of list.querySelectorAll(".remove-gasprice-button")) {
+
+        button.onclick = (event) => {
+            event.stopPropagation();
+            withSpinner(button, () => removeGasPrice(Number(button.dataset.id)));
+        };
+    }
+}
+
+
+async function addGasPrice() {
+
+    const descriptionInput = document.getElementById("gasprice-description");
+    const priceInput = document.getElementById("gasprice-price");
+
+    const response = await fetch(API + "/api/gas-prices", {
+
+        method: "POST",
+
+        headers: {
+            "Content-Type": "application/json"
+        },
+
+        body: JSON.stringify({
+            description: descriptionInput.value,
+            price_per_gallon: Number(priceInput.value)
+        })
+
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+        alert(data.detail || "Could not add gas price");
+        return;
+    }
+
+    descriptionInput.value = "";
+    priceInput.value = "";
+
+    loadGasPrices();
+    loadPlaces();
+}
+
+
+async function removeGasPrice(placeId) {
+
+    const gasPrice = gasPricesByPlaceId.get(placeId);
+
+    if (!confirm(`Delete gas price for "${gasPrice ? gasPrice.description : placeId}"?`)) {
+        return;
+    }
+
+    const response = await fetch(API + "/api/gas-prices/" + placeId, { method: "DELETE" });
+
+    if (!response.ok) {
+
+        const data = await response.json();
+        alert(data.detail || "Could not delete gas price");
+        return;
+    }
+
+    loadGasPrices();
+}
+
+
+async function uploadGasPrices() {
+
+    const fileInput = document.getElementById("gasprice-file-input");
+    const resultDiv = document.getElementById("gasprice-upload-result");
+
+    if (!fileInput.files.length) {
+        alert("Choose a CSV or JSON file first");
+        return;
+    }
+
+    const formData = new FormData();
+    formData.append("file", fileInput.files[0]);
+
+    const response = await fetch(API + "/api/gas-prices/upload", {
+
+        method: "POST",
+
+        body: formData
+
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+        alert(data.detail || "Could not upload gas prices");
+        return;
+    }
+
+    resultDiv.textContent = `Added/updated ${data.created} price(s)` +
+        (data.errors.length ? ` - ${data.errors.length} row(s) failed, see console` : "");
+
+    if (data.errors.length) {
+        console.warn("Gas price upload errors:", data.errors);
+    }
+
+    fileInput.value = "";
+
+    loadGasPrices();
     loadPlaces();
 }
 
@@ -2013,6 +2277,7 @@ function updateSimClock() {
 loadSpecs().then(loadVehicles);
 loadPaths();
 loadPlaces();
+loadGasPrices();
 
 loadSettings();
 

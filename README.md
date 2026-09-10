@@ -64,7 +64,7 @@ to an empty value) on a machine with unrestricted direct internet access.
 
 ## Data model
 
-Seven tables, defined in `postgres/init.sql`. **There is no migration
+Eight tables, defined in `postgres/init.sql`. **There is no migration
 tooling** — `init.sql` only runs the first time a Postgres container starts
 against an empty volume. Changing the schema after that (adding a column,
 etc.) requires either:
@@ -145,6 +145,21 @@ Every free-text location box in the frontend (vehicle starting location,
 path origin/destination) has a `<datalist>` of these places wired to it via
 its `list` attribute, so a saved place can be picked back up by name
 without giving up the ability to type a brand-new description.
+
+### `gas_prices`
+
+The current price per gallon at a place, powering the Gas Prices map
+overlay. One row per place, not a history — `place_id` is the primary key,
+so adding a price for a place that already has one (typing it again, or a
+re-uploaded CSV/JSON row) updates it in place via upsert
+(`upsert_gas_price_row()` in `app.py`) rather than accumulating stale
+duplicates.
+
+| Column             | Type    | Notes                          |
+|---------------------|---------|----------------------------------|
+| `place_id`          | integer | primary key, FK `places(id)`, `ON DELETE CASCADE` |
+| `price_per_gallon`  | double precision | must be positive (enforced in the API, not a DB constraint) |
+| `updated`           | timestamp | default `NOW()`, refreshed on every upsert |
 
 ### `vehicles`
 
@@ -484,6 +499,10 @@ All endpoints are on the `backend` service, default `http://localhost:5000`.
 | `DELETE /api/zones/{id}`        | Delete a road zone |
 | `POST /api/trips`               | Start a trip. Body: `{vehicle_id, path_id, simulated_datetime?, traffic_bias?}`. 409 if the vehicle is already driving, sold, or not at the path's origin |
 | `GET /api/trips/active`         | Poll all currently-active trips, each with live position/speed/road name |
+| `GET /api/gas-prices`           | List all priced places, each with `price_per_gallon` and the place's `description`/`lat`/`lng` |
+| `POST /api/gas-prices`          | Set the price at a place. Body: `{description, price_per_gallon}` — resolved via `find_or_create_place()` like a vehicle/path location. Upserts: re-submitting for the same place updates its price rather than duplicating it. 400 if `price_per_gallon` isn't positive or the location doesn't resolve |
+| `DELETE /api/gas-prices/{place_id}` | Remove a place's price. 404 if that place has none |
+| `POST /api/gas-prices/upload`   | Bulk-set prices from an uploaded CSV or JSON file (multipart `file` field; `.json` filename parses as JSON, otherwise CSV). Each row/object needs a description/address (`description`, `address`, or `location`) and a price (`price_per_gallon` or `price`). Rows commit independently, so one bad row doesn't roll back the rest — response is `{created, errors: [{row, description, error}, ...]}` |
 
 Every response is JSON. Any unhandled backend exception returns a generic
 `500 {"detail": "Internal server error"}` — the real traceback is only in
@@ -538,6 +557,16 @@ Five tabs in the side panel:
 - **In Route** — list of currently-driving vehicles; selecting one follows
   it on the map and shows status, nearest city, position, current road,
   speed, and time remaining.
+- **Gas Prices** — a persistent map overlay, not a selection-driven marker
+  like the Places tab: every priced place gets its own always-on circle
+  marker, color-graded green (cheapest currently loaded) to red (priciest)
+  relative to each other rather than a fixed dollar scale
+  (`gasPriceColor()` in `app.js`), with a "Show on map" checkbox to hide
+  the whole layer. Add or update one place's price by description/address
+  (reusing the same place resolution as a vehicle/path location), or bulk
+  import a CSV/JSON file of `description`/`price_per_gallon` rows — a
+  re-uploaded file just refreshes existing prices since they're keyed by
+  place (see [`gas_prices`](#gas_prices)).
 
 A clock in the top-right corner of the map (`updateSimClock()`) shows the
 current [game time](#game-time) — the same clock the traffic model judges

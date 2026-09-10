@@ -139,7 +139,8 @@
         }
 
         .sell-button,
-        .remove-path-button {
+        .remove-path-button,
+        .remove-gasprice-button {
             font-size: 11px;
             padding: 2px 8px;
         }
@@ -189,7 +190,8 @@
             margin-top: 6px;
         }
 
-        #speed-legend {
+        #speed-legend,
+        #gasprice-legend {
             font-size: 11px;
             color: #555;
             margin-bottom: 10px;
@@ -248,6 +250,7 @@
         <button class="tab-button" id="tab-button-allvehicles" onclick="withSpinner(this, () => showTab('allvehicles'))">All Vehicles</button>
         <button class="tab-button" id="tab-button-paths" onclick="withSpinner(this, () => showTab('paths'))">Paths</button>
         <button class="tab-button" id="tab-button-inroute" onclick="withSpinner(this, () => showTab('inroute'))">In Route</button>
+        <button class="tab-button" id="tab-button-gasprices" onclick="withSpinner(this, () => showTab('gasprices'))">Gas Prices</button>
     </div>
 
     <!--
@@ -359,6 +362,33 @@
 
         <div id="inroute-list"></div>
         <div id="vehicle-details">Select a vehicle to see details.</div>
+
+    </div>
+
+    <div class="tab-content" id="tab-gasprices">
+
+        <div id="gasprice-legend">
+            <label><input type="checkbox" id="gasprice-toggle" checked onchange="toggleGasPriceOverlay()"> Show on map</label>
+            <br>Price:
+            <span class="legend-swatch" style="background:#2f9e44"></span>cheapest
+            <span class="legend-swatch" style="background:#f08c00"></span>mid
+            <span class="legend-swatch" style="background:#e03131"></span>priciest
+        </div>
+
+        <div id="gasprice-list"></div>
+
+        <div class="panel-form">
+            <input id="gasprice-description" list="places-list" placeholder="A description (Shell near Minneapolis) or an address">
+            <input id="gasprice-price" type="number" min="0.01" step="0.01" placeholder="Price per gallon ($)">
+            <button onclick="withSpinner(this, addGasPrice)">Add / Update Price</button>
+        </div>
+
+        <div class="panel-form">
+            <label for="gasprice-file-input" style="font-size:11px;color:#555;">Bulk import from CSV/JSON (columns/keys: description or address, price_per_gallon or price)</label>
+            <input id="gasprice-file-input" type="file" accept=".csv,.json,application/json,text/csv">
+            <button onclick="withSpinner(this, uploadGasPrices)">Upload</button>
+            <div id="gasprice-upload-result" style="font-size:11px;color:#555;"></div>
+        </div>
 
     </div>
 
