@@ -1233,7 +1233,17 @@ function renderPathSelectForTripVehicle() {
     }
 
     hint.style.display = matching.length === 0 ? "" : "none";
-    hint.textContent = `No paths from ${vehicle.current_location} yet - create one in the Paths tab.`;
+
+    //
+    // showTab("paths") already prefills Origin from whichever vehicle is
+    // focused (selectedTripVehicleId here, since this hint only renders
+    // once a vehicle is selected for a trip - see the !vehicle guard
+    // above) via its own vehicle-aware logic, so jumping there from this
+    // link lands right where a "create one" click implies: a path form
+    // already started from this vehicle's location.
+    //
+    hint.innerHTML = `No paths from ${vehicle.current_location} yet - ` +
+        `<a href="#" class="hint-link" onclick="showTab('paths'); return false;">create one in the Paths tab</a>.`;
 
     updateStartTripVisibility();
 }
