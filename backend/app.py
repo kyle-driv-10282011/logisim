@@ -893,8 +893,12 @@ def list_jobs():
                 "progress_current": row[3],
                 "progress_total": row[4],
                 "error": row[5],
-                "created": row[6],
-                "updated": row[7],
+                # Naive in Postgres (the container clock is UTC - see
+                # SIMULATION_TIMEZONE above), so tag it explicitly rather
+                # than letting the browser's Date parser assume the
+                # viewer's own local zone for a bare (no offset) string.
+                "created": row[6].replace(tzinfo=ZoneInfo("UTC")),
+                "updated": row[7].replace(tzinfo=ZoneInfo("UTC")),
             }
             for row in rows
         ]

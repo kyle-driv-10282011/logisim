@@ -378,7 +378,12 @@ function renderJobsList(jobs) {
             ? `${job.progress_current}/${job.progress_total} - `
             : "";
 
-        const updated = new Date(job.updated).toLocaleString();
+        // job.created/updated are ISO strings with an explicit UTC offset
+        // (see list_jobs() in app.py) - toLocaleString with timeZoneName
+        // shown converts that to the viewer's own local time rather than
+        // silently mislabeling it, and spells out which zone that is.
+        const started = new Date(job.created).toLocaleString(undefined, { timeZoneName: "short" });
+        const updated = new Date(job.updated).toLocaleString(undefined, { timeZoneName: "short" });
 
         const errorLine = job.error
             ? `<div class="spec-item-details" style="color:#e03131;">${job.error}</div>`
@@ -386,7 +391,7 @@ function renderJobsList(jobs) {
 
         item.innerHTML =
             `<span class="spec-item-label"><span>#${job.id} ${prettyJobType(job.job_type)}` +
-            `<div class="spec-item-details">${progress}updated ${updated}</div>` +
+            `<div class="spec-item-details">${progress}started ${started} - updated ${updated}</div>` +
             errorLine +
             `</span></span>` +
             `<span style="color:${JOB_STATUS_COLORS[job.status] || "#333"};font-weight:bold;">${job.status}</span>`;
