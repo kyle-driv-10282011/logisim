@@ -355,12 +355,27 @@ def build_trip_schedule(distances_miles, max_speeds_mph, zones, traffic_base_dat
 geolocator = Nominatim(user_agent="logisim-vehicle-sim", timeout=10)
 
 #
-# Nominatim's public instance allows at most 1 request/second. This is only
-# used for reverse-geocoding a vehicle's current city, which the frontend
-# polls on its own slow timer (not from the 1s /api/trips/active poll), but
-# the rate limiter is a hard backstop in case of multiple concurrent users.
+# Nominatim's public instance allows at most 1 request/second and returns
+# 429 ("Non-successful status code 429") once that's exceeded. Reverse
+# geocoding already respected this; forward geocoding (geocode_full()
+# below) didn't, which was fine when only one request could be in flight
+# at a time, but job_executor can now run up to JOB_EXECUTOR_MAX_WORKERS
+# create_path/gas-price-upload jobs concurrently, each making its own
+# unpaced geocode call - hence the 429s. swallow_exceptions=False + a few
+# retries means a transient 429 gets retried with backoff instead of
+# immediately failing the whole job. Sharing one RateLimiter instance
+# across threads is the pattern geopy itself documents for bulk/concurrent
+# geocoding - it's thread-safe.
 #
 reverse_geocode_limited = RateLimiter(geolocator.reverse, min_delay_seconds=1)
+
+geocode_limited = RateLimiter(
+    geolocator.geocode,
+    min_delay_seconds=1,
+    max_retries=3,
+    error_wait_seconds=2.0,
+    swallow_exceptions=False,
+)
 
 
 #
@@ -400,10 +415,10 @@ def geocode_full(place):
 
     normalized_place = PLACE_IN_PATTERN.sub(", ", place)
 
-    location = geolocator.geocode(normalized_place)
+    location = geocode_limited(normalized_place)
 
     if location is None and normalized_place != place:
-        location = geolocator.geocode(place)
+        location = geocode_limited(place)
 
     if location is None:
         raise HTTPException(
