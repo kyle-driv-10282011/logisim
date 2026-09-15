@@ -285,6 +285,42 @@ function withSpinner(button, fn) {
 }
 
 
+//
+// Endpoints that need to geocode a free-text place (creating a path,
+// uploading a batch of gas prices) hand back a job id instead of blocking
+// on the result - see job_executor in app.py. This polls GET
+// /api/jobs/{id} until the backend marks it done/error, optionally
+// reporting progress (progress_current/progress_total) back to the
+// caller via onProgress so a big upload can show a running count.
+//
+async function pollJob(jobId, onProgress) {
+
+    for (;;) {
+
+        const response = await fetch(API + "/api/jobs/" + jobId);
+        const job = await response.json();
+
+        if (!response.ok) {
+            throw new Error(job.detail || "Could not check job status");
+        }
+
+        if (onProgress) {
+            onProgress(job);
+        }
+
+        if (job.status === "done") {
+            return job.result;
+        }
+
+        if (job.status === "error") {
+            throw new Error(job.error || "Job failed");
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+}
+
+
 function formatHMS(totalSeconds) {
 
     totalSeconds = Math.max(0, Math.round(totalSeconds));
@@ -954,10 +990,25 @@ async function uploadGasPrices() {
 
     });
 
-    const data = await response.json();
+    const submitted = await response.json();
 
     if (!response.ok) {
-        alert(data.detail || "Could not upload gas prices");
+        alert(submitted.detail || "Could not upload gas prices");
+        return;
+    }
+
+    resultDiv.textContent = "Processing...";
+
+    let data;
+
+    try {
+
+        data = await pollJob(submitted.job_id, (job) => {
+            resultDiv.textContent = `Processing ${job.progress_current}/${job.progress_total}...`;
+        });
+
+    } catch (e) {
+        alert(e.message);
         return;
     }
 
@@ -2209,10 +2260,19 @@ async function createPath() {
 
     });
 
-    const path = await response.json();
+    const submitted = await response.json();
 
     if (!response.ok) {
-        alert(path.detail || "Could not create path");
+        alert(submitted.detail || "Could not create path");
+        return;
+    }
+
+    let path;
+
+    try {
+        path = await pollJob(submitted.job_id);
+    } catch (e) {
+        alert(e.message);
         return;
     }
 

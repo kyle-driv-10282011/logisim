@@ -7,6 +7,8 @@ from geopy.extra.rate_limiter import RateLimiter
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Optional
+from concurrent.futures import ThreadPoolExecutor
+from psycopg2.extras import Json
 import psycopg2
 import requests
 import json
@@ -763,10 +765,117 @@ def run_migrations():
         """
     )
 
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS jobs (
+            id SERIAL PRIMARY KEY,
+            job_type TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            progress_current INTEGER NOT NULL DEFAULT 0,
+            progress_total INTEGER NOT NULL DEFAULT 0,
+            result JSONB,
+            error TEXT,
+            created TIMESTAMP DEFAULT NOW(),
+            updated TIMESTAMP DEFAULT NOW()
+        )
+        """
+    )
+
     conn.commit()
 
     cur.close()
     conn.close()
+
+
+#
+# Anything that has to geocode a free-text place (find_or_create_place())
+# is too slow, and too likely to blow a proxy/browser timeout, to run
+# inline in the request that triggers it - Nominatim's public instance has
+# no bulk endpoint and is rate-capped, so a CSV upload of many addresses or
+# even a single create_path() can take well past what a client is willing
+# to wait on one HTTP request. Both run their real work in this pool
+# instead, tracked via the jobs table, and hand the request back a job id
+# to poll (GET /api/jobs/{id}) rather than blocking on the result.
+#
+job_executor = ThreadPoolExecutor(max_workers=4)
+
+
+def create_job(job_type, total=0):
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute(
+        "INSERT INTO jobs (job_type, progress_total) VALUES (%s, %s) RETURNING id",
+        (job_type, total)
+    )
+
+    job_id = cur.fetchone()[0]
+
+    conn.commit()
+
+    cur.close()
+    conn.close()
+
+    return job_id
+
+
+def update_job(job_id, **fields):
+
+    if not fields:
+        return
+
+    if "result" in fields:
+        fields["result"] = Json(fields["result"])
+
+    set_clause = ", ".join(f"{column} = %s" for column in fields)
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute(
+        f"UPDATE jobs SET {set_clause}, updated = NOW() WHERE id = %s",
+        (*fields.values(), job_id)
+    )
+
+    conn.commit()
+
+    cur.close()
+    conn.close()
+
+
+@app.get("/api/jobs/{job_id}")
+def get_job(job_id: int):
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT status, progress_current, progress_total, result, error
+        FROM jobs
+        WHERE id = %s
+        """,
+        (job_id,)
+    )
+
+    row = cur.fetchone()
+
+    cur.close()
+    conn.close()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    status, progress_current, progress_total, result, error = row
+
+    return {
+        "status": status,
+        "progress_current": progress_current,
+        "progress_total": progress_total,
+        "result": result,
+        "error": error,
+    }
 
 
 def zone_dict(row):
@@ -1773,7 +1882,77 @@ def delete_gas_price(place_id: int):
 # CSV/JSON is likely to have at least one typo, and that shouldn't cost the
 # rows that parsed fine.
 #
-@app.post("/api/gas-prices/upload")
+# The actual row loop runs in job_executor (see find_or_create_place() -
+# each new place is a live geocode call) rather than inline here, so a
+# file with hundreds of addresses doesn't hold the request open for
+# minutes. This handler only does the fast part (parsing) before handing
+# off to _run_gas_price_upload_job() and returning a job id to poll.
+#
+def _run_gas_price_upload_job(job_id, entries):
+
+    update_job(job_id, status="running")
+
+    try:
+
+        conn = db()
+        cur = conn.cursor()
+
+        created = 0
+        errors = []
+
+        for index, entry in enumerate(entries):
+
+            description = None
+
+            try:
+
+                if not isinstance(entry, dict):
+                    raise ValueError("row is not an object/record")
+
+                description = entry.get("description") or entry.get("address") or entry.get("location")
+
+                if not description:
+                    raise ValueError("missing description/address/location")
+
+                price_raw = entry.get("price_per_gallon")
+                price_raw = price_raw if price_raw is not None else entry.get("price")
+
+                price = float(price_raw)
+
+                if price <= 0:
+                    raise ValueError("price_per_gallon must be positive")
+
+                place_id, _, _ = find_or_create_place(cur, description)
+
+                upsert_gas_price_row(cur, place_id, price)
+
+                conn.commit()
+
+                created += 1
+
+            except Exception as e:
+
+                conn.rollback()
+
+                errors.append({
+                    "row": index,
+                    "description": description,
+                    "error": getattr(e, "detail", str(e))
+                })
+
+            update_job(job_id, progress_current=index + 1)
+
+        cur.close()
+        conn.close()
+
+    except Exception as e:
+        update_job(job_id, status="error", error=getattr(e, "detail", str(e)))
+        return
+
+    update_job(job_id, status="done", result={"created": created, "errors": errors})
+
+
+@app.post("/api/gas-prices/upload", status_code=202)
 async def upload_gas_prices(file: UploadFile = File(...)):
 
     raw = await file.read()
@@ -1800,196 +1979,181 @@ async def upload_gas_prices(file: UploadFile = File(...)):
 
         entries = list(csv.DictReader(io.StringIO(text)))
 
+    job_id = create_job("gas_prices_upload", total=len(entries))
+
+    job_executor.submit(_run_gas_price_upload_job, job_id, entries)
+
+    return {"job_id": job_id}
+
+
+
+#
+# The geocoding (find_or_create_place(), x2) and routing (road_route())
+# below are both live third-party HTTP calls - too slow, and too likely to
+# blow a proxy/browser timeout, to do inline in the request. This builds
+# the same result a synchronous create_path() used to return directly, but
+# is only ever called from job_executor (see _run_create_path_job()),
+# which stores it on the job row for the frontend to poll for instead.
+#
+def _build_path_result(origin, destination):
+
     conn = db()
     cur = conn.cursor()
 
-    created = 0
-    errors = []
+    try:
 
-    for index, entry in enumerate(entries):
+        origin_place_id, origin_lat, origin_lng = find_or_create_place(cur, origin)
+        destination_place_id, destination_lat, destination_lng = find_or_create_place(cur, destination)
 
-        description = None
+        #
+        # Same origin/destination place is the same path - return the existing
+        # one instead of re-routing and inserting a duplicate.
+        #
+        cur.execute(
+            """
+            SELECT id, origin_place_id, destination_place_id,
+                route, distances_miles, max_speeds_mph, road_names, road_name_boundary_miles
+            FROM paths
+            WHERE origin_place_id = %s AND destination_place_id = %s
+            """,
+            (origin_place_id, destination_place_id)
+        )
 
-        try:
+        existing = cur.fetchone()
 
-            if not isinstance(entry, dict):
-                raise ValueError("row is not an object/record")
+        if existing is not None:
 
-            description = entry.get("description") or entry.get("address") or entry.get("location")
+            zones = fetch_zones_for_paths(cur, [existing[0]]).get(existing[0], [])
+            places_by_id = fetch_places_by_id(cur, [existing[1], existing[2]])
 
-            if not description:
-                raise ValueError("missing description/address/location")
-
-            price_raw = entry.get("price_per_gallon")
-            price_raw = price_raw if price_raw is not None else entry.get("price")
-
-            price = float(price_raw)
-
-            if price <= 0:
-                raise ValueError("price_per_gallon must be positive")
-
-            place_id, _, _ = find_or_create_place(cur, description)
-
-            upsert_gas_price_row(cur, place_id, price)
-
+            #
+            # Nothing new for the path itself, but find_or_create_place() above
+            # may have inserted new places rows - commit those rather than
+            # rolling them back on close.
+            #
             conn.commit()
 
-            created += 1
+            return {
 
-        except Exception as e:
+                "id": existing[0],
 
-            conn.rollback()
+                "origin": places_by_id[existing[1]]["description"],
 
-            errors.append({
-                "row": index,
-                "description": description,
-                "error": getattr(e, "detail", str(e))
-            })
+                "origin_lat": places_by_id[existing[1]]["lat"],
 
-    cur.close()
-    conn.close()
+                "origin_lng": places_by_id[existing[1]]["lng"],
 
-    return {"created": created, "errors": errors}
+                "destination": places_by_id[existing[2]]["description"],
 
+                "destination_lat": places_by_id[existing[2]]["lat"],
 
+                "destination_lng": places_by_id[existing[2]]["lng"],
 
-@app.post("/api/paths")
-def create_path(req: CreatePathRequest):
+                "route": existing[3],
 
-    conn = db()
-    cur = conn.cursor()
+                "distances_miles": existing[4],
 
-    origin_place_id, origin_lat, origin_lng = find_or_create_place(cur, req.origin)
-    destination_place_id, destination_lat, destination_lng = find_or_create_place(cur, req.destination)
+                "max_speeds_mph": existing[5],
 
-    #
-    # Same origin/destination place is the same path - return the existing
-    # one instead of re-routing and inserting a duplicate.
-    #
-    cur.execute(
-        """
-        SELECT id, origin_place_id, destination_place_id,
-            route, distances_miles, max_speeds_mph, road_names, road_name_boundary_miles
-        FROM paths
-        WHERE origin_place_id = %s AND destination_place_id = %s
-        """,
-        (origin_place_id, destination_place_id)
-    )
+                "road_names": existing[6],
 
-    existing = cur.fetchone()
+                "road_name_boundary_miles": existing[7],
 
-    if existing is not None:
+                "zones": zones
+            }
 
-        zones = fetch_zones_for_paths(cur, [existing[0]]).get(existing[0], [])
-        places_by_id = fetch_places_by_id(cur, [existing[1], existing[2]])
+        route, distances_miles, max_speeds_mph, road_names, road_name_boundary_miles = road_route(
+            (origin_lat, origin_lng), (destination_lat, destination_lng)
+        )
 
-        #
-        # Nothing new for the path itself, but find_or_create_place() above
-        # may have inserted new places rows - commit those rather than
-        # rolling them back on close.
-        #
+        cur.execute(
+            """
+            INSERT INTO paths
+            (
+                origin_place_id,
+                destination_place_id,
+                route,
+                distances_miles,
+                max_speeds_mph,
+                road_names,
+                road_name_boundary_miles
+            )
+
+            VALUES
+            (%s,%s,%s,%s,%s,%s,%s)
+
+            RETURNING id
+            """,
+            (
+                origin_place_id,
+                destination_place_id,
+                json.dumps(route),
+                json.dumps(distances_miles),
+                json.dumps(max_speeds_mph),
+                json.dumps(road_names),
+                json.dumps(road_name_boundary_miles)
+            )
+        )
+
+        path_id = cur.fetchone()[0]
+
         conn.commit()
-
-        cur.close()
-        conn.close()
 
         return {
 
-            "id": existing[0],
+            "id": path_id,
 
-            "origin": places_by_id[existing[1]]["description"],
+            "origin": origin,
 
-            "origin_lat": places_by_id[existing[1]]["lat"],
+            "origin_lat": origin_lat,
 
-            "origin_lng": places_by_id[existing[1]]["lng"],
+            "origin_lng": origin_lng,
 
-            "destination": places_by_id[existing[2]]["description"],
+            "destination": destination,
 
-            "destination_lat": places_by_id[existing[2]]["lat"],
+            "destination_lat": destination_lat,
 
-            "destination_lng": places_by_id[existing[2]]["lng"],
+            "destination_lng": destination_lng,
 
-            "route": existing[3],
+            "route": route,
 
-            "distances_miles": existing[4],
+            "distances_miles": distances_miles,
 
-            "max_speeds_mph": existing[5],
+            "max_speeds_mph": max_speeds_mph,
 
-            "road_names": existing[6],
+            "road_names": road_names,
 
-            "road_name_boundary_miles": existing[7],
+            "road_name_boundary_miles": road_name_boundary_miles,
 
-            "zones": zones
+            "zones": []
         }
 
-    route, distances_miles, max_speeds_mph, road_names, road_name_boundary_miles = road_route(
-        (origin_lat, origin_lng), (destination_lat, destination_lng)
-    )
+    finally:
+        cur.close()
+        conn.close()
 
-    cur.execute(
-        """
-        INSERT INTO paths
-        (
-            origin_place_id,
-            destination_place_id,
-            route,
-            distances_miles,
-            max_speeds_mph,
-            road_names,
-            road_name_boundary_miles
-        )
 
-        VALUES
-        (%s,%s,%s,%s,%s,%s,%s)
+def _run_create_path_job(job_id, origin, destination):
 
-        RETURNING id
-        """,
-        (
-            origin_place_id,
-            destination_place_id,
-            json.dumps(route),
-            json.dumps(distances_miles),
-            json.dumps(max_speeds_mph),
-            json.dumps(road_names),
-            json.dumps(road_name_boundary_miles)
-        )
-    )
+    update_job(job_id, status="running")
 
-    path_id = cur.fetchone()[0]
+    try:
+        result = _build_path_result(origin, destination)
+    except Exception as e:
+        update_job(job_id, status="error", error=getattr(e, "detail", str(e)))
+        return
 
-    conn.commit()
+    update_job(job_id, status="done", result=result)
 
-    cur.close()
-    conn.close()
 
-    return {
+@app.post("/api/paths", status_code=202)
+def create_path(req: CreatePathRequest):
 
-        "id": path_id,
+    job_id = create_job("create_path")
 
-        "origin": req.origin,
+    job_executor.submit(_run_create_path_job, job_id, req.origin, req.destination)
 
-        "origin_lat": origin_lat,
-
-        "origin_lng": origin_lng,
-
-        "destination": req.destination,
-
-        "destination_lat": destination_lat,
-
-        "destination_lng": destination_lng,
-
-        "route": route,
-
-        "distances_miles": distances_miles,
-
-        "max_speeds_mph": max_speeds_mph,
-
-        "road_names": road_names,
-
-        "road_name_boundary_miles": road_name_boundary_miles,
-
-        "zones": []
-    }
+    return {"job_id": job_id}
 
 
 

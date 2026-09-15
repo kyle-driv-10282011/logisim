@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import csv
+import os
 import platform
 import re
 import subprocess
@@ -62,10 +63,6 @@ else:
 import requests
 from bs4 import BeautifulSoup
 
-STATE = "MN"
-URL = f"https://gasprices.aaa.com/?state={STATE}"
-OUTPUT = "mn_gas_prices.csv"
-
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64) "
@@ -75,13 +72,21 @@ HEADERS = {
     )
 }
 
+BASE_URL = "https://gasprices.aaa.com/?state="
 
-def main():
+OUTPUT = "gas_prices.csv"
 
-    print(f"Downloading {URL}...")
+FIELDNAMES = ["description", "price_per_gallon"]
+
+
+def fetch_state_prices(state):
+
+    url = f"{BASE_URL}{state}"
+
+    print(f"Downloading {url}...")
 
     response = requests.get(
-        URL,
+        url,
         headers=HEADERS,
         timeout=30,
         verify=CA_BUNDLE
@@ -102,7 +107,7 @@ def main():
         description = heading.get_text(" ", strip=True)
 
         if description:
-            description = f"{description}, {STATE}"
+            description = f"{description}, {state}"
 
         # Only process headings underneath the Minnesota
         # metro average section.
@@ -175,39 +180,62 @@ def main():
     for item in results:
         unique[item["description"]] = item
 
-    results = list(unique.values())
+    return list(unique.values())
 
-    print()
-    print(f"Found {len(results)} locations:")
-    print()
 
-    for item in results:
-        print(
-            f"{item['description']:<35} "
-            f"${item['price_per_gallon']:.4f}"
-        )
+def main():
 
-    # Write CSV
+    states_input = input(
+        "Enter comma-separated state codes "
+        "(e.g. IA,MN,WI): "
+    ).strip()
+
+    states = [
+        state.strip().upper()
+        for state in states_input.split(",")
+        if state.strip()
+    ]
+
+    if not states:
+        raise SystemExit("No state codes provided.")
+
+    # Start fresh for this run.
+    if os.path.exists(OUTPUT):
+        os.remove(OUTPUT)
+
     with open(
         OUTPUT,
         "w",
         newline="",
         encoding="utf-8"
     ) as f:
+        csv.DictWriter(f, fieldnames=FIELDNAMES).writeheader()
 
-        writer = csv.DictWriter(
-            f,
-            fieldnames=[
-                "description",
-                "price_per_gallon"
-            ]
-        )
+    for state in states:
 
-        writer.writeheader()
-        writer.writerows(results)
+        results = fetch_state_prices(state)
 
-    print()
-    print(f"CSV written to: {OUTPUT}")
+        print()
+        print(f"Found {len(results)} locations for {state}:")
+        print()
+
+        for item in results:
+            print(
+                f"{item['description']:<35} "
+                f"${item['price_per_gallon']:.4f}"
+            )
+
+        with open(
+            OUTPUT,
+            "a",
+            newline="",
+            encoding="utf-8"
+        ) as f:
+            csv.DictWriter(f, fieldnames=FIELDNAMES).writerows(results)
+
+        print()
+
+    print(f"Results written to: {OUTPUT}")
 
 
 if __name__ == "__main__":

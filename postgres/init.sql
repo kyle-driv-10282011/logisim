@@ -180,6 +180,36 @@ CREATE TABLE road_zones (
 );
 
 
+CREATE TABLE jobs (
+
+    id SERIAL PRIMARY KEY,
+
+    -- 'gas_prices_upload' or 'create_path' - see app.py's job_executor
+    -- submissions. Both involve per-row/per-place geocoding against the
+    -- public Nominatim API, which is too slow (and too likely to blow a
+    -- proxy/browser timeout) to do inline in the request that kicks it
+    -- off, so that work runs in a background thread and the request
+    -- returns this row's id immediately for the frontend to poll via
+    -- GET /api/jobs/{id}.
+    job_type TEXT NOT NULL,
+
+    status TEXT NOT NULL DEFAULT 'pending', -- pending, running, done, error
+
+    progress_current INTEGER NOT NULL DEFAULT 0,
+    progress_total INTEGER NOT NULL DEFAULT 0,
+
+    -- Whatever the job's normal synchronous return value used to be (e.g.
+    -- the created path, or {created, errors} for an upload), stashed here
+    -- for the frontend to pick up once status = 'done'.
+    result JSONB,
+
+    error TEXT,
+
+    created TIMESTAMP DEFAULT NOW(),
+    updated TIMESTAMP DEFAULT NOW()
+);
+
+
 CREATE TABLE trips (
 
     id SERIAL PRIMARY KEY,
