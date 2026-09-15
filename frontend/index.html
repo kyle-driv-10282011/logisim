@@ -331,6 +331,7 @@
             <button class="tab-button" id="tab-button-paths" onclick="withSpinner(this, () => showTab('paths'))">Paths</button>
             <button class="tab-button" id="tab-button-inroute" onclick="withSpinner(this, () => showTab('inroute'))">In Route</button>
             <button class="tab-button" id="tab-button-gasprices" onclick="withSpinner(this, () => showTab('gasprices'))">Gas Prices</button>
+            <button class="tab-button" id="tab-button-jobs" onclick="withSpinner(this, () => showTab('jobs'))">Background Jobs</button>
         </div>
     </div>
 
@@ -506,6 +507,14 @@
             <button onclick="withSpinner(this, uploadGasPrices)">Upload</button>
             <div id="gasprice-upload-result" style="font-size:11px;color:#555;"></div>
         </div>
+
+    </div>
+
+    <div class="tab-content" id="tab-jobs">
+
+        <div id="jobs-summary" style="font-size:12px;color:#555;margin-bottom:10px;"></div>
+
+        <div id="jobs-list"></div>
 
     </div>
 

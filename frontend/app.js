@@ -321,6 +321,81 @@ async function pollJob(jobId, onProgress) {
 }
 
 
+//
+// Background Jobs tab - a generic status view over the jobs table (see
+// job_executor/GET /api/jobs in app.py), rather than one bespoke view per
+// job type. Polled on the same always-on timer as the rest of the app's
+// live data (see the setInterval calls at the bottom of this file), so it
+// stays current whether or not the tab is the one currently showing.
+//
+const JOB_STATUS_COLORS = {
+    pending: "#868e96",
+    running: "#1c7ed6",
+    done: "#2f9e44",
+    error: "#e03131"
+};
+
+
+function prettyJobType(jobType) {
+
+    return jobType
+        .split("_")
+        .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+        .join(" ");
+}
+
+
+async function loadJobs() {
+
+    const response = await fetch(API + "/api/jobs");
+    const data = await response.json();
+
+    renderJobsSummary(data);
+    renderJobsList(data.jobs);
+}
+
+
+function renderJobsSummary(data) {
+
+    document.getElementById("jobs-summary").textContent =
+        `${data.running}/${data.workers_max} workers busy - ${data.queued} queued`;
+}
+
+
+function renderJobsList(jobs) {
+
+    const list = document.getElementById("jobs-list");
+
+    list.innerHTML = "";
+
+    for (const job of jobs) {
+
+        const item = document.createElement("div");
+
+        item.className = "vehicle-item list-row";
+
+        const progress = job.progress_total > 0
+            ? `${job.progress_current}/${job.progress_total} - `
+            : "";
+
+        const updated = new Date(job.updated).toLocaleString();
+
+        const errorLine = job.error
+            ? `<div class="spec-item-details" style="color:#e03131;">${job.error}</div>`
+            : "";
+
+        item.innerHTML =
+            `<span class="spec-item-label"><span>#${job.id} ${prettyJobType(job.job_type)}` +
+            `<div class="spec-item-details">${progress}updated ${updated}</div>` +
+            errorLine +
+            `</span></span>` +
+            `<span style="color:${JOB_STATUS_COLORS[job.status] || "#333"};font-weight:bold;">${job.status}</span>`;
+
+        list.appendChild(item);
+    }
+}
+
+
 function formatHMS(totalSeconds) {
 
     totalSeconds = Math.max(0, Math.round(totalSeconds));
@@ -348,7 +423,8 @@ const TAB_LABELS = {
     allvehicles: "All Vehicles",
     paths: "Paths",
     inroute: "In Route",
-    gasprices: "Gas Prices"
+    gasprices: "Gas Prices",
+    jobs: "Background Jobs"
 };
 
 
@@ -382,7 +458,7 @@ document.addEventListener("click", (event) => {
 
 function showTab(tab) {
 
-    for (const name of ["templates", "places", "myvehicles", "allvehicles", "paths", "inroute", "gasprices"]) {
+    for (const name of ["templates", "places", "myvehicles", "allvehicles", "paths", "inroute", "gasprices", "jobs"]) {
 
         document.getElementById(`tab-${name}`).classList.toggle("active", name === tab);
         document.getElementById(`tab-button-${name}`).classList.toggle("active", name === tab);
@@ -2532,10 +2608,13 @@ loadSpecs().then(loadVehicles);
 loadPaths();
 loadPlaces();
 loadGasPrices();
+loadJobs();
 
 loadSettings();
 
 setInterval(pollActiveTrips, 1000);
+
+setInterval(loadJobs, 2000);
 
 setInterval(updateSimClock, 1000);
 

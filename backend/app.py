@@ -797,7 +797,9 @@ def run_migrations():
 # instead, tracked via the jobs table, and hand the request back a job id
 # to poll (GET /api/jobs/{id}) rather than blocking on the result.
 #
-job_executor = ThreadPoolExecutor(max_workers=4)
+JOB_EXECUTOR_MAX_WORKERS = 4
+
+job_executor = ThreadPoolExecutor(max_workers=JOB_EXECUTOR_MAX_WORKERS)
 
 
 def create_job(job_type, total=0):
@@ -842,6 +844,61 @@ def update_job(job_id, **fields):
 
     cur.close()
     conn.close()
+
+
+#
+# Status page for the background-job system itself (see job_executor
+# above) - every job type that ever runs through it shows up here, most
+# recent first, so a growing list of job types doesn't need its own
+# bespoke monitoring view. "queued" mirrors a job sitting in
+# job_executor's internal work queue (status is only flipped to 'running'
+# once a worker thread actually picks it up - see create_job()/
+# update_job() callers), and workers_max is the hard cap on how many can
+# run at once.
+#
+@app.get("/api/jobs")
+def list_jobs():
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("SELECT status, COUNT(*) FROM jobs GROUP BY status")
+    counts = dict(cur.fetchall())
+
+    cur.execute(
+        """
+        SELECT id, job_type, status, progress_current, progress_total, error, created, updated
+        FROM jobs
+        ORDER BY created DESC
+        LIMIT 50
+        """
+    )
+
+    rows = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    return {
+
+        "workers_max": JOB_EXECUTOR_MAX_WORKERS,
+        "running": counts.get("running", 0),
+        "queued": counts.get("pending", 0),
+
+        "jobs": [
+            {
+                "id": row[0],
+                "job_type": row[1],
+                "status": row[2],
+                "progress_current": row[3],
+                "progress_total": row[4],
+                "error": row[5],
+                "created": row[6],
+                "updated": row[7],
+            }
+            for row in rows
+        ]
+    }
 
 
 @app.get("/api/jobs/{job_id}")
