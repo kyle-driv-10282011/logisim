@@ -215,7 +215,7 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
             )
         FROM trips t
         JOIN paths p ON p.id = t.path_id
-        JOIN vehicle_specs vs ON vs.id = v.spec_id
+        JOIN vehicle_specs vs ON vs.id = (SELECT spec_id FROM vehicles WHERE id = t.vehicle_id)
         WHERE t.id = (
             SELECT t2.id FROM trips t2
             WHERE t2.vehicle_id = v.id
