@@ -43,6 +43,11 @@ CREATE TABLE vehicle_specs (
 
     mpg DOUBLE PRECISION NOT NULL,
 
+    -- Capacity of this vehicle's fuel tank, in gallons. Every vehicle
+    -- created against this spec starts with a full tank (vehicles.fuel_gallons
+    -- below) and can hold at most this much at once.
+    fuel_tank_gallons DOUBLE PRECISION NOT NULL DEFAULT 20,
+
     -- Filename under frontend/images/, e.g. "2026-Chevy-Express.png". Nullable
     -- since a spec is still usable without a picture.
     image TEXT,
@@ -116,6 +121,16 @@ CREATE TABLE vehicles (
     -- displayed total is this plus every trip it's driven since - see
     -- list_vehicles() in app.py.
     starting_mileage DOUBLE PRECISION NOT NULL DEFAULT 0,
+
+    -- Gallons currently in the tank. Set to the spec's fuel_tank_gallons
+    -- (a full tank) when the vehicle is created, drained as it drives
+    -- (distance / spec.mpg) and refilled to full by POST
+    -- /api/vehicles/{id}/refuel. Only ever updated once a trip actually
+    -- settles (settle_arrived_vehicles() in app.py) - like place_id, this
+    -- is the vehicle's last-known-good value, not a live-ticking one; the
+    -- live level for a vehicle currently driving/stranded is derived per
+    -- poll instead (see trips.starting_fuel_gallons below).
+    fuel_gallons DOUBLE PRECISION NOT NULL DEFAULT 0,
 
     -- Hauling specs (year/brand/model/capacity/cost/mpg/image) live on the
     -- reusable spec, not duplicated per vehicle - same pattern as paths
@@ -232,5 +247,23 @@ CREATE TABLE trips (
 
     realized_seconds JSONB NOT NULL DEFAULT '[]',
 
-    realized_duration_seconds DOUBLE PRECISION NOT NULL DEFAULT 0
+    realized_duration_seconds DOUBLE PRECISION NOT NULL DEFAULT 0,
+
+    -- The vehicle's fuel_gallons at the moment this trip started - frozen
+    -- here the same way traffic_bias/zones_snapshot are, so a later refuel
+    -- of the vehicle (which can't happen while it's driving anyway) could
+    -- never retroactively change a schedule already in progress.
+    starting_fuel_gallons DOUBLE PRECISION NOT NULL DEFAULT 0,
+
+    -- How many roadside refuels (see POST /api/vehicles/{id}/roadside-refuel)
+    -- have topped this trip back up to a full tank after it ran dry
+    -- mid-route. Each one adds another spec.fuel_tank_gallons worth of range
+    -- from wherever it stranded, so the total fuel available for the whole
+    -- trip is starting_fuel_gallons + roadside_refuel_count * fuel_tank_gallons.
+    roadside_refuel_count INTEGER NOT NULL DEFAULT 0,
+
+    -- Real seconds' worth of schedule progress "refunded" by a roadside
+    -- refuel, so the trip's clock doesn't count time spent stranded as
+    -- distance covered. See resolve_trip_progress() in app.py.
+    paused_seconds DOUBLE PRECISION NOT NULL DEFAULT 0
 );

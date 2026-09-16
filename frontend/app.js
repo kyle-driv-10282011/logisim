@@ -596,7 +596,8 @@ function renderSpecList() {
             `<span>${specLabel(spec)}` +
             `<div class="spec-item-details">` +
             `${spec.person_capacity} people &middot; ${spec.cargo_capacity_cuft} cu ft &middot; ` +
-            `$${Math.round(spec.cost).toLocaleString()} &middot; ${spec.mpg} mpg` +
+            `$${Math.round(spec.cost).toLocaleString()} &middot; ${spec.mpg} mpg &middot; ` +
+            `${spec.fuel_tank_gallons} gal tank` +
             `</div></span></span>` +
             `<button class="remove-spec-button" data-id="${spec.id}">Delete</button>`;
 
@@ -651,6 +652,8 @@ async function addSpec() {
             cost: Number(document.getElementById("spec-cost").value),
 
             mpg: Number(document.getElementById("spec-mpg").value),
+
+            fuel_tank_gallons: Number(document.getElementById("spec-fuel-tank").value),
 
             image: document.getElementById("spec-image").value || null
 
@@ -1163,7 +1166,7 @@ function renderVehicleList() {
 
         const item = document.createElement("div");
 
-        const driving = vehicle.status === "DRIVING";
+        const driving = vehicle.status === "DRIVING" || vehicle.status === "STRANDED";
         const ready = vehicle.status === "READY";
 
         item.className = "vehicle-item list-row vehicle-row" +
@@ -1189,6 +1192,16 @@ function renderVehicleList() {
         const trip = activeTripsById.get(vehicle.id);
         const gallonsUsed = trip ? tripGallonsUsed(trip, vehicle) : null;
 
+        //
+        // A driving/stranded vehicle's fuel gauge comes from the live trip
+        // (tripFuelRemaining()); a READY one shows its persisted tank level
+        // instead - both against the same spec.fuel_tank_gallons capacity.
+        //
+        const fuelRemaining = trip ? tripFuelRemaining(trip) : vehicle.fuel_gallons;
+        const fuelBadge = fuelRemaining !== null && vehicle.spec
+            ? ` <span class="fuel-badge">&#9981; ${formatGallons(fuelRemaining)}/${vehicle.spec.fuel_tank_gallons} gal</span>`
+            : "";
+
         item.innerHTML =
             `<span class="spec-item-label">` +
             (imageUrl ? `<img class="spec-thumb" src="${imageUrl}">` : "") +
@@ -1202,9 +1215,12 @@ function renderVehicleList() {
                       : "") +
                   " "
                 : "") +
-            `<span class="status-badge status-${vehicle.status}">${vehicle.status}</span></span></span>` +
+            `<span class="status-badge status-${vehicle.status}">${vehicle.status}</span>` +
+            (!trip ? fuelBadge : "") +
+            `</span></span>` +
             (vehicle.status === "READY"
-                ? `<button class="sell-button" data-id="${vehicle.id}">Sell</button>`
+                ? `<button class="refuel-button" data-id="${vehicle.id}">Refuel</button>` +
+                  `<button class="sell-button" data-id="${vehicle.id}">Sell</button>`
                 : "");
 
         list.appendChild(item);
@@ -1217,6 +1233,29 @@ function renderVehicleList() {
             withSpinner(button, () => sellVehicle(Number(button.dataset.id)));
         };
     }
+
+    for (const button of list.querySelectorAll(".refuel-button")) {
+
+        button.onclick = (event) => {
+            event.stopPropagation();
+            withSpinner(button, () => refuelVehicle(Number(button.dataset.id)));
+        };
+    }
+}
+
+
+async function refuelVehicle(vehicleId) {
+
+    const response = await fetch(API + "/api/vehicles/" + vehicleId + "/refuel", { method: "POST" });
+
+    if (!response.ok) {
+
+        const data = await response.json();
+        alert(data.detail || "Could not refuel vehicle");
+        return;
+    }
+
+    loadVehicles();
 }
 
 
@@ -1248,15 +1287,17 @@ function renderAllVehicleList() {
         // live trip position instead, when the active-trips poll has
         // already picked it up.
         //
+        const driving = vehicle.status === "DRIVING" || vehicle.status === "STRANDED";
+
         item.onclick = () => {
 
             clearFocus();
 
-            const trip = vehicle.status === "DRIVING" ? activeTripsById.get(vehicle.id) : null;
+            const trip = driving ? activeTripsById.get(vehicle.id) : null;
 
             map.panTo(trip ? trip.position : [vehicle.current_lat, vehicle.current_lng]);
 
-            if (vehicle.status !== "DRIVING") {
+            if (!driving) {
                 showRestingVehicleMarker(vehicle);
             }
 
@@ -1265,6 +1306,12 @@ function renderAllVehicleList() {
 
         const imageUrl = vehicle.spec ? specImageUrl(vehicle.spec.image) : null;
 
+        const trip = driving ? activeTripsById.get(vehicle.id) : null;
+        const fuelRemaining = trip ? tripFuelRemaining(trip) : vehicle.fuel_gallons;
+        const fuelBadge = fuelRemaining !== null && vehicle.spec
+            ? ` <span class="fuel-badge">&#9981; ${formatGallons(fuelRemaining)}/${vehicle.spec.fuel_tank_gallons} gal</span>`
+            : "";
+
         item.innerHTML =
             `<span class="spec-item-label">` +
             (imageUrl ? `<img class="spec-thumb" src="${imageUrl}">` : "") +
@@ -1272,7 +1319,7 @@ function renderAllVehicleList() {
             (vehicle.spec ? ` (${specLabel(vehicle.spec)})` : "") +
             ` &middot; ${vehicle.current_location} ` +
             `&middot; ${Math.round(vehicleTotalMiles(vehicle)).toLocaleString()} mi ` +
-            `<span class="status-badge status-${vehicle.status}">${vehicle.status}</span></span></span>`;
+            `<span class="status-badge status-${vehicle.status}">${vehicle.status}</span>${fuelBadge}</span></span>`;
 
         list.appendChild(item);
     }
@@ -1490,6 +1537,20 @@ function formatGallons(gallons) {
 }
 
 
+//
+// Unlike tripGallonsUsed() above (a pure mpg x distance readout, unaffected
+// by tank size), this is the actual live tank level from the backend's own
+// resolve_trip_progress() - it reflects the vehicle's real starting fuel,
+// any roadside refuels used so far, and clamps to 0 once truly dry, so it's
+// what should drive the fuel gauge and the STRANDED/roadside-refuel UI.
+// null when the vehicle/spec's mpg isn't trackable (see resolve_trip_progress()).
+//
+function tripFuelRemaining(trip) {
+
+    return typeof trip.fuel_gallons_remaining === "number" ? trip.fuel_gallons_remaining : null;
+}
+
+
 function renderInRouteList() {
 
     const list = document.getElementById("inroute-list");
@@ -1534,6 +1595,26 @@ function renderInRouteList() {
     const spec = vehicle ? vehicle.spec : null;
 
     const gallonsUsed = tripGallonsUsed(trip, vehicle);
+    const fuelRemaining = tripFuelRemaining(trip);
+
+    const fuelLine = fuelRemaining !== null && spec
+        ? `Fuel: ${formatGallons(fuelRemaining)} / ${spec.fuel_tank_gallons} gal<br>`
+        : "";
+
+    let statusLine;
+
+    if (trip.status === "ARRIVED") {
+        statusLine = "Arrived";
+    } else if (trip.status === "STRANDED") {
+        statusLine =
+            `Out of fuel - stranded ${trip.distance_miles.toFixed(1)} mi in<br>` +
+            `<button id="roadside-refuel-button" data-id="${trip.vehicle_id}">` +
+            `Send roadside fuel ($${ROADSIDE_ASSIST_FEE_USD})</button>`;
+    } else {
+        statusLine =
+            `Speed: ${Math.round(trip.speed_mph)} mph<br>` +
+            `Arriving in: ${formatHMS(trip.remaining_sim_seconds)}`;
+    }
 
     details.innerHTML =
         `<b>${vehicle ? vehicle.name : trip.vehicle_name}</b><br>` +
@@ -1548,10 +1629,41 @@ function renderInRouteList() {
         (trip.road_name ? `Road: ${trip.road_name}<br>` : "") +
         `Distance so far: ${trip.distance_miles.toFixed(1)} mi<br>` +
         (gallonsUsed !== null ? `Gas used: ${formatGallons(gallonsUsed)} gal<br>` : "") +
-        (trip.status === "ARRIVED"
-            ? "Arrived"
-            : `Speed: ${Math.round(trip.speed_mph)} mph<br>` +
-              `Arriving in: ${formatHMS(trip.remaining_sim_seconds)}`);
+        fuelLine +
+        statusLine;
+
+    const roadsideButton = document.getElementById("roadside-refuel-button");
+
+    if (roadsideButton) {
+        roadsideButton.onclick = () => withSpinner(roadsideButton, () => roadsideRefuel(Number(roadsideButton.dataset.id)));
+    }
+}
+
+
+//
+// There's no money/budget system in the app yet (see ROADSIDE_ASSIST_FEE_USD
+// in app.py), so this fee isn't actually charged anywhere - it's just shown
+// to set expectations for when one exists.
+//
+const ROADSIDE_ASSIST_FEE_USD = 75;
+
+
+async function roadsideRefuel(vehicleId) {
+
+    const vehicle = vehiclesById.get(vehicleId);
+
+    if (!confirm(`Send roadside fuel to ${vehicle ? vehicle.name : "this vehicle"} for $${ROADSIDE_ASSIST_FEE_USD}?`)) {
+        return;
+    }
+
+    const response = await fetch(API + "/api/vehicles/" + vehicleId + "/roadside-refuel", { method: "POST" });
+
+    if (!response.ok) {
+
+        const data = await response.json();
+        alert(data.detail || "Could not send roadside fuel");
+        return;
+    }
 }
 
 
@@ -2478,6 +2590,8 @@ async function pollActiveTrips() {
         layer.marker.setTooltipContent(
             trip.status === "ARRIVED"
                 ? `${trip.vehicle_name}: Arrived`
+                : trip.status === "STRANDED"
+                ? `${trip.vehicle_name}: Out of fuel - stranded`
                 : `${trip.vehicle_name}: arriving in ${formatHMS(trip.remaining_sim_seconds)}`
         );
 

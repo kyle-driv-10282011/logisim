@@ -99,6 +99,17 @@ INCIDENT_CHANCE = 0.03
 INCIDENT_FACTOR = 0.4
 JITTER_RANGE = 0.08
 
+#
+# Flat placeholder fee for a roadside refuel (see POST
+# /api/vehicles/{id}/roadside-refuel) - there's no money/budget system
+# anywhere else in the app yet (a vehicle spec's "cost" and a gas price's
+# "price_per_gallon" are both purely informational, never actually
+# charged), so this isn't deducted from anything either. It's surfaced in
+# that endpoint's response so a future balance system has a real number to
+# charge against without needing to change this endpoint's own logic.
+#
+ROADSIDE_ASSIST_FEE_USD = 75.0
+
 
 def road_tier(free_flow_mph):
 
@@ -178,20 +189,33 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
 
     #
     # A vehicle's place only updates once its most recent trip has actually
-    # arrived (real elapsed time since started_at has passed the compressed
-    # playback duration - same condition list_vehicles()/active_trips() use
-    # to decide DRIVING vs not) - not the instant a trip is created, and not
-    # continuously while driving. A single bulk UPDATE covers every vehicle
-    # at once rather than looping per vehicle; IS DISTINCT FROM skips
-    # vehicles already settled at that destination so this is cheap to call
-    # on every read.
+    # arrived - not the instant a trip is created, and not continuously
+    # while driving. "Arrived" now accounts for paused_seconds (real
+    # schedule-time refunded by a roadside refuel - see resolve_trip_progress())
+    # as well as elapsed real time, so a vehicle currently STRANDED (out of
+    # fuel, paused_seconds not yet advanced) never gets mistaken for arrived
+    # no matter how long it sits there in real time. A single bulk UPDATE
+    # covers every vehicle at once rather than looping per vehicle;
+    # IS DISTINCT FROM skips vehicles already settled at that destination so
+    # this is cheap to call on every read.
+    #
+    # fuel_gallons is settled in the same statement: the tank's contents at
+    # arrival are whatever this trip's total fuel budget (starting_fuel_gallons
+    # plus one tank per roadside refuel used) had left once the full route's
+    # distance was paid for in gallons.
     #
     cur.execute(
         """
         UPDATE vehicles v
-        SET place_id = p.destination_place_id
+        SET place_id = p.destination_place_id,
+            fuel_gallons = GREATEST(
+                0.0,
+                t.starting_fuel_gallons + t.roadside_refuel_count * vs.fuel_tank_gallons
+                - (p.distances_miles ->> -1)::double precision / vs.mpg
+            )
         FROM trips t
         JOIN paths p ON p.id = t.path_id
+        JOIN vehicle_specs vs ON vs.id = v.spec_id
         WHERE t.id = (
             SELECT t2.id FROM trips t2
             WHERE t2.vehicle_id = v.id
@@ -199,7 +223,7 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
             LIMIT 1
         )
         AND t.vehicle_id = v.id
-        AND EXTRACT(EPOCH FROM (NOW() - t.started_at)) >= t.realized_duration_seconds / %s
+        AND (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) >= t.realized_duration_seconds
         AND v.place_id IS DISTINCT FROM p.destination_place_id
         """,
         (time_multiplier,)
@@ -581,6 +605,153 @@ def current_road_name(road_names, road_name_boundaries, position):
     return road_names[name_index]
 
 
+def interpolate_seconds_at_distance(distances_miles, realized_seconds, target_distance_miles):
+
+    #
+    # Within one route segment, distance and time are linearly related
+    # (build_trip_schedule() prices a whole segment at one constant speed),
+    # so this is the exact inverse of the distance -> time step
+    # derive_position() does the other way around, not an approximation.
+    #
+    segment_index = bisect.bisect_right(distances_miles, target_distance_miles) - 1
+    segment_index = max(0, min(segment_index, len(distances_miles) - 2))
+
+    d0, d1 = distances_miles[segment_index], distances_miles[segment_index + 1]
+    t0, t1 = realized_seconds[segment_index], realized_seconds[segment_index + 1]
+
+    fraction = 0 if d1 == d0 else (target_distance_miles - d0) / (d1 - d0)
+
+    return t0 + (t1 - t0) * fraction
+
+
+#
+# Central fuel/time bookkeeping for one trip, shared by settle_arrived_vehicles()
+# (bulk arrival check), list_vehicles() (fleet status), and derive_position()
+# (live position/map). Kept separate from derive_position's own lat/lon/road-name
+# work below so the cheaper callers (which only need status + fuel, not a
+# point on the map) don't have to touch route/road_names/zones at all.
+#
+# A trip's total fuel budget is starting_fuel_gallons (the vehicle's tank
+# when it departed) plus one more full tank per roadside refuel used so far
+# (roadside_refuel_count) - see the `trips` table comment in init.sql. If
+# that's enough to cover the whole route, this behaves exactly like the
+# pre-fuel model. If not, the vehicle runs dry at a fixed distance along the
+# route (independent of speed/traffic, since gallons are consumed by
+# distance, not time) and STRANDED freezes progress right there until a
+# roadside refuel bumps roadside_refuel_count and pushes the dry point
+# further out.
+#
+# paused_seconds is schedule time (the same domain as realized_seconds/
+# realized_duration_seconds, not wall-clock real time) "refunded" by a past
+# roadside refuel - see resolve the endpoint below - so time spent stranded
+# never counts as progress once the trip resumes.
+#
+def resolve_trip_progress(
+    distances_miles,
+    realized_seconds,
+    realized_duration_seconds,
+    mpg,
+    fuel_tank_gallons,
+    starting_fuel_gallons,
+    roadside_refuel_count,
+    paused_seconds,
+    elapsed_real_seconds,
+    time_multiplier
+):
+
+    total_miles = distances_miles[-1]
+
+    schedule_elapsed = elapsed_real_seconds * time_multiplier - paused_seconds
+
+    total_fuel_available = None
+
+    if mpg and mpg > 0:
+        total_fuel_available = starting_fuel_gallons + roadside_refuel_count * fuel_tank_gallons
+
+    dry_miles = None
+
+    if total_fuel_available is not None:
+
+        candidate = total_fuel_available * mpg
+
+        if candidate < total_miles:
+            dry_miles = candidate
+
+    if dry_miles is not None:
+
+        dry_elapsed = interpolate_seconds_at_distance(distances_miles, realized_seconds, dry_miles)
+
+        if schedule_elapsed >= dry_elapsed:
+
+            return {
+
+                "status": "STRANDED",
+
+                "elapsed_seconds": dry_elapsed,
+
+                "distance_miles": dry_miles,
+
+                "fuel_gallons_remaining": max(0.0, total_fuel_available - dry_miles / mpg),
+
+                "remaining_sim_seconds": (realized_duration_seconds - dry_elapsed) / time_multiplier
+            }
+
+    if schedule_elapsed >= realized_duration_seconds:
+
+        fuel_remaining = (
+            max(0.0, total_fuel_available - total_miles / mpg)
+            if total_fuel_available is not None else None
+        )
+
+        return {
+
+            "status": "ARRIVED",
+
+            "elapsed_seconds": realized_duration_seconds,
+
+            "distance_miles": total_miles,
+
+            "fuel_gallons_remaining": fuel_remaining,
+
+            "remaining_sim_seconds": 0
+        }
+
+    #
+    # Still driving - find the current segment the same way derive_position()
+    # will (so the two can never disagree about "how far along is it"),
+    # purely to report a live current_distance/fuel_gallons_remaining.
+    #
+    segment_index = bisect.bisect_right(realized_seconds, schedule_elapsed) - 1
+    segment_index = max(0, min(segment_index, len(distances_miles) - 2))
+
+    segment_start, segment_end = realized_seconds[segment_index], realized_seconds[segment_index + 1]
+
+    fraction = 0 if segment_end == segment_start else (
+        (schedule_elapsed - segment_start) / (segment_end - segment_start)
+    )
+
+    distance_start, distance_end = distances_miles[segment_index], distances_miles[segment_index + 1]
+    current_distance = distance_start + (distance_end - distance_start) * fraction
+
+    fuel_remaining = (
+        max(0.0, total_fuel_available - current_distance / mpg)
+        if total_fuel_available is not None else None
+    )
+
+    return {
+
+        "status": "DRIVING",
+
+        "elapsed_seconds": schedule_elapsed,
+
+        "distance_miles": current_distance,
+
+        "fuel_gallons_remaining": fuel_remaining,
+
+        "remaining_sim_seconds": (realized_duration_seconds - schedule_elapsed) / time_multiplier
+    }
+
+
 def derive_position(
     trip_id,
     route,
@@ -593,39 +764,46 @@ def derive_position(
     realized_duration_seconds,
     traffic_base_datetime,
     traffic_bias,
+    mpg,
+    fuel_tank_gallons,
+    starting_fuel_gallons,
+    roadside_refuel_count,
+    paused_seconds,
     elapsed_real_seconds,
     time_multiplier
 ):
 
-    elapsed_seconds = elapsed_real_seconds * time_multiplier
-
-    if elapsed_seconds >= realized_duration_seconds:
-
-        return {
-
-            "position": route[-1],
-
-            "status": "ARRIVED",
-
-            "remaining_sim_seconds": 0,
-
-            "speed_mph": 0,
-
-            "road_name": current_road_name(road_names, road_name_boundary_miles, distances_miles[-1]),
-
-            "distance_miles": distances_miles[-1]
-        }
+    progress = resolve_trip_progress(
+        distances_miles,
+        realized_seconds,
+        realized_duration_seconds,
+        mpg,
+        fuel_tank_gallons,
+        starting_fuel_gallons,
+        roadside_refuel_count,
+        paused_seconds,
+        elapsed_real_seconds,
+        time_multiplier
+    )
 
     #
-    # Find which route segment we're currently inside of, and how far
-    # across it (by time), then interpolate position within it.
+    # schedule_elapsed pins the exact point on the route to show: for
+    # ARRIVED/STRANDED it's a fixed value (the end of the route, or the
+    # distance the tank ran dry at), for DRIVING it's wherever "now" maps
+    # to - the same segment-interpolation code below handles all three
+    # without special-casing, since bisecting realized_seconds against its
+    # own maximum value naturally resolves to the last segment at
+    # fraction=1 (i.e. route[-1]) for ARRIVED.
     #
-    segment_index = bisect.bisect_right(realized_seconds, elapsed_seconds) - 1
+    schedule_elapsed = progress["elapsed_seconds"]
+
+    segment_index = bisect.bisect_right(realized_seconds, schedule_elapsed) - 1
+    segment_index = max(0, min(segment_index, len(distances_miles) - 2))
 
     segment_start, segment_end = realized_seconds[segment_index], realized_seconds[segment_index + 1]
 
     fraction = 0 if segment_end == segment_start else (
-        (elapsed_seconds - segment_start) / (segment_end - segment_start)
+        (schedule_elapsed - segment_start) / (segment_end - segment_start)
     )
 
     lat1, lon1 = route[segment_index]
@@ -638,39 +816,46 @@ def derive_position(
         lon1 + (lon2 - lon1) * fraction
     ]
 
-    distance_start, distance_end = distances_miles[segment_index], distances_miles[segment_index + 1]
-    current_distance = distance_start + (distance_end - distance_start) * fraction
+    road_name = current_road_name(road_names, road_name_boundary_miles, progress["distance_miles"])
 
-    road_name = current_road_name(road_names, road_name_boundary_miles, current_distance)
+    speed_mph = 0
 
-    #
-    # The wall-clock moment this segment is reached, advancing through the
-    # trip by real (uncompressed) drive time - so a long trip can drive
-    # into a different rush-hour window partway through, not just reflect
-    # conditions frozen at departure. segment_start comes from the trip's
-    # own realized_seconds schedule (computed once at trip start), so this
-    # matches exactly the effective_dt build_trip_schedule() used for this
-    # same segment.
-    #
-    effective_dt = traffic_base_datetime + timedelta(seconds=segment_start)
+    if progress["status"] == "DRIVING":
 
-    speed_mph = segment_speed_mph(
-        zones, max_speeds_mph, segment_index, distance_start, effective_dt, traffic_bias, trip_id
-    )
+        #
+        # The wall-clock moment this segment is reached, advancing through
+        # the trip by real (uncompressed) drive time - so a long trip can
+        # drive into a different rush-hour window partway through, not just
+        # reflect conditions frozen at departure. segment_start comes from
+        # the trip's own realized_seconds schedule (computed once at trip
+        # start), so this matches exactly the effective_dt
+        # build_trip_schedule() used for this same segment.
+        #
+        effective_dt = traffic_base_datetime + timedelta(seconds=segment_start)
+
+        speed_mph = round(
+            segment_speed_mph(
+                zones, max_speeds_mph, segment_index, distances_miles[segment_index],
+                effective_dt, traffic_bias, trip_id
+            ),
+            1
+        )
 
     return {
 
         "position": position,
 
-        "status": "DRIVING",
+        "status": progress["status"],
 
-        "remaining_sim_seconds": (realized_duration_seconds - elapsed_seconds) / time_multiplier,
+        "remaining_sim_seconds": progress["remaining_sim_seconds"],
 
-        "speed_mph": round(speed_mph, 1),
+        "speed_mph": speed_mph,
 
         "road_name": road_name,
 
-        "distance_miles": current_distance
+        "distance_miles": progress["distance_miles"],
+
+        "fuel_gallons_remaining": progress["fuel_gallons_remaining"]
     }
 
 
@@ -777,6 +962,28 @@ def run_migrations():
             price_per_gallon DOUBLE PRECISION NOT NULL,
             updated TIMESTAMP NOT NULL DEFAULT NOW()
         )
+        """
+    )
+
+    #
+    # Fuel tank support - additive columns with defaults, safe to run against
+    # both a pre-existing DB and a fresh one (where init.sql already created
+    # them). Existing vehicles start full (see the UPDATE below); existing
+    # trips get 0/0/0, which is exactly right for a trip that already
+    # finished before this migration ever ran.
+    #
+    cur.execute("ALTER TABLE vehicle_specs ADD COLUMN IF NOT EXISTS fuel_tank_gallons DOUBLE PRECISION NOT NULL DEFAULT 20")
+    cur.execute("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS fuel_gallons DOUBLE PRECISION NOT NULL DEFAULT 0")
+    cur.execute("ALTER TABLE trips ADD COLUMN IF NOT EXISTS starting_fuel_gallons DOUBLE PRECISION NOT NULL DEFAULT 0")
+    cur.execute("ALTER TABLE trips ADD COLUMN IF NOT EXISTS roadside_refuel_count INTEGER NOT NULL DEFAULT 0")
+    cur.execute("ALTER TABLE trips ADD COLUMN IF NOT EXISTS paused_seconds DOUBLE PRECISION NOT NULL DEFAULT 0")
+
+    cur.execute(
+        """
+        UPDATE vehicles v
+        SET fuel_gallons = vs.fuel_tank_gallons
+        FROM vehicle_specs vs
+        WHERE vs.id = v.spec_id AND v.fuel_gallons = 0 AND v.sold = FALSE
         """
     )
 
@@ -996,12 +1203,14 @@ def spec_dict(row):
 
         "mpg": row[7],
 
-        "image": row[8]
+        "image": row[8],
+
+        "fuel_tank_gallons": row[9]
     }
 
 
 SPEC_COLUMNS = """
-    id, year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, image
+    id, year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, image, fuel_tank_gallons
 """
 
 
@@ -1163,6 +1372,14 @@ class CreateVehicleSpecRequest(BaseModel):
     mpg: float
 
     #
+    # Capacity of every vehicle created against this spec, in gallons - a
+    # new vehicle starts with a full tank (see create_vehicle()), and this
+    # is also how far a roadside refuel extends a stranded trip's range
+    # (see resolve_trip_progress()).
+    #
+    fuel_tank_gallons: float
+
+    #
     # Filename under frontend/images/ (e.g. "2026-Chevy-Express.png"), not a
     # full URL - the frontend is what knows it's serving that directory at
     # its own origin.
@@ -1308,7 +1525,7 @@ def update_settings(req: UpdateSettingsRequest):
         """
         SELECT 1
         FROM trips t
-        WHERE EXTRACT(EPOCH FROM (NOW() - t.started_at)) < t.realized_duration_seconds / %s
+        WHERE (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) < t.realized_duration_seconds
         LIMIT 1
         """,
         (time_multiplier,)
@@ -1374,13 +1591,21 @@ def create_vehicle(req: CreateVehicleRequest):
 
     name = f"{spec['year']} {spec['brand']} {spec['model']} {vehicle_number}"
 
+    #
+    # A brand-new vehicle always starts with a full tank of its spec's
+    # capacity - there's no "starting fuel level" input the way
+    # starting_mileage has one, since a fresh vehicle joining the fleet is
+    # assumed fueled up and ready to go.
+    #
+    fuel_gallons = spec["fuel_tank_gallons"]
+
     cur.execute(
         """
-        INSERT INTO vehicles (name, spec_id, place_id, starting_mileage)
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO vehicles (name, spec_id, place_id, starting_mileage, fuel_gallons)
+        VALUES (%s, %s, %s, %s, %s)
         RETURNING id
         """,
-        (name, req.spec_id, place_id, req.starting_mileage)
+        (name, req.spec_id, place_id, req.starting_mileage, fuel_gallons)
     )
 
     vehicle_id = cur.fetchone()[0]
@@ -1406,6 +1631,8 @@ def create_vehicle(req: CreateVehicleRequest):
 
         "starting_mileage": req.starting_mileage,
 
+        "fuel_gallons": fuel_gallons,
+
         #
         # A brand-new vehicle has no trips yet, so its total is just what
         # it started with.
@@ -1420,14 +1647,20 @@ def create_vehicle(req: CreateVehicleRequest):
 @app.post("/api/vehicle-specs")
 def create_vehicle_spec(req: CreateVehicleSpecRequest):
 
+    if req.mpg <= 0:
+        raise HTTPException(status_code=400, detail="mpg must be positive")
+
+    if req.fuel_tank_gallons <= 0:
+        raise HTTPException(status_code=400, detail="fuel_tank_gallons must be positive")
+
     conn = db()
     cur = conn.cursor()
 
     cur.execute(
         """
         INSERT INTO vehicle_specs
-        (year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, image)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        (year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, image, fuel_tank_gallons)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
         (
@@ -1438,7 +1671,8 @@ def create_vehicle_spec(req: CreateVehicleSpecRequest):
             req.cargo_capacity_cuft,
             req.cost,
             req.mpg,
-            req.image
+            req.image,
+            req.fuel_tank_gallons
         )
     )
 
@@ -1508,6 +1742,54 @@ def delete_vehicle_spec(id: int):
 
 
 
+#
+# For every vehicle_id whose fleet-wide status query (below) says 'DRIVING'
+# (i.e. its latest trip's realized_duration_seconds hasn't been reached
+# yet), get the trip/path/spec data resolve_trip_progress() needs to tell a
+# genuinely-driving vehicle apart from one that's actually STRANDED (out of
+# fuel) - and its live fuel_gallons_remaining either way. Batched into one
+# query rather than one per vehicle, same pattern as fetch_specs_by_id().
+#
+def fetch_live_trip_progress(cur, vehicle_ids, time_multiplier):
+
+    vehicle_ids = list(set(vehicle_ids))
+
+    if not vehicle_ids:
+        return {}
+
+    cur.execute(
+        """
+        SELECT DISTINCT ON (t.vehicle_id)
+            t.vehicle_id, p.distances_miles, t.realized_seconds, t.realized_duration_seconds,
+            t.starting_fuel_gallons, t.roadside_refuel_count, t.paused_seconds,
+            EXTRACT(EPOCH FROM (NOW() - t.started_at)), vs.mpg, vs.fuel_tank_gallons
+        FROM trips t
+        JOIN paths p ON p.id = t.path_id
+        JOIN vehicles v ON v.id = t.vehicle_id
+        JOIN vehicle_specs vs ON vs.id = v.spec_id
+        WHERE t.vehicle_id = ANY(%s)
+        ORDER BY t.vehicle_id, t.started_at DESC
+        """,
+        (vehicle_ids,)
+    )
+
+    progress_by_vehicle = {}
+
+    for (
+        vehicle_id, distances_miles, realized_seconds, realized_duration_seconds,
+        starting_fuel_gallons, roadside_refuel_count, paused_seconds,
+        elapsed_real_seconds, mpg, fuel_tank_gallons
+    ) in cur.fetchall():
+
+        progress_by_vehicle[vehicle_id] = resolve_trip_progress(
+            distances_miles, realized_seconds, realized_duration_seconds,
+            mpg, fuel_tank_gallons, starting_fuel_gallons, roadside_refuel_count, paused_seconds,
+            float(elapsed_real_seconds), time_multiplier
+        )
+
+    return progress_by_vehicle
+
+
 @app.get("/api/vehicles")
 def list_vehicles(include_sold: bool = False):
 
@@ -1525,11 +1807,16 @@ def list_vehicles(include_sold: bool = False):
     # clause (only the bool toggles which literal is used), so it's safe
     # to splice in rather than parameterize.
     #
-    # completed_trip_miles sums, per vehicle, the full length of every path
-    # driven on a trip that's actually arrived (same "arrived" condition as
-    # the DRIVING check below) - a trip in progress contributes its
-    # partial distance separately, via GET /api/trips/active's own
-    # distance_miles (see derive_position()), not here.
+    # Both conditions below now account for paused_seconds (see
+    # resolve_trip_progress()) so a vehicle stuck STRANDED for a long real
+    # time is never mistaken for arrived just because a lot of wall-clock
+    # time has passed - completed_trip_miles sums, per vehicle, the full
+    # length of every path driven on a trip that's actually arrived (a trip
+    # in progress contributes its partial distance separately, via GET
+    # /api/trips/active's own distance_miles, not here). The status CASE
+    # only tells DRIVING-or-STRANDED apart from READY/SOLD here - the two are
+    # disambiguated below via fetch_live_trip_progress(), which is the only
+    # place that actually knows about fuel.
     #
     cur.execute(
         f"""
@@ -1541,13 +1828,14 @@ def list_vehicles(include_sold: bool = False):
             v.starting_mileage,
             v.sold,
             v.sold_at,
+            v.fuel_gallons,
             CASE
                 WHEN v.sold THEN 'SOLD'
                 WHEN EXISTS (
                     SELECT 1
                     FROM trips t
                     WHERE t.vehicle_id = v.id
-                    AND EXTRACT(EPOCH FROM (NOW() - t.started_at)) < t.realized_duration_seconds / %s
+                    AND (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) < t.realized_duration_seconds
                 ) THEN 'DRIVING'
                 ELSE 'READY'
             END,
@@ -1557,7 +1845,7 @@ def list_vehicles(include_sold: bool = False):
             SELECT t.vehicle_id, SUM((p.distances_miles ->> -1)::double precision) AS miles
             FROM trips t
             JOIN paths p ON p.id = t.path_id
-            WHERE EXTRACT(EPOCH FROM (NOW() - t.started_at)) >= t.realized_duration_seconds / %s
+            WHERE (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) >= t.realized_duration_seconds
             GROUP BY t.vehicle_id
         ) ctm ON ctm.vehicle_id = v.id
         {"" if include_sold else "WHERE v.sold = FALSE"}
@@ -1571,11 +1859,20 @@ def list_vehicles(include_sold: bool = False):
     specs_by_id = fetch_specs_by_id(cur, [row[2] for row in rows])
     places_by_id = fetch_places_by_id(cur, [row[3] for row in rows])
 
+    progress_by_vehicle = fetch_live_trip_progress(
+        cur, [row[0] for row in rows if row[8] == "DRIVING"], time_multiplier
+    )
+
     cur.close()
     conn.close()
 
-    return [
-        {
+    result = []
+
+    for row in rows:
+
+        progress = progress_by_vehicle.get(row[0])
+
+        result.append({
 
             "id": row[0],
 
@@ -1597,16 +1894,25 @@ def list_vehicles(include_sold: bool = False):
 
             "starting_mileage": row[4],
 
-            "total_miles_traveled": row[4] + row[8],
+            "total_miles_traveled": row[4] + row[9],
 
             "sold": row[5],
 
             "sold_at": row[6],
 
-            "status": row[7]
-        }
-        for row in rows
-    ]
+            #
+            # A settled vehicle's fuel is just its persisted value; a
+            # DRIVING/STRANDED one gets the live figure from
+            # resolve_trip_progress() instead, the same way its odometer
+            # comes from the active trip's own distance_miles rather than
+            # v.starting_mileage while driving.
+            #
+            "fuel_gallons": progress["fuel_gallons_remaining"] if progress else row[7],
+
+            "status": progress["status"] if progress else row[8]
+        })
+
+    return result
 
 
 
@@ -1637,7 +1943,7 @@ def sell_vehicle(id: int):
         SELECT 1
         FROM trips t
         WHERE t.vehicle_id = %s
-        AND EXTRACT(EPOCH FROM (NOW() - t.started_at)) < t.realized_duration_seconds / %s
+        AND (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) < t.realized_duration_seconds
         """,
         (id, time_multiplier)
     )
@@ -1658,6 +1964,185 @@ def sell_vehicle(id: int):
     conn.close()
 
     return {"id": id, "sold": True}
+
+
+
+#
+# Refuels a READY vehicle to its spec's full tank capacity, but only while
+# it's sitting at a place that's actually a gas station - i.e. one with an
+# entry in gas_prices (the Gas Prices tab/map). A vehicle currently
+# DRIVING or STRANDED has to use POST /api/vehicles/{id}/roadside-refuel
+# instead, since it isn't at any place to check.
+#
+@app.post("/api/vehicles/{id}/refuel")
+def refuel_vehicle(id: int):
+
+    conn = db()
+    cur = conn.cursor()
+
+    time_multiplier, _ = get_settings(conn, cur)
+
+    settle_arrived_vehicles(conn, cur, time_multiplier)
+
+    cur.execute("SELECT sold, place_id, spec_id FROM vehicles WHERE id=%s", (id,))
+
+    row = cur.fetchone()
+
+    if row is None:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=404, detail="Vehicle not found")
+
+    sold, place_id, spec_id = row
+
+    if sold:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=409, detail="Vehicle has been sold")
+
+    cur.execute(
+        """
+        SELECT 1
+        FROM trips t
+        WHERE t.vehicle_id = %s
+        AND (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) < t.realized_duration_seconds
+        """,
+        (id, time_multiplier)
+    )
+
+    if cur.fetchone() is not None:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=409, detail="Vehicle is currently on a trip")
+
+    cur.execute("SELECT 1 FROM gas_prices WHERE place_id=%s", (place_id,))
+
+    if cur.fetchone() is None:
+        cur.close()
+        conn.close()
+        raise HTTPException(
+            status_code=409,
+            detail="Vehicle isn't at a priced gas station - add a gas price for this location on the Gas Prices tab first"
+        )
+
+    fuel_tank_gallons = fetch_specs_by_id(cur, [spec_id])[spec_id]["fuel_tank_gallons"]
+
+    cur.execute("UPDATE vehicles SET fuel_gallons = %s WHERE id = %s", (fuel_tank_gallons, id))
+
+    conn.commit()
+
+    cur.close()
+    conn.close()
+
+    return {"id": id, "fuel_gallons": fuel_tank_gallons}
+
+
+
+#
+# Recovers a STRANDED vehicle (one that ran out of fuel mid-route) without
+# needing it to be at any place - there's no gas station out on the open
+# road, so this ignores the gas_prices check the normal refuel above
+# requires entirely. Tops the tank back up to full and lets the trip
+# continue from wherever it stopped (see resolve_trip_progress()'s
+# paused_seconds/roadside_refuel_count handling).
+#
+@app.post("/api/vehicles/{id}/roadside-refuel")
+def roadside_refuel_vehicle(id: int):
+
+    conn = db()
+    cur = conn.cursor()
+
+    time_multiplier, _ = get_settings(conn, cur)
+
+    settle_arrived_vehicles(conn, cur, time_multiplier)
+
+    cur.execute("SELECT sold FROM vehicles WHERE id=%s", (id,))
+
+    row = cur.fetchone()
+
+    if row is None:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=404, detail="Vehicle not found")
+
+    if row[0]:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=409, detail="Vehicle has been sold")
+
+    cur.execute(
+        """
+        SELECT
+            t.id, t.paused_seconds, t.roadside_refuel_count, t.starting_fuel_gallons,
+            t.realized_seconds, t.realized_duration_seconds, p.distances_miles,
+            vs.mpg, vs.fuel_tank_gallons, EXTRACT(EPOCH FROM (NOW() - t.started_at))
+        FROM trips t
+        JOIN paths p ON p.id = t.path_id
+        JOIN vehicles v ON v.id = t.vehicle_id
+        JOIN vehicle_specs vs ON vs.id = v.spec_id
+        WHERE t.vehicle_id = %s
+        ORDER BY t.started_at DESC
+        LIMIT 1
+        """,
+        (id,)
+    )
+
+    row = cur.fetchone()
+
+    if row is None:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=409, detail="Vehicle has never been on a trip")
+
+    (
+        trip_id, paused_seconds, roadside_refuel_count, starting_fuel_gallons,
+        realized_seconds, realized_duration_seconds, distances_miles,
+        mpg, fuel_tank_gallons, elapsed_real_seconds
+    ) = row
+
+    elapsed_real_seconds = float(elapsed_real_seconds)
+
+    progress = resolve_trip_progress(
+        distances_miles, realized_seconds, realized_duration_seconds,
+        mpg, fuel_tank_gallons, starting_fuel_gallons, roadside_refuel_count, paused_seconds,
+        elapsed_real_seconds, time_multiplier
+    )
+
+    if progress["status"] != "STRANDED":
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=409, detail="Vehicle is not currently stranded")
+
+    #
+    # "Refund" exactly the schedule time spent stuck since it ran dry, so
+    # the trip resumes right where it left off instead of jumping ahead by
+    # however long it sat there in real time - see resolve_trip_progress()'s
+    # own paused_seconds comment.
+    #
+    schedule_elapsed_before = elapsed_real_seconds * time_multiplier - paused_seconds
+    new_paused_seconds = paused_seconds + (schedule_elapsed_before - progress["elapsed_seconds"])
+    new_roadside_refuel_count = roadside_refuel_count + 1
+
+    cur.execute(
+        "UPDATE trips SET paused_seconds = %s, roadside_refuel_count = %s WHERE id = %s",
+        (new_paused_seconds, new_roadside_refuel_count, trip_id)
+    )
+
+    conn.commit()
+
+    cur.close()
+    conn.close()
+
+    return {
+
+        "id": id,
+
+        "trip_id": trip_id,
+
+        "roadside_refuel_count": new_roadside_refuel_count,
+
+        "cost_usd": ROADSIDE_ASSIST_FEE_USD
+    }
 
 
 
@@ -1713,15 +2198,22 @@ def vehicle_city(id: int):
             t.realized_duration_seconds,
             t.traffic_base_datetime,
             t.traffic_bias,
+            vs.mpg,
+            vs.fuel_tank_gallons,
+            t.starting_fuel_gallons,
+            t.roadside_refuel_count,
+            t.paused_seconds,
             EXTRACT(EPOCH FROM (NOW() - t.started_at))
         FROM trips t
         JOIN paths p ON p.id = t.path_id
+        JOIN vehicles v ON v.id = t.vehicle_id
+        JOIN vehicle_specs vs ON vs.id = v.spec_id
         WHERE t.vehicle_id = %s
-        AND EXTRACT(EPOCH FROM (NOW() - t.started_at)) < (t.realized_duration_seconds / %s) + %s
+        AND (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) < t.realized_duration_seconds + %s * %s
         ORDER BY t.started_at DESC
         LIMIT 1
         """,
-        (id, time_multiplier, ARRIVAL_GRACE_SECONDS)
+        (id, time_multiplier, ARRIVAL_GRACE_SECONDS, time_multiplier)
     )
 
     row = cur.fetchone()
@@ -1744,6 +2236,11 @@ def vehicle_city(id: int):
         realized_duration_seconds,
         traffic_base_datetime,
         traffic_bias,
+        mpg,
+        fuel_tank_gallons,
+        starting_fuel_gallons,
+        roadside_refuel_count,
+        paused_seconds,
         elapsed_real_seconds
     ) = row
 
@@ -1759,6 +2256,11 @@ def vehicle_city(id: int):
         realized_duration_seconds,
         traffic_base_datetime,
         traffic_bias,
+        mpg,
+        fuel_tank_gallons,
+        starting_fuel_gallons,
+        roadside_refuel_count,
+        paused_seconds,
         float(elapsed_real_seconds),
         time_multiplier
     )
@@ -2539,7 +3041,7 @@ def start_trip(req: StartTripRequest):
     #
     settle_arrived_vehicles(conn, cur, time_multiplier)
 
-    cur.execute("SELECT sold, place_id FROM vehicles WHERE id=%s", (req.vehicle_id,))
+    cur.execute("SELECT sold, place_id, fuel_gallons FROM vehicles WHERE id=%s", (req.vehicle_id,))
 
     vehicle_row = cur.fetchone()
 
@@ -2548,7 +3050,7 @@ def start_trip(req: StartTripRequest):
         conn.close()
         raise HTTPException(status_code=404, detail="Vehicle not found")
 
-    sold, vehicle_place_id = vehicle_row
+    sold, vehicle_place_id, vehicle_fuel_gallons = vehicle_row
 
     if sold:
         cur.close()
@@ -2587,7 +3089,7 @@ def start_trip(req: StartTripRequest):
         SELECT 1
         FROM trips t
         WHERE t.vehicle_id = %s
-        AND EXTRACT(EPOCH FROM (NOW() - t.started_at)) < t.realized_duration_seconds / %s
+        AND (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) < t.realized_duration_seconds
         """,
         (req.vehicle_id, time_multiplier)
     )
@@ -2616,13 +3118,19 @@ def start_trip(req: StartTripRequest):
     #
     zones = fetch_zones_for_paths(cur, [req.path_id]).get(req.path_id, [])
 
+    #
+    # Fuel isn't checked against the path's distance here - a vehicle is
+    # allowed to depart without enough of it (see resolve_trip_progress()),
+    # and simply runs dry (STRANDED) partway down the route instead of
+    # being blocked from leaving at all.
+    #
     cur.execute(
         """
-        INSERT INTO trips (vehicle_id, path_id, traffic_base_datetime, traffic_bias, zones_snapshot)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO trips (vehicle_id, path_id, traffic_base_datetime, traffic_bias, zones_snapshot, starting_fuel_gallons)
+        VALUES (%s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
-        (req.vehicle_id, req.path_id, traffic_base_datetime, req.traffic_bias, json.dumps(zones))
+        (req.vehicle_id, req.path_id, traffic_base_datetime, req.traffic_bias, json.dumps(zones), vehicle_fuel_gallons)
     )
 
     trip_id = cur.fetchone()[0]
@@ -2697,13 +3205,19 @@ def active_trips():
             t.realized_duration_seconds,
             t.traffic_base_datetime,
             t.traffic_bias,
+            vs.mpg,
+            vs.fuel_tank_gallons,
+            t.starting_fuel_gallons,
+            t.roadside_refuel_count,
+            t.paused_seconds,
             EXTRACT(EPOCH FROM (NOW() - t.started_at))
         FROM trips t
         JOIN vehicles v ON v.id = t.vehicle_id
         JOIN paths p ON p.id = t.path_id
-        WHERE EXTRACT(EPOCH FROM (NOW() - t.started_at)) < (t.realized_duration_seconds / %s) + %s
+        JOIN vehicle_specs vs ON vs.id = v.spec_id
+        WHERE (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) < t.realized_duration_seconds + %s * %s
         """,
-        (time_multiplier, ARRIVAL_GRACE_SECONDS)
+        (time_multiplier, ARRIVAL_GRACE_SECONDS, time_multiplier)
     )
 
     rows = cur.fetchall()
@@ -2728,6 +3242,11 @@ def active_trips():
         realized_duration_seconds,
         traffic_base_datetime,
         traffic_bias,
+        mpg,
+        fuel_tank_gallons,
+        starting_fuel_gallons,
+        roadside_refuel_count,
+        paused_seconds,
         elapsed_real_seconds
     ) in rows:
 
@@ -2743,6 +3262,11 @@ def active_trips():
             realized_duration_seconds,
             traffic_base_datetime,
             traffic_bias,
+            mpg,
+            fuel_tank_gallons,
+            starting_fuel_gallons,
+            roadside_refuel_count,
+            paused_seconds,
             float(elapsed_real_seconds),
             time_multiplier
         )
