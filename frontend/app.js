@@ -977,7 +977,17 @@ function renderGasPriceList() {
 
         item.className = "vehicle-item list-row";
         item.style.cursor = "pointer";
-        item.onclick = () => map.panTo([gasPrice.lat, gasPrice.lng]);
+
+        //
+        // Same reasoning as clearFocus() itself - without this, a followed
+        // driving vehicle (selectedVehicleId) would just yank the map back
+        // to its own position on the very next poll tick, undoing this pan.
+        //
+        item.onclick = () => {
+            clearFocus();
+            renderFocusDependentViews();
+            map.panTo([gasPrice.lat, gasPrice.lng]);
+        };
 
         item.innerHTML =
             `<span class="spec-item-label"><span>${gasPrice.description}` +
@@ -1198,8 +1208,8 @@ function renderVehicleList() {
         // instead - both against the same spec.fuel_tank_gallons capacity.
         //
         const fuelRemaining = trip ? tripFuelRemaining(trip) : vehicle.fuel_gallons;
-        const fuelBadge = fuelRemaining !== null && vehicle.spec
-            ? ` <span class="fuel-badge">&#9981; ${formatGallons(fuelRemaining)}/${vehicle.spec.fuel_tank_gallons} gal</span>`
+        const fuelGauge = fuelRemaining !== null && vehicle.spec
+            ? fuelGaugeHtml(fuelRemaining, vehicle.spec.fuel_tank_gallons)
             : "";
 
         item.innerHTML =
@@ -1216,8 +1226,7 @@ function renderVehicleList() {
                   " "
                 : "") +
             `<span class="status-badge status-${vehicle.status}">${vehicle.status}</span>` +
-            (!trip ? fuelBadge : "") +
-            `</span></span>` +
+            `</span>${fuelGauge}</span>` +
             (vehicle.status === "READY"
                 ? `<button class="refuel-button" data-id="${vehicle.id}">Refuel</button>` +
                   `<button class="sell-button" data-id="${vehicle.id}">Sell</button>`
@@ -1548,6 +1557,40 @@ function formatGallons(gallons) {
 function tripFuelRemaining(trip) {
 
     return typeof trip.fuel_gallons_remaining === "number" ? trip.fuel_gallons_remaining : null;
+}
+
+
+//
+// A small visual fuel gauge (bar + gallons label) for the My Vehicles list -
+// color shifts from green to red as the tank empties (same "lower = worse"
+// idea as the gas-price/speed-limit color scales elsewhere in the app), so a
+// vehicle that needs fuel soon stands out at a glance without reading the
+// number.
+//
+function fuelGaugeColor(fraction) {
+
+    if (fraction <= 0.15) {
+        return "#c92a2a";
+    }
+
+    if (fraction <= 0.4) {
+        return "#f08c00";
+    }
+
+    return "#2a8f2a";
+}
+
+
+function fuelGaugeHtml(remainingGallons, capacityGallons) {
+
+    const fraction = capacityGallons > 0 ? Math.max(0, Math.min(1, remainingGallons / capacityGallons)) : 0;
+
+    return (
+        `<span class="fuel-gauge" title="${formatGallons(remainingGallons)} / ${capacityGallons} gal">` +
+        `<span class="fuel-gauge-bar"><span class="fuel-gauge-fill" style="width:${(fraction * 100).toFixed(0)}%;background:${fuelGaugeColor(fraction)}"></span></span>` +
+        `<span class="fuel-gauge-label">${formatGallons(remainingGallons)}/${capacityGallons} gal</span>` +
+        `</span>`
+    );
 }
 
 
