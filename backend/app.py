@@ -18,6 +18,8 @@ import io
 import logging
 import random
 import re
+import threading
+import time
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -379,17 +381,41 @@ def build_trip_schedule(distances_miles, max_speeds_mph, zones, traffic_base_dat
 geolocator = Nominatim(user_agent="logisim-vehicle-sim", timeout=10)
 
 #
-# Nominatim's public instance allows at most 1 request/second and returns
-# 429 ("Non-successful status code 429") once that's exceeded. Reverse
-# geocoding already respected this; forward geocoding (geocode_full()
-# below) didn't, which was fine when only one request could be in flight
-# at a time, but job_executor can now run up to JOB_EXECUTOR_MAX_WORKERS
-# create_path/gas-price-upload jobs concurrently, each making its own
-# unpaced geocode call - hence the 429s. swallow_exceptions=False + a few
-# retries means a transient 429 gets retried with backoff instead of
-# immediately failing the whole job. Sharing one RateLimiter instance
-# across threads is the pattern geopy itself documents for bulk/concurrent
-# geocoding - it's thread-safe.
+# Nominatim's public instance allows at most 1 request/second, full stop,
+# across the whole app - and returns 429 ("Non-successful status code 429")
+# once that's exceeded. geocode_limited and reverse_geocode_limited below
+# each independently cap themselves to 1/sec, which was enough back when
+# forward and reverse geocoding never ran at the same time, but a vehicle
+# currently driving polls its own reverse-geocoded city every 7s (GET
+# /api/vehicles/{id}/city) while job_executor can concurrently be running a
+# create_path/gas-price-upload job that forward-geocodes - two independent
+# 1/sec limiters can burst to ~2 outbound requests/sec between them, which
+# is exactly the kind of burst Nominatim's real, combined limit rejects.
+# geocode_throttle_gate() is a third, lower-level gate shared by both, so
+# the *actual* combined request rate (whichever type) never exceeds 1/sec,
+# on top of (not instead of) each RateLimiter's own retry/backoff handling.
+#
+_geocode_throttle_lock = threading.Lock()
+_last_geocode_call_monotonic = [0.0]
+
+
+def geocode_throttle_gate():
+
+    with _geocode_throttle_lock:
+
+        wait_seconds = 1.0 - (time.monotonic() - _last_geocode_call_monotonic[0])
+
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+
+        _last_geocode_call_monotonic[0] = time.monotonic()
+
+
+#
+# swallow_exceptions=False + a few retries means a transient 429 gets
+# retried with backoff instead of immediately failing the whole job.
+# Sharing one RateLimiter instance across threads is the pattern geopy
+# itself documents for bulk/concurrent geocoding - it's thread-safe.
 #
 reverse_geocode_limited = RateLimiter(geolocator.reverse, min_delay_seconds=1)
 
@@ -439,9 +465,11 @@ def geocode_full(place):
 
     normalized_place = PLACE_IN_PATTERN.sub(", ", place)
 
+    geocode_throttle_gate()
     location = geocode_limited(normalized_place)
 
     if location is None and normalized_place != place:
+        geocode_throttle_gate()
         location = geocode_limited(place)
 
     if location is None:
@@ -866,6 +894,7 @@ def reverse_geocode(position):
     if cache_key in _reverse_geocode_cache:
         return _reverse_geocode_cache[cache_key]
 
+    geocode_throttle_gate()
     location = reverse_geocode_limited((position[0], position[1]), zoom=10, language="en")
 
     if location is None:
