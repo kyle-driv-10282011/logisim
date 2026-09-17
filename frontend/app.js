@@ -1292,8 +1292,28 @@ function renderVehicleList() {
 
         const item = document.createElement("div");
 
-        const driving = vehicle.status === "DRIVING" || vehicle.status === "STRANDED";
-        const ready = vehicle.status === "READY";
+        //
+        // Trip-scoped, not the vehicle's lifetime odometer - these badges
+        // mirror the In Route tab's own per-trip miles/gallons, so they
+        // only render at all while this vehicle actually has an active
+        // trip (activeTripsById), and show nothing otherwise.
+        //
+        const trip = activeTripsById.get(vehicle.id);
+        const gallonsUsed = trip ? tripGallonsUsed(trip, vehicle) : null;
+
+        //
+        // vehicle.status (GET /api/vehicles) only gets re-fetched when a
+        // vehicle enters or leaves the active-trips set (see
+        // pollActiveTrips()'s setsEqual() check) - going DRIVING -> STRANDED
+        // doesn't change set membership at all, so that fetch never fires
+        // and vehicle.status would otherwise stay stuck on "DRIVING"
+        // forever once a vehicle strands. trip.status (from the 1s poll)
+        // is always current, so prefer it for exactly that transition.
+        //
+        const displayStatus = trip && trip.status === "STRANDED" ? "STRANDED" : vehicle.status;
+
+        const driving = displayStatus === "DRIVING" || displayStatus === "STRANDED";
+        const ready = displayStatus === "READY";
 
         item.className = "vehicle-item vehicle-row vehicle-card" +
             (driving || ready ? " clickable" : "") +
@@ -1307,15 +1327,6 @@ function renderVehicleList() {
         }
 
         const imageUrl = vehicle.spec ? specImageUrl(vehicle.spec.image) : null;
-
-        //
-        // Trip-scoped, not the vehicle's lifetime odometer - these badges
-        // mirror the In Route tab's own per-trip miles/gallons, so they
-        // only render at all while this vehicle actually has an active
-        // trip (activeTripsById), and show nothing otherwise.
-        //
-        const trip = activeTripsById.get(vehicle.id);
-        const gallonsUsed = trip ? tripGallonsUsed(trip, vehicle) : null;
 
         //
         // A driving/stranded vehicle's fuel gauge comes from the live trip
@@ -1336,7 +1347,7 @@ function renderVehicleList() {
             `</div>` +
             `<div class="vehicle-card-location">${vehicle.current_location}</div>` +
             `</div>` +
-            `<span class="status-badge status-${vehicle.status}">${vehicle.status}</span>` +
+            `<span class="status-badge status-${displayStatus}">${displayStatus}</span>` +
             `</div>` +
             (trip || fuelGauge
                 ? `<div class="vehicle-card-meta">` +
@@ -1345,7 +1356,7 @@ function renderVehicleList() {
                   fuelGauge +
                   `</div>`
                 : "") +
-            (vehicle.status === "READY"
+            (displayStatus === "READY"
                 ? `<div class="vehicle-card-actions">` +
                   `<button class="refuel-button" data-id="${vehicle.id}">Refuel</button>` +
                   `<button class="sell-button" data-id="${vehicle.id}">Sell</button>` +
