@@ -25,7 +25,7 @@ CREATE TABLE settings (
 );
 
 
-CREATE TABLE vehicle_specs (
+CREATE TABLE vehicle_models (
 
     id SERIAL PRIMARY KEY,
 
@@ -44,12 +44,12 @@ CREATE TABLE vehicle_specs (
     mpg DOUBLE PRECISION NOT NULL,
 
     -- Capacity of this vehicle's fuel tank, in gallons. Every vehicle
-    -- created against this spec starts with a full tank (vehicles.fuel_gallons
+    -- created against this vehicle model starts with a full tank (vehicles.fuel_gallons
     -- below) and can hold at most this much at once.
     fuel_tank_gallons DOUBLE PRECISION NOT NULL DEFAULT 20,
 
     -- Filename under frontend/images/, e.g. "2026-Chevy-Express.png". Nullable
-    -- since a spec is still usable without a picture.
+    -- since a vehicle model is still usable without a picture.
     image TEXT,
 
     created TIMESTAMP DEFAULT NOW()
@@ -137,9 +137,9 @@ CREATE TABLE vehicles (
     -- list_vehicles() in app.py.
     starting_mileage DOUBLE PRECISION NOT NULL DEFAULT 0,
 
-    -- Gallons currently in the tank. Set to the spec's fuel_tank_gallons
+    -- Gallons currently in the tank. Set to the vehicle model's fuel_tank_gallons
     -- (a full tank) when the vehicle is created, drained as it drives
-    -- (distance / spec.mpg) and refilled to full by POST
+    -- (distance / vehicle_model.mpg) and refilled to full by POST
     -- /api/vehicles/{id}/refuel. Only ever updated once a trip actually
     -- settles (settle_arrived_vehicles() in app.py) - like place_id, this
     -- is the vehicle's last-known-good value, not a live-ticking one; the
@@ -147,10 +147,10 @@ CREATE TABLE vehicles (
     -- poll instead (see trips.starting_fuel_gallons below).
     fuel_gallons DOUBLE PRECISION NOT NULL DEFAULT 0,
 
-    -- Hauling specs (year/brand/model/capacity/cost/mpg/image) live on the
-    -- reusable spec, not duplicated per vehicle - same pattern as paths
+    -- Hauling vehicle models (year/brand/model/capacity/cost/mpg/image) live on the
+    -- reusable vehicle model, not duplicated per vehicle - same pattern as paths
     -- being reused across trips instead of storing route data per trip.
-    spec_id INTEGER NOT NULL REFERENCES vehicle_specs(id),
+    vehicle_model_id INTEGER NOT NULL REFERENCES vehicle_models(id),
 
     -- Selling a vehicle marks it sold rather than deleting the row, so
     -- "All Vehicles" can show full history while "My Vehicles" (the
@@ -272,7 +272,7 @@ CREATE TABLE trips (
 
     -- How many roadside refuels (see POST /api/vehicles/{id}/roadside-refuel)
     -- have topped this trip back up to a full tank after it ran dry
-    -- mid-route. Each one adds another spec.fuel_tank_gallons worth of range
+    -- mid-route. Each one adds another vehicle_model.fuel_tank_gallons worth of range
     -- from wherever it stranded, so the total fuel available for the whole
     -- trip is starting_fuel_gallons + roadside_refuel_count * fuel_tank_gallons.
     roadside_refuel_count INTEGER NOT NULL DEFAULT 0,

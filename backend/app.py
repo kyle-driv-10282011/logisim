@@ -104,7 +104,7 @@ JITTER_RANGE = 0.08
 #
 # Flat placeholder fee for a roadside refuel (see POST
 # /api/vehicles/{id}/roadside-refuel) - there's no money/budget system
-# anywhere else in the app yet (a vehicle spec's "cost" and a gas price's
+# anywhere else in the app yet (a vehicle model's "cost" and a gas price's
 # "price_per_gallon" are both purely informational, never actually
 # charged), so this isn't deducted from anything either. It's surfaced in
 # that endpoint's response so a future balance system has a real number to
@@ -217,7 +217,7 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
             )
         FROM trips t
         JOIN paths p ON p.id = t.path_id
-        JOIN vehicle_specs vs ON vs.id = (SELECT spec_id FROM vehicles WHERE id = t.vehicle_id)
+        JOIN vehicle_models vs ON vs.id = (SELECT vehicle_model_id FROM vehicles WHERE id = t.vehicle_id)
         WHERE t.id = (
             SELECT t2.id FROM trips t2
             WHERE t2.vehicle_id = v.id
@@ -1077,6 +1077,41 @@ def run_migrations():
     conn = db()
     cur = conn.cursor()
 
+    #
+    # Renamed from vehicle_specs/spec_id to vehicle_models/vehicle_model_id
+    # (the "Templates" tab became "Vehicle Models") - ALTER TABLE's own
+    # IF EXISTS only guards the table/column being altered, not "has this
+    # rename already happened", so each is wrapped in its own existence
+    # check instead. That keeps this idempotent forever: a DB that's
+    # already been renamed (or a fresh one, created directly with the new
+    # names via init.sql) just finds nothing to do here, rather than
+    # erroring on a table/column that no longer has the old name.
+    #
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'vehicle_specs') THEN
+                ALTER TABLE vehicle_specs RENAME TO vehicle_models;
+            END IF;
+        END $$;
+        """
+    )
+
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'vehicles' AND column_name = 'spec_id'
+            ) THEN
+                ALTER TABLE vehicles RENAME COLUMN spec_id TO vehicle_model_id;
+            END IF;
+        END $$;
+        """
+    )
+
     cur.execute("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS starting_mileage DOUBLE PRECISION NOT NULL DEFAULT 0")
 
     cur.execute(
@@ -1096,7 +1131,7 @@ def run_migrations():
     # trips get 0/0/0, which is exactly right for a trip that already
     # finished before this migration ever ran.
     #
-    cur.execute("ALTER TABLE vehicle_specs ADD COLUMN IF NOT EXISTS fuel_tank_gallons DOUBLE PRECISION NOT NULL DEFAULT 20")
+    cur.execute("ALTER TABLE vehicle_models ADD COLUMN IF NOT EXISTS fuel_tank_gallons DOUBLE PRECISION NOT NULL DEFAULT 20")
     cur.execute("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS fuel_gallons DOUBLE PRECISION NOT NULL DEFAULT 0")
     cur.execute("ALTER TABLE trips ADD COLUMN IF NOT EXISTS starting_fuel_gallons DOUBLE PRECISION NOT NULL DEFAULT 0")
     cur.execute("ALTER TABLE trips ADD COLUMN IF NOT EXISTS roadside_refuel_count INTEGER NOT NULL DEFAULT 0")
@@ -1106,8 +1141,8 @@ def run_migrations():
         """
         UPDATE vehicles v
         SET fuel_gallons = vs.fuel_tank_gallons
-        FROM vehicle_specs vs
-        WHERE vs.id = v.spec_id AND v.fuel_gallons = 0 AND v.sold = FALSE
+        FROM vehicle_models vs
+        WHERE vs.id = v.vehicle_model_id AND v.fuel_gallons = 0 AND v.sold = FALSE
         """
     )
 
@@ -1336,7 +1371,7 @@ def zone_dict(row):
     }
 
 
-def spec_dict(row):
+def vehicle_model_dict(row):
 
     return {
 
@@ -1362,24 +1397,24 @@ def spec_dict(row):
     }
 
 
-SPEC_COLUMNS = """
+VEHICLE_MODEL_COLUMNS = """
     id, year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, image, fuel_tank_gallons
 """
 
 
-def fetch_specs_by_id(cur, spec_ids):
+def fetch_vehicle_models_by_id(cur, vehicle_model_ids):
 
-    spec_ids = list(set(spec_ids))
+    vehicle_model_ids = list(set(vehicle_model_ids))
 
-    if not spec_ids:
+    if not vehicle_model_ids:
         return {}
 
     cur.execute(
-        f"SELECT {SPEC_COLUMNS} FROM vehicle_specs WHERE id = ANY(%s)",
-        (spec_ids,)
+        f"SELECT {VEHICLE_MODEL_COLUMNS} FROM vehicle_models WHERE id = ANY(%s)",
+        (vehicle_model_ids,)
     )
 
-    return {row[0]: spec_dict(row) for row in cur.fetchall()}
+    return {row[0]: vehicle_model_dict(row) for row in cur.fetchall()}
 
 
 def fetch_zones_for_paths(cur, path_ids):
@@ -1501,11 +1536,11 @@ class CreateVehicleRequest(BaseModel):
 
     #
     # No user-supplied name - create_vehicle() derives "<year> <brand>
-    # <model> <n>" from the spec plus how many vehicles already exist on
+    # <model> <n>" from the vehicle model plus how many vehicles already exist on
     # it, so fleet vehicles are named consistently instead of whatever a
     # user happens to type (e.g. "2026 Chevy Express 1").
     #
-    spec_id: int
+    vehicle_model_id: int
 
     #
     # Free-text address or place description, resolved to a place row on
@@ -1531,7 +1566,7 @@ class UpdateSettingsRequest(BaseModel):
 
 
 
-class CreateVehicleSpecRequest(BaseModel):
+class CreateVehicleModelRequest(BaseModel):
 
     year: int
     brand: str
@@ -1542,7 +1577,7 @@ class CreateVehicleSpecRequest(BaseModel):
     mpg: float
 
     #
-    # Capacity of every vehicle created against this spec, in gallons - a
+    # Capacity of every vehicle created against this vehicle model, in gallons - a
     # new vehicle starts with a full tank (see create_vehicle()), and this
     # is also how far a roadside refuel extends a stranded trip's range
     # (see resolve_trip_progress()).
@@ -1733,13 +1768,13 @@ def create_vehicle(req: CreateVehicleRequest):
     conn = db()
     cur = conn.cursor()
 
-    specs_by_id = fetch_specs_by_id(cur, [req.spec_id])
-    spec = specs_by_id.get(req.spec_id)
+    vehicle_models_by_id = fetch_vehicle_models_by_id(cur, [req.vehicle_model_id])
+    vehicle_model = vehicle_models_by_id.get(req.vehicle_model_id)
 
-    if spec is None:
+    if vehicle_model is None:
         cur.close()
         conn.close()
-        raise HTTPException(status_code=404, detail="Vehicle spec not found")
+        raise HTTPException(status_code=404, detail="Vehicle model not found")
 
     #
     # Geocoded/resolved up front (same as create_path()'s origin/
@@ -1751,31 +1786,31 @@ def create_vehicle(req: CreateVehicleRequest):
     #
     # "<year> <brand> <model> <n>" instead of a user-typed name, e.g.
     # "2026 Chevy Express 1" then "... 2" for the next one on that same
-    # spec. Counts every vehicle ever created on this spec (sold ones
+    # vehicle model. Counts every vehicle ever created on this vehicle model (sold ones
     # included) so numbers stay unique across "My Vehicles" and "All
     # Vehicles" rather than getting reused after a sale.
     #
-    cur.execute("SELECT COUNT(*) FROM vehicles WHERE spec_id=%s", (req.spec_id,))
+    cur.execute("SELECT COUNT(*) FROM vehicles WHERE vehicle_model_id=%s", (req.vehicle_model_id,))
 
     vehicle_number = cur.fetchone()[0] + 1
 
-    name = f"{spec['year']} {spec['brand']} {spec['model']} {vehicle_number}"
+    name = f"{vehicle_model['year']} {vehicle_model['brand']} {vehicle_model['model']} {vehicle_number}"
 
     #
-    # A brand-new vehicle always starts with a full tank of its spec's
+    # A brand-new vehicle always starts with a full tank of its vehicle model's
     # capacity - there's no "starting fuel level" input the way
     # starting_mileage has one, since a fresh vehicle joining the fleet is
     # assumed fueled up and ready to go.
     #
-    fuel_gallons = spec["fuel_tank_gallons"]
+    fuel_gallons = vehicle_model["fuel_tank_gallons"]
 
     cur.execute(
         """
-        INSERT INTO vehicles (name, spec_id, place_id, starting_mileage, fuel_gallons)
+        INSERT INTO vehicles (name, vehicle_model_id, place_id, starting_mileage, fuel_gallons)
         VALUES (%s, %s, %s, %s, %s)
         RETURNING id
         """,
-        (name, req.spec_id, place_id, req.starting_mileage, fuel_gallons)
+        (name, req.vehicle_model_id, place_id, req.starting_mileage, fuel_gallons)
     )
 
     vehicle_id = cur.fetchone()[0]
@@ -1791,7 +1826,7 @@ def create_vehicle(req: CreateVehicleRequest):
 
         "name": name,
 
-        "spec": spec,
+        "vehicle_model": vehicle_model,
 
         "current_location": req.current_location,
 
@@ -1814,8 +1849,8 @@ def create_vehicle(req: CreateVehicleRequest):
 
 
 
-@app.post("/api/vehicle-specs")
-def create_vehicle_spec(req: CreateVehicleSpecRequest):
+@app.post("/api/vehicle-models")
+def create_vehicle_model(req: CreateVehicleModelRequest):
 
     if req.mpg <= 0:
         raise HTTPException(status_code=400, detail="mpg must be positive")
@@ -1828,7 +1863,7 @@ def create_vehicle_spec(req: CreateVehicleSpecRequest):
 
     cur.execute(
         """
-        INSERT INTO vehicle_specs
+        INSERT INTO vehicle_models
         (year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, image, fuel_tank_gallons)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
@@ -1846,36 +1881,36 @@ def create_vehicle_spec(req: CreateVehicleSpecRequest):
         )
     )
 
-    spec_id = cur.fetchone()[0]
+    vehicle_model_id = cur.fetchone()[0]
 
     conn.commit()
 
     cur.close()
     conn.close()
 
-    return {**req.model_dump(), "id": spec_id}
+    return {**req.model_dump(), "id": vehicle_model_id}
 
 
 
-@app.get("/api/vehicle-specs")
-def list_vehicle_specs():
+@app.get("/api/vehicle-models")
+def list_vehicle_models():
 
     conn = db()
     cur = conn.cursor()
 
-    cur.execute(f"SELECT {SPEC_COLUMNS} FROM vehicle_specs ORDER BY id")
+    cur.execute(f"SELECT {VEHICLE_MODEL_COLUMNS} FROM vehicle_models ORDER BY id")
 
-    specs = [spec_dict(row) for row in cur.fetchall()]
+    vehicle_models = [vehicle_model_dict(row) for row in cur.fetchall()]
 
     cur.close()
     conn.close()
 
-    return specs
+    return vehicle_models
 
 
 
-@app.delete("/api/vehicle-specs/{id}")
-def delete_vehicle_spec(id: int):
+@app.delete("/api/vehicle-models/{id}")
+def delete_vehicle_model(id: int):
 
     conn = db()
     cur = conn.cursor()
@@ -1883,7 +1918,7 @@ def delete_vehicle_spec(id: int):
     try:
 
         cur.execute(
-            "DELETE FROM vehicle_specs WHERE id=%s RETURNING id",
+            "DELETE FROM vehicle_models WHERE id=%s RETURNING id",
             (id,)
         )
 
@@ -1899,14 +1934,14 @@ def delete_vehicle_spec(id: int):
 
         raise HTTPException(
             status_code=409,
-            detail="Vehicle spec is still in use by one or more vehicles"
+            detail="Vehicle model is still in use by one or more vehicles"
         )
 
     cur.close()
     conn.close()
 
     if deleted is None:
-        raise HTTPException(status_code=404, detail="Vehicle spec not found")
+        raise HTTPException(status_code=404, detail="Vehicle model not found")
 
     return {"deleted": id}
 
@@ -1915,10 +1950,10 @@ def delete_vehicle_spec(id: int):
 #
 # For every vehicle_id whose fleet-wide status query (below) says 'DRIVING'
 # (i.e. its latest trip's realized_duration_seconds hasn't been reached
-# yet), get the trip/path/spec data resolve_trip_progress() needs to tell a
+# yet), get the trip/path/vehicle-model data resolve_trip_progress() needs to tell a
 # genuinely-driving vehicle apart from one that's actually STRANDED (out of
 # fuel) - and its live fuel_gallons_remaining either way. Batched into one
-# query rather than one per vehicle, same pattern as fetch_specs_by_id().
+# query rather than one per vehicle, same pattern as fetch_vehicle_models_by_id().
 #
 def fetch_live_trip_progress(cur, vehicle_ids, time_multiplier):
 
@@ -1936,7 +1971,7 @@ def fetch_live_trip_progress(cur, vehicle_ids, time_multiplier):
         FROM trips t
         JOIN paths p ON p.id = t.path_id
         JOIN vehicles v ON v.id = t.vehicle_id
-        JOIN vehicle_specs vs ON vs.id = v.spec_id
+        JOIN vehicle_models vs ON vs.id = v.vehicle_model_id
         WHERE t.vehicle_id = ANY(%s)
         ORDER BY t.vehicle_id, t.started_at DESC
         """,
@@ -1993,7 +2028,7 @@ def list_vehicles(include_sold: bool = False):
         SELECT
             v.id,
             v.name,
-            v.spec_id,
+            v.vehicle_model_id,
             v.place_id,
             v.starting_mileage,
             v.sold,
@@ -2026,7 +2061,7 @@ def list_vehicles(include_sold: bool = False):
 
     rows = cur.fetchall()
 
-    specs_by_id = fetch_specs_by_id(cur, [row[2] for row in rows])
+    vehicle_models_by_id = fetch_vehicle_models_by_id(cur, [row[2] for row in rows])
     places_by_id = fetch_places_by_id(cur, [row[3] for row in rows])
 
     progress_by_vehicle = fetch_live_trip_progress(
@@ -2048,7 +2083,7 @@ def list_vehicles(include_sold: bool = False):
 
             "name": row[1],
 
-            "spec": specs_by_id.get(row[2]),
+            "vehicle_model": vehicle_models_by_id.get(row[2]),
 
             #
             # A single source of truth for a vehicle's location text/
@@ -2138,7 +2173,7 @@ def sell_vehicle(id: int):
 
 
 #
-# Refuels a READY vehicle to its spec's full tank capacity, but only while
+# Refuels a READY vehicle to its vehicle model's full tank capacity, but only while
 # it's sitting at a place that's actually a gas station - i.e. one with an
 # entry in gas_prices (the Gas Prices tab/map). A vehicle currently
 # DRIVING or STRANDED has to use POST /api/vehicles/{id}/roadside-refuel
@@ -2154,7 +2189,7 @@ def refuel_vehicle(id: int):
 
     settle_arrived_vehicles(conn, cur, time_multiplier)
 
-    cur.execute("SELECT sold, place_id, spec_id FROM vehicles WHERE id=%s", (id,))
+    cur.execute("SELECT sold, place_id, vehicle_model_id FROM vehicles WHERE id=%s", (id,))
 
     row = cur.fetchone()
 
@@ -2163,7 +2198,7 @@ def refuel_vehicle(id: int):
         conn.close()
         raise HTTPException(status_code=404, detail="Vehicle not found")
 
-    sold, place_id, spec_id = row
+    sold, place_id, vehicle_model_id = row
 
     if sold:
         cur.close()
@@ -2195,7 +2230,7 @@ def refuel_vehicle(id: int):
             detail="Vehicle isn't at a priced gas station - add a gas price for this location on the Gas Prices tab first"
         )
 
-    fuel_tank_gallons = fetch_specs_by_id(cur, [spec_id])[spec_id]["fuel_tank_gallons"]
+    fuel_tank_gallons = fetch_vehicle_models_by_id(cur, [vehicle_model_id])[vehicle_model_id]["fuel_tank_gallons"]
 
     cur.execute("UPDATE vehicles SET fuel_gallons = %s WHERE id = %s", (fuel_tank_gallons, id))
 
@@ -2249,7 +2284,7 @@ def roadside_refuel_vehicle(id: int):
         FROM trips t
         JOIN paths p ON p.id = t.path_id
         JOIN vehicles v ON v.id = t.vehicle_id
-        JOIN vehicle_specs vs ON vs.id = v.spec_id
+        JOIN vehicle_models vs ON vs.id = v.vehicle_model_id
         WHERE t.vehicle_id = %s
         ORDER BY t.started_at DESC
         LIMIT 1
@@ -2377,7 +2412,7 @@ def vehicle_city(id: int):
         FROM trips t
         JOIN paths p ON p.id = t.path_id
         JOIN vehicles v ON v.id = t.vehicle_id
-        JOIN vehicle_specs vs ON vs.id = v.spec_id
+        JOIN vehicle_models vs ON vs.id = v.vehicle_model_id
         WHERE t.vehicle_id = %s
         AND (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) < t.realized_duration_seconds + %s * %s
         ORDER BY t.started_at DESC
@@ -3443,7 +3478,7 @@ def active_trips():
         FROM trips t
         JOIN vehicles v ON v.id = t.vehicle_id
         JOIN paths p ON p.id = t.path_id
-        JOIN vehicle_specs vs ON vs.id = v.spec_id
+        JOIN vehicle_models vs ON vs.id = v.vehicle_model_id
         WHERE (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) < t.realized_duration_seconds + %s * %s
         """,
         (time_multiplier, ARRIVAL_GRACE_SECONDS, time_multiplier)

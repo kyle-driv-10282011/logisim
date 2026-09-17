@@ -392,7 +392,7 @@
         }
 
         #zone-editor label,
-        #tab-templates label {
+        #tab-vehiclemodels label {
             display: block;
             font-size: 11px;
             color: #555;
@@ -462,7 +462,7 @@
             <span class="tab-menu-arrow">&#9662;</span>
         </button>
         <div class="tab-menu-list" id="tab-menu-list">
-            <button class="tab-button" id="tab-button-templates" onclick="withSpinner(this, () => showTab('templates'))">Templates</button>
+            <button class="tab-button" id="tab-button-vehiclemodels" onclick="withSpinner(this, () => showTab('vehiclemodels'))">Vehicle Models</button>
             <button class="tab-button" id="tab-button-places" onclick="withSpinner(this, () => showTab('places'))">Places</button>
             <button class="tab-button active" id="tab-button-myvehicles" onclick="withSpinner(this, () => showTab('myvehicles'))">My Vehicles</button>
             <button class="tab-button" id="tab-button-paths" onclick="withSpinner(this, () => showTab('paths'))">Paths</button>
@@ -479,41 +479,41 @@
     -->
     <datalist id="places-list"></datalist>
 
-    <div class="tab-content" id="tab-templates">
+    <div class="tab-content" id="tab-vehiclemodels">
 
-        <b>Vehicle Templates</b>
+        <b>Vehicle Models</b>
 
-        <div id="spec-list"></div>
+        <div id="vehicle-model-list"></div>
 
         <div class="panel-form">
-            <label for="spec-year">Year</label>
-            <input id="spec-year" type="number" placeholder="Year" value="2026">
+            <label for="vehicle-model-year">Year</label>
+            <input id="vehicle-model-year" type="number" placeholder="Year" value="2026">
 
-            <label for="spec-brand">Brand</label>
-            <input id="spec-brand" placeholder="Brand" value="Chevy">
+            <label for="vehicle-model-brand">Brand</label>
+            <input id="vehicle-model-brand" placeholder="Brand" value="Chevy">
 
-            <label for="spec-model">Model</label>
-            <input id="spec-model" placeholder="Model" value="Express">
+            <label for="vehicle-model-model">Model</label>
+            <input id="vehicle-model-model" placeholder="Model" value="Express">
 
-            <label for="spec-person-capacity">Person capacity</label>
-            <input id="spec-person-capacity" type="number" min="1" placeholder="Person capacity" value="2">
+            <label for="vehicle-model-person-capacity">Person capacity</label>
+            <input id="vehicle-model-person-capacity" type="number" min="1" placeholder="Person capacity" value="2">
 
-            <label for="spec-cargo-capacity">Cargo capacity (cu ft)</label>
-            <input id="spec-cargo-capacity" type="number" min="0" step="0.1" placeholder="Cargo capacity (cu ft)" value="240">
+            <label for="vehicle-model-cargo-capacity">Cargo capacity (cu ft)</label>
+            <input id="vehicle-model-cargo-capacity" type="number" min="0" step="0.1" placeholder="Cargo capacity (cu ft)" value="240">
 
-            <label for="spec-cost">Cost ($)</label>
-            <input id="spec-cost" type="number" min="0" step="0.01" placeholder="Cost ($)" value="45000">
+            <label for="vehicle-model-cost">Cost ($)</label>
+            <input id="vehicle-model-cost" type="number" min="0" step="0.01" placeholder="Cost ($)" value="45000">
 
-            <label for="spec-mpg">MPG</label>
-            <input id="spec-mpg" type="number" min="0" step="0.1" placeholder="MPG" value="18">
+            <label for="vehicle-model-mpg">MPG</label>
+            <input id="vehicle-model-mpg" type="number" min="0" step="0.1" placeholder="MPG" value="18">
 
-            <label for="spec-fuel-tank">Fuel tank (gallons)</label>
-            <input id="spec-fuel-tank" type="number" min="0" step="0.1" placeholder="Fuel tank (gallons)" value="20">
+            <label for="vehicle-model-fuel-tank">Fuel tank (gallons)</label>
+            <input id="vehicle-model-fuel-tank" type="number" min="0" step="0.1" placeholder="Fuel tank (gallons)" value="20">
 
-            <label for="spec-image">Image filename (frontend/images/...)</label>
-            <input id="spec-image" placeholder="Image filename (frontend/images/...)" value="2026-Chevy-Express.png">
+            <label for="vehicle-model-image">Image filename (frontend/images/...)</label>
+            <input id="vehicle-model-image" placeholder="Image filename (frontend/images/...)" value="2026-Chevy-Express.png">
 
-            <button onclick="withSpinner(this, addSpec)">Add Template</button>
+            <button onclick="withSpinner(this, addVehicleModel)">Add Vehicle Model</button>
         </div>
 
     </div>
@@ -534,7 +534,7 @@
     <div class="tab-content active" id="tab-myvehicles">
 
         <div class="panel-form">
-            <select id="vehicle-spec-select"></select>
+            <select id="vehicle-model-select"></select>
             <input id="vehicle-location" list="places-list" placeholder="A description (Target near Minneapolis) or an address" value="Minneapolis">
             <input id="vehicle-starting-mileage" type="number" min="0" step="1" placeholder="Starting mileage" value="0">
             <button onclick="withSpinner(this, addVehicle)">Add Vehicle</button>

@@ -134,7 +134,7 @@ async function setTimeMultiplier() {
 }
 
 const tripLayers = new Map();      // vehicle_id -> { marker, routeLine }
-let specsById = new Map();         // spec_id -> vehicle spec (from GET /api/vehicle-specs)
+let vehicleModelsById = new Map();         // vehicle_model_id -> vehicle model (from GET /api/vehicle-models)
 let pathsById = new Map();         // path_id -> path (from GET /api/paths)
 let vehiclesById = new Map();      // vehicle_id -> vehicle - current fleet, not sold (from GET /api/vehicles)
 let placesById = new Map();        // place_id -> place (from GET /api/places)
@@ -142,7 +142,7 @@ let activeTripsById = new Map();   // vehicle_id -> trip (from the last poll)
 let activeVehicleIds = new Set();  // vehicle ids seen on the last poll
 let selectedVehicleId = null;      // vehicle id followed in the In Route tab
 let selectedTripVehicleId = null;  // vehicle id chosen (in the Vehicles tab) to start a trip
-let selectedSpecId = null;         // spec id highlighted in the Templates tab (purely visual, no map focus)
+let selectedVehicleModelId = null;         // vehicle model id highlighted in the Vehicle Models tab (purely visual, no map focus)
 let selectedPlaceId = null;        // place id focused in the Places tab
 let selectedPathId = null;         // path id currently previewed in the Paths tab
 
@@ -393,12 +393,12 @@ function renderJobsList(jobs) {
         const updated = new Date(job.updated).toLocaleString(undefined, { timeZoneName: "short" });
 
         const errorLine = job.error
-            ? `<div class="spec-item-details" style="color:#e03131;">${job.error}</div>`
+            ? `<div class="list-item-details" style="color:#e03131;">${job.error}</div>`
             : "";
 
         item.innerHTML =
-            `<span class="spec-item-label"><span>#${job.id} ${prettyJobType(job.job_type)}` +
-            `<div class="spec-item-details">${progress}started ${started} - updated ${updated}</div>` +
+            `<span class="list-item-label"><span>#${job.id} ${prettyJobType(job.job_type)}` +
+            `<div class="list-item-details">${progress}started ${started} - updated ${updated}</div>` +
             errorLine +
             `</span></span>` +
             `<span style="color:${JOB_STATUS_COLORS[job.status] || "#333"};font-weight:bold;">${job.status}</span>`;
@@ -429,7 +429,7 @@ function formatHMS(totalSeconds) {
 // tab/tab-button element ids showTab() below already toggles "active" on.
 //
 const TAB_LABELS = {
-    templates: "Templates",
+    vehiclemodels: "Vehicle Models",
     places: "Places",
     myvehicles: "My Vehicles",
     paths: "Paths",
@@ -469,7 +469,7 @@ document.addEventListener("click", (event) => {
 
 function showTab(tab) {
 
-    for (const name of ["templates", "places", "myvehicles", "paths", "inroute", "gasprices", "jobs"]) {
+    for (const name of ["vehiclemodels", "places", "myvehicles", "paths", "inroute", "gasprices", "jobs"]) {
 
         document.getElementById(`tab-${name}`).classList.toggle("active", name === tab);
         document.getElementById(`tab-button-${name}`).classList.toggle("active", name === tab);
@@ -530,112 +530,112 @@ async function fillOriginWithFullAddress(vehicleId) {
 
 
 //
-// Specs are served by the backend as a filename (e.g. "2026-Chevy-Express.png"),
+// Vehicle models are served by the backend as a filename (e.g. "2026-Chevy-Express.png"),
 // not a URL - the frontend is what knows it's serving frontend/images/ at its
 // own origin (same host/port index.html was loaded from), so this is a plain
 // relative path rather than going through the API host/port.
 //
-function specImageUrl(filename) {
+function vehicleModelImageUrl(filename) {
 
     return filename ? `images/${encodeURIComponent(filename)}` : null;
 }
 
 
-function specLabel(spec) {
+function vehicleModelLabel(vehicleModel) {
 
-    return `${spec.year} ${spec.brand} ${spec.model}`;
+    return `${vehicleModel.year} ${vehicleModel.brand} ${vehicleModel.model}`;
 }
 
 
-async function loadSpecs() {
+async function loadVehicleModels() {
 
-    const response = await fetch(API + "/api/vehicle-specs");
-    const specs = await response.json();
+    const response = await fetch(API + "/api/vehicle-models");
+    const vehicleModels = await response.json();
 
-    specsById = new Map(specs.map((spec) => [spec.id, spec]));
+    vehicleModelsById = new Map(vehicleModels.map((vehicleModel) => [vehicleModel.id, vehicleModel]));
 
-    const select = document.getElementById("vehicle-spec-select");
+    const select = document.getElementById("vehicle-model-select");
     const previousValue = select.value;
 
-    select.innerHTML = specs.length
+    select.innerHTML = vehicleModels.length
         ? ""
-        : '<option value="">No specs yet - add one below</option>';
+        : '<option value="">No vehicle models yet - add one below</option>';
 
-    for (const spec of specs) {
+    for (const vehicleModel of vehicleModels) {
 
         const option = document.createElement("option");
 
-        option.value = spec.id;
-        option.textContent = specLabel(spec);
+        option.value = vehicleModel.id;
+        option.textContent = vehicleModelLabel(vehicleModel);
 
         select.appendChild(option);
     }
 
-    if (specs.some((spec) => String(spec.id) === previousValue)) {
+    if (vehicleModels.some((vehicleModel) => String(vehicleModel.id) === previousValue)) {
         select.value = previousValue;
     }
 
     renderVehicleList();
     renderInRouteList();
-    renderSpecList();
+    renderVehicleModelList();
 }
 
 
-function renderSpecList() {
+function renderVehicleModelList() {
 
-    const list = document.getElementById("spec-list");
+    const list = document.getElementById("vehicle-model-list");
 
     list.innerHTML = "";
 
-    for (const spec of specsById.values()) {
+    for (const vehicleModel of vehicleModelsById.values()) {
 
         const item = document.createElement("div");
 
-        item.className = "vehicle-item list-row" + (spec.id === selectedSpecId ? " selected" : "");
-        item.onclick = () => selectSpec(spec.id);
+        item.className = "vehicle-item list-row" + (vehicleModel.id === selectedVehicleModelId ? " selected" : "");
+        item.onclick = () => selectVehicleModel(vehicleModel.id);
 
-        const imageUrl = specImageUrl(spec.image);
+        const imageUrl = vehicleModelImageUrl(vehicleModel.image);
 
         item.innerHTML =
-            `<span class="spec-item-label">` +
-            (imageUrl ? `<img class="spec-thumb" src="${imageUrl}">` : "") +
-            `<span>${specLabel(spec)}` +
-            `<div class="spec-item-details">` +
-            `${spec.person_capacity} people &middot; ${spec.cargo_capacity_cuft} cu ft &middot; ` +
-            `$${Math.round(spec.cost).toLocaleString()} &middot; ${spec.mpg} mpg &middot; ` +
-            `${spec.fuel_tank_gallons} gal tank` +
+            `<span class="list-item-label">` +
+            (imageUrl ? `<img class="list-item-thumb" src="${imageUrl}">` : "") +
+            `<span>${vehicleModelLabel(vehicleModel)}` +
+            `<div class="list-item-details">` +
+            `${vehicleModel.person_capacity} people &middot; ${vehicleModel.cargo_capacity_cuft} cu ft &middot; ` +
+            `$${Math.round(vehicleModel.cost).toLocaleString()} &middot; ${vehicleModel.mpg} mpg &middot; ` +
+            `${vehicleModel.fuel_tank_gallons} gal tank` +
             `</div></span></span>` +
-            `<button class="remove-spec-button" data-id="${spec.id}">Delete</button>`;
+            `<button class="remove-vehicle-model-button" data-id="${vehicleModel.id}">Delete</button>`;
 
         list.appendChild(item);
     }
 
-    for (const button of list.querySelectorAll(".remove-spec-button")) {
+    for (const button of list.querySelectorAll(".remove-vehicle-model-button")) {
 
         button.onclick = (event) => {
             event.stopPropagation();
-            withSpinner(button, () => removeSpec(Number(button.dataset.id)));
+            withSpinner(button, () => removeVehicleModel(Number(button.dataset.id)));
         };
     }
 }
 
 
 //
-// Clicking a spec just highlights it (click again to clear) - purely a
-// visual focus like the Places tab's own selection, not tied to the map
-// (a template has no location).
+// Clicking a vehicle model just highlights it (click again to clear) - purely
+// a visual focus like the Places tab's own selection, not tied to the map
+// (a vehicle model has no location).
 //
-function selectSpec(specId) {
+function selectVehicleModel(vehicleModelId) {
 
-    selectedSpecId = selectedSpecId === specId ? null : specId;
+    selectedVehicleModelId = selectedVehicleModelId === vehicleModelId ? null : vehicleModelId;
 
-    renderSpecList();
+    renderVehicleModelList();
 }
 
 
-async function addSpec() {
+async function addVehicleModel() {
 
-    const response = await fetch(API + "/api/vehicle-specs", {
+    const response = await fetch(API + "/api/vehicle-models", {
 
         method: "POST",
 
@@ -645,23 +645,23 @@ async function addSpec() {
 
         body: JSON.stringify({
 
-            year: Number(document.getElementById("spec-year").value),
+            year: Number(document.getElementById("vehicle-model-year").value),
 
-            brand: document.getElementById("spec-brand").value,
+            brand: document.getElementById("vehicle-model-brand").value,
 
-            model: document.getElementById("spec-model").value,
+            model: document.getElementById("vehicle-model-model").value,
 
-            person_capacity: Number(document.getElementById("spec-person-capacity").value),
+            person_capacity: Number(document.getElementById("vehicle-model-person-capacity").value),
 
-            cargo_capacity_cuft: Number(document.getElementById("spec-cargo-capacity").value),
+            cargo_capacity_cuft: Number(document.getElementById("vehicle-model-cargo-capacity").value),
 
-            cost: Number(document.getElementById("spec-cost").value),
+            cost: Number(document.getElementById("vehicle-model-cost").value),
 
-            mpg: Number(document.getElementById("spec-mpg").value),
+            mpg: Number(document.getElementById("vehicle-model-mpg").value),
 
-            fuel_tank_gallons: Number(document.getElementById("spec-fuel-tank").value),
+            fuel_tank_gallons: Number(document.getElementById("vehicle-model-fuel-tank").value),
 
-            image: document.getElementById("spec-image").value || null
+            image: document.getElementById("vehicle-model-image").value || null
 
         })
 
@@ -670,36 +670,36 @@ async function addSpec() {
     const data = await response.json();
 
     if (!response.ok) {
-        alert(data.detail || "Could not add spec");
+        alert(data.detail || "Could not add vehicle model");
         return;
     }
 
-    loadSpecs();
+    loadVehicleModels();
 }
 
 
-async function removeSpec(specId) {
+async function removeVehicleModel(vehicleModelId) {
 
-    const spec = specsById.get(specId);
+    const vehicleModel = vehicleModelsById.get(vehicleModelId);
 
-    if (!confirm(`Delete spec "${spec ? specLabel(spec) : specId}"?`)) {
+    if (!confirm(`Delete vehicle model "${vehicleModel ? vehicleModelLabel(vehicleModel) : vehicleModelId}"?`)) {
         return;
     }
 
-    const response = await fetch(API + "/api/vehicle-specs/" + specId, { method: "DELETE" });
+    const response = await fetch(API + "/api/vehicle-models/" + vehicleModelId, { method: "DELETE" });
 
     if (!response.ok) {
 
         const data = await response.json();
-        alert(data.detail || "Could not delete spec");
+        alert(data.detail || "Could not delete vehicle model");
         return;
     }
 
-    if (selectedSpecId === specId) {
-        selectedSpecId = null;
+    if (selectedVehicleModelId === vehicleModelId) {
+        selectedVehicleModelId = null;
     }
 
-    loadSpecs();
+    loadVehicleModels();
 }
 
 
@@ -872,8 +872,8 @@ function renderPlaceList() {
         item.onclick = () => selectPlace(place.id);
 
         item.innerHTML =
-            `<span class="spec-item-label"><span>${place.description}` +
-            `<div class="spec-item-details">${place.address}</div></span></span>` +
+            `<span class="list-item-label"><span>${place.description}` +
+            `<div class="list-item-details">${place.address}</div></span></span>` +
             `<button class="remove-place-button" data-id="${place.id}">Delete</button>`;
 
         list.appendChild(item);
@@ -1129,8 +1129,8 @@ function renderGasPriceList() {
         };
 
         item.innerHTML =
-            `<span class="spec-item-label"><span>${gasPrice.description}` +
-            `<div class="spec-item-details">$${gasPrice.price_per_gallon.toFixed(2)}/gal</div></span></span>` +
+            `<span class="list-item-label"><span>${gasPrice.description}` +
+            `<div class="list-item-details">$${gasPrice.price_per_gallon.toFixed(2)}/gal</div></span></span>` +
             `<button class="remove-gasprice-button" data-id="${gasPrice.place_id}">Delete</button>`;
 
         list.appendChild(item);
@@ -1326,24 +1326,24 @@ function renderVehicleList() {
             item.onclick = () => selectTripVehicle(vehicle.id);
         }
 
-        const imageUrl = vehicle.spec ? specImageUrl(vehicle.spec.image) : null;
+        const imageUrl = vehicle.vehicle_model ? vehicleModelImageUrl(vehicle.vehicle_model.image) : null;
 
         //
         // A driving/stranded vehicle's fuel gauge comes from the live trip
         // (tripFuelRemaining()); a READY one shows its persisted tank level
-        // instead - both against the same spec.fuel_tank_gallons capacity.
+        // instead - both against the same vehicle_model.fuel_tank_gallons capacity.
         //
         const fuelRemaining = trip ? tripFuelRemaining(trip) : vehicle.fuel_gallons;
-        const fuelGauge = fuelRemaining !== null && vehicle.spec
-            ? fuelGaugeHtml(fuelRemaining, vehicle.spec.fuel_tank_gallons)
+        const fuelGauge = fuelRemaining !== null && vehicle.vehicle_model
+            ? fuelGaugeHtml(fuelRemaining, vehicle.vehicle_model.fuel_tank_gallons)
             : "";
 
         item.innerHTML =
             `<div class="vehicle-card-top">` +
-            (imageUrl ? `<img class="spec-thumb" src="${imageUrl}">` : "") +
+            (imageUrl ? `<img class="list-item-thumb" src="${imageUrl}">` : "") +
             `<div class="vehicle-card-title">` +
             `<div class="vehicle-card-name">${vehicle.name}` +
-            (vehicle.spec ? ` (${specLabel(vehicle.spec)})` : "") +
+            (vehicle.vehicle_model ? ` (${vehicleModelLabel(vehicle.vehicle_model)})` : "") +
             `</div>` +
             `<div class="vehicle-card-location">${vehicle.current_location}</div>` +
             `</div>` +
@@ -1592,13 +1592,13 @@ async function fetchCurrentCity() {
 //
 // Gas used so far on the current trip is derived client-side -
 // trip.distance_miles (from GET /api/trips/active's derive_position())
-// divided by the vehicle's own spec.mpg, rather than a value stored/
-// computed on the backend. Returns null when the vehicle or its spec (and
-// so its mpg) isn't known yet.
+// divided by the vehicle's own vehicle_model.mpg, rather than a value stored/
+// computed on the backend. Returns null when the vehicle or its vehicle model
+// (and so its mpg) isn't known yet.
 //
 function tripGallonsUsed(trip, vehicle) {
 
-    const mpg = vehicle && vehicle.spec ? vehicle.spec.mpg : null;
+    const mpg = vehicle && vehicle.vehicle_model ? vehicle.vehicle_model.mpg : null;
 
     return mpg ? trip.distance_miles / mpg : null;
 }
@@ -1616,7 +1616,7 @@ function formatGallons(gallons) {
 // resolve_trip_progress() - it reflects the vehicle's real starting fuel,
 // any roadside refuels used so far, and clamps to 0 once truly dry, so it's
 // what should drive the fuel gauge and the STRANDED/roadside-refuel UI.
-// null when the vehicle/spec's mpg isn't trackable (see resolve_trip_progress()).
+// null when the vehicle/vehicle model's mpg isn't trackable (see resolve_trip_progress()).
 //
 function tripFuelRemaining(trip) {
 
@@ -1699,13 +1699,13 @@ function renderInRouteList() {
         ? `Near: ${currentCity.city || "unknown"}<br>`
         : "Near: (looking up...)<br>";
 
-    const spec = vehicle ? vehicle.spec : null;
+    const vehicleModel = vehicle ? vehicle.vehicle_model : null;
 
     const gallonsUsed = tripGallonsUsed(trip, vehicle);
     const fuelRemaining = tripFuelRemaining(trip);
 
-    const fuelLine = fuelRemaining !== null && spec
-        ? `Fuel: ${formatGallons(fuelRemaining)} / ${spec.fuel_tank_gallons} gal<br>`
+    const fuelLine = fuelRemaining !== null && vehicleModel
+        ? `Fuel: ${formatGallons(fuelRemaining)} / ${vehicleModel.fuel_tank_gallons} gal<br>`
         : "";
 
     let statusLine;
@@ -1725,10 +1725,10 @@ function renderInRouteList() {
 
     details.innerHTML =
         `<b>${vehicle ? vehicle.name : trip.vehicle_name}</b><br>` +
-        (spec
-            ? `Spec: ${specLabel(spec)}<br>` +
-              `Capacity: ${spec.person_capacity} people, ${spec.cargo_capacity_cuft} cu ft cargo<br>` +
-              `Cost: $${Math.round(spec.cost).toLocaleString()} &middot; ${spec.mpg} mpg<br>`
+        (vehicleModel
+            ? `Model: ${vehicleModelLabel(vehicleModel)}<br>` +
+              `Capacity: ${vehicleModel.person_capacity} people, ${vehicleModel.cargo_capacity_cuft} cu ft cargo<br>` +
+              `Cost: $${Math.round(vehicleModel.cost).toLocaleString()} &middot; ${vehicleModel.mpg} mpg<br>`
             : "") +
         `Status: ${trip.status}<br>` +
         cityLine +
@@ -1776,10 +1776,10 @@ async function roadsideRefuel(vehicleId) {
 
 async function addVehicle() {
 
-    const specId = document.getElementById("vehicle-spec-select").value;
+    const vehicleModelId = document.getElementById("vehicle-model-select").value;
 
-    if (!specId) {
-        alert("Add a hauling spec first");
+    if (!vehicleModelId) {
+        alert("Add a hauling vehicle model first");
         return;
     }
 
@@ -1793,7 +1793,7 @@ async function addVehicle() {
 
         body: JSON.stringify({
 
-            spec_id: Number(specId),
+            vehicle_model_id: Number(vehicleModelId),
 
             current_location: document.getElementById("vehicle-location").value,
 
@@ -2829,7 +2829,7 @@ function updateSimClock() {
 }
 
 
-loadSpecs().then(loadVehicles);
+loadVehicleModels().then(loadVehicles);
 loadPaths();
 loadPlaces();
 loadGasPrices();

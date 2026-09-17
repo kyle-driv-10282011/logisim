@@ -102,9 +102,9 @@ Python's own `datetime.utcnow()`, which `init.sql` inserting via
 Postgres's `NOW()` can't guarantee without depending on the container's
 configured timezone.
 
-### `vehicle_specs`
+### `vehicle_models`
 
-A reusable hauling-spec catalog entry — e.g. "2026 Chevy Express" — that
+A reusable hauling-vehicle-model catalog entry — e.g. "2026 Chevy Express" — that
 any number of vehicles can be created against, the same way a `path` is
 geocoded/routed once and reused by any number of trips.
 
@@ -179,9 +179,9 @@ duplicates.
 | Column         | Type    | Notes                          |
 |----------------|---------|----------------------------------|
 | `id`           | serial  | primary key                     |
-| `name`         | text    | server-generated as `"<year> <brand> <model> <n>"` from the vehicle's spec (see `create_vehicle()` in `app.py`) — not user-typed |
+| `name`         | text    | server-generated as `"<year> <brand> <model> <n>"` from the vehicle's vehicle model (see `create_vehicle()` in `app.py`) — not user-typed |
 | `place_id`     | integer | FK `places(id)` — where the vehicle currently is, matched against a path's `origin_place_id` to decide which paths it can start a trip on. Set at creation, then repointed at a trip's `destination_place_id` once that trip arrives (`settle_arrived_vehicles()`) — see [Vehicle location](#vehicle-location) below |
-| `spec_id`      | integer | FK `vehicle_specs(id)` — hauling specs (including type/brand/model) live on the spec, not duplicated per vehicle |
+| `vehicle_model_id`      | integer | FK `vehicle_models(id)` — hauling vehicle models (including type/brand/model) live on the vehicle model, not duplicated per vehicle |
 | `sold`         | boolean | default `false`. Selling a vehicle sets this rather than deleting the row, preserving history (`GET /api/vehicles?include_sold=true`) while "My Vehicles" filters to `sold = false` |
 | `sold_at`      | timestamp | nullable                      |
 | `created`      | timestamp | default `NOW()`                |
@@ -492,13 +492,13 @@ All endpoints are on the `backend` service, default `http://localhost:5000`.
 |---------------------------------|-------------|
 | `GET /api/settings`             | Current game clock: `{time_multiplier, game_time}` |
 | `PUT /api/settings`             | Change `time_multiplier`. Body: `{time_multiplier}` — re-anchors the game clock at its current value so it speeds up/slows down rather than jumping. 409 if any vehicle is currently in route |
-| `POST /api/vehicles`            | Create a vehicle. Body: `{spec_id, current_location, starting_mileage?}` — `name` is server-generated (`"<year> <brand> <model> <n>"`), not part of the request. Response includes the generated `name`, resolved `spec`, and resolved `current_lat`/`current_lng`. 400 if `current_location` doesn't resolve |
-| `GET /api/vehicles`             | List vehicles with computed `status` (`READY`/`DRIVING`/`SOLD`), each vehicle's `spec`, and `current_location`/`current_lat`/`current_lng` derived from its place (settled first — see [Vehicle location](#vehicle-location)). Defaults to the current fleet (`sold = false`, "My Vehicles"); `?include_sold=true` returns full history. No frontend tab currently surfaces the latter — the frontend only ever calls this without the flag |
+| `POST /api/vehicles`            | Create a vehicle. Body: `{vehicle_model_id, current_location, starting_mileage?}` — `name` is server-generated (`"<year> <brand> <model> <n>"`), not part of the request. Response includes the generated `name`, resolved `vehicle_model`, and resolved `current_lat`/`current_lng`. 400 if `current_location` doesn't resolve |
+| `GET /api/vehicles`             | List vehicles with computed `status` (`READY`/`DRIVING`/`SOLD`), each vehicle's `vehicle_model`, and `current_location`/`current_lat`/`current_lng` derived from its place (settled first — see [Vehicle location](#vehicle-location)). Defaults to the current fleet (`sold = false`, "My Vehicles"); `?include_sold=true` returns full history. No frontend tab currently surfaces the latter — the frontend only ever calls this without the flag |
 | `POST /api/vehicles/{id}/sell`  | Mark a vehicle sold (soft-delete). 409 if already sold or currently on a trip |
 | `DELETE /api/vehicles/{id}`     | Permanently delete a vehicle (cascades its trips) — distinct from selling; not used by the frontend |
-| `POST /api/vehicle-specs`       | Create a hauling-spec catalog entry. Body: `{year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, image?}` |
-| `GET /api/vehicle-specs`        | List all vehicle specs |
-| `DELETE /api/vehicle-specs/{id}`| Delete a spec. 409 if any vehicle still references it |
+| `POST /api/vehicle-models`       | Create a hauling-vehicle-model catalog entry. Body: `{year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, image?}` |
+| `GET /api/vehicle-models`        | List all vehicle models |
+| `DELETE /api/vehicle-models/{id}`| Delete a vehicle model. 409 if any vehicle still references it |
 | `GET /api/vehicles/{id}/city`   | Nearest place name to the vehicle's current position, if driving |
 | `GET /api/vehicles/{id}/address`| A settled vehicle's place's saved `address` — used to prefill the Paths tab's Origin field (see [Vehicle location](#vehicle-location)) |
 | `POST /api/places`              | Resolve a free-text description or address to a saved place (or return the existing match — see [`places`](#places)). Body: `{description}`. 400 if it doesn't resolve |
@@ -529,10 +529,10 @@ Plain JS + Leaflet, no build step, a single page (`frontend/app.js`,
 `frontend/index.html`). Seven tabs, collapsed into a dropdown menu in the
 side panel since they don't all fit as a row:
 
-- **Templates** — the hauling-spec catalog. Create specs
+- **Vehicle Models** — the hauling-vehicle-model catalog. Create vehicle models
   (year/brand/model/person capacity/cargo capacity/cost/MPG/image) and
-  delete unused ones (409 if any vehicle still references one). A spec's
-  `image` is just a filename resolved against `frontend/images/` (e.g.
+  delete unused ones (409 if any vehicle still references one). A vehicle
+  model's `image` is just a filename resolved against `frontend/images/` (e.g.
   dropping in `frontend/images/2026-Chevy-Express.png` and setting
   `image` to `2026-Chevy-Express.png`) — nginx serves that directory
   alongside the rest of the static frontend, no separate upload endpoint.
@@ -546,7 +546,7 @@ side panel since they don't all fit as a row:
   anything chosen below it). `renderPlaceFilterChips()`/`setPlaceFilter()`
   in `app.js`.
 - **My Vehicles** — the current fleet (not sold). Add a vehicle by
-  picking a template from a dropdown (required — templates must exist
+  picking a vehicle model from a dropdown (required — vehicle models must exist
   first) and giving it a starting location, pick a path and start a trip
   for a `READY` vehicle (the path dropdown only offers paths departing
   from that vehicle's current location — see [Vehicle
