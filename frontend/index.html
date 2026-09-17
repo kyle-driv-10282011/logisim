@@ -208,7 +208,55 @@
             background: #f5f5f5;
         }
 
+        /*
+         * Stacked layout for a My Vehicles row - replaces the old
+         * single-line .list-row, which had no room for a name, location,
+         * status badge, trip badges, a fuel gauge and two buttons all
+         * fighting for the same 280px-wide line.
+         */
+        .vehicle-card {
+            display: flex;
+            flex-direction: column;
+            align-items: stretch;
+            gap: 6px;
+        }
+
+        .vehicle-card-top {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .vehicle-card-title {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .vehicle-card-name,
+        .vehicle-card-location {
+            overflow-wrap: anywhere;
+        }
+
+        .vehicle-card-location {
+            font-size: 11px;
+            color: #555;
+        }
+
+        .vehicle-card-meta {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .vehicle-card-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 6px;
+        }
+
         .sell-button,
+        .refuel-button,
         .remove-path-button,
         .remove-gasprice-button {
             font-size: 11px;
@@ -220,6 +268,8 @@
             padding: 2px 6px;
             border-radius: 10px;
             color: white;
+            flex-shrink: 0;
+            white-space: nowrap;
         }
 
         .status-READY {
@@ -369,7 +419,6 @@
             <button class="tab-button" id="tab-button-templates" onclick="withSpinner(this, () => showTab('templates'))">Templates</button>
             <button class="tab-button" id="tab-button-places" onclick="withSpinner(this, () => showTab('places'))">Places</button>
             <button class="tab-button active" id="tab-button-myvehicles" onclick="withSpinner(this, () => showTab('myvehicles'))">My Vehicles</button>
-            <button class="tab-button" id="tab-button-allvehicles" onclick="withSpinner(this, () => showTab('allvehicles'))">All Vehicles</button>
             <button class="tab-button" id="tab-button-paths" onclick="withSpinner(this, () => showTab('paths'))">Paths</button>
             <button class="tab-button" id="tab-button-inroute" onclick="withSpinner(this, () => showTab('inroute'))">In Route</button>
             <button class="tab-button" id="tab-button-gasprices" onclick="withSpinner(this, () => showTab('gasprices'))">Gas Prices</button>
@@ -453,13 +502,6 @@
             <div id="path-select-hint" style="display:none"></div>
             <button id="start-trip-button" onclick="withSpinner(this, startTrip)" style="display:none">Start Trip</button>
         </div>
-
-    </div>
-
-    <div class="tab-content" id="tab-allvehicles">
-
-        <b>All Vehicles</b>
-        <div id="all-vehicle-list"></div>
 
     </div>
 

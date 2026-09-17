@@ -137,7 +137,6 @@ const tripLayers = new Map();      // vehicle_id -> { marker, routeLine }
 let specsById = new Map();         // spec_id -> vehicle spec (from GET /api/vehicle-specs)
 let pathsById = new Map();         // path_id -> path (from GET /api/paths)
 let vehiclesById = new Map();      // vehicle_id -> vehicle - current fleet, not sold (from GET /api/vehicles)
-let allVehiclesById = new Map();   // vehicle_id -> vehicle - full history, sold or not (from GET /api/vehicles?include_sold=true)
 let placesById = new Map();        // place_id -> place (from GET /api/places)
 let activeTripsById = new Map();   // vehicle_id -> trip (from the last poll)
 let activeVehicleIds = new Set();  // vehicle ids seen on the last poll
@@ -257,7 +256,6 @@ function renderFocusDependentViews() {
 
     renderInRouteList();
     renderVehicleList();
-    renderAllVehicleList();
     renderPathSelectForTripVehicle();
 }
 
@@ -425,7 +423,6 @@ const TAB_LABELS = {
     templates: "Templates",
     places: "Places",
     myvehicles: "My Vehicles",
-    allvehicles: "All Vehicles",
     paths: "Paths",
     inroute: "In Route",
     gasprices: "Gas Prices",
@@ -463,7 +460,7 @@ document.addEventListener("click", (event) => {
 
 function showTab(tab) {
 
-    for (const name of ["templates", "places", "myvehicles", "allvehicles", "paths", "inroute", "gasprices", "jobs"]) {
+    for (const name of ["templates", "places", "myvehicles", "paths", "inroute", "gasprices", "jobs"]) {
 
         document.getElementById(`tab-${name}`).classList.toggle("active", name === tab);
         document.getElementById(`tab-button-${name}`).classList.toggle("active", name === tab);
@@ -1122,16 +1119,10 @@ async function uploadGasPrices() {
 
 async function loadVehicles() {
 
-    const [ownedResponse, allResponse] = await Promise.all([
-        fetch(API + "/api/vehicles"),
-        fetch(API + "/api/vehicles?include_sold=true")
-    ]);
-
-    const vehicles = await ownedResponse.json();
-    const allVehicles = await allResponse.json();
+    const response = await fetch(API + "/api/vehicles");
+    const vehicles = await response.json();
 
     vehiclesById = new Map(vehicles.map((vehicle) => [vehicle.id, vehicle]));
-    allVehiclesById = new Map(allVehicles.map((vehicle) => [vehicle.id, vehicle]));
 
     //
     // The vehicle chosen for a trip might have been sold, or started driving
@@ -1145,24 +1136,7 @@ async function loadVehicles() {
     }
 
     renderVehicleList();
-    renderAllVehicleList();
     renderPathSelectForTripVehicle();
-}
-
-
-//
-// A vehicle's settled total_miles_traveled (from GET /api/vehicles) only
-// picks up a trip once it's arrived - while DRIVING, the distance covered
-// so far on the current trip comes from the live poll (GET
-// /api/trips/active's distance_miles, see derive_position()) instead, so
-// the odometer shown in the vehicle lists keeps ticking up in real time.
-//
-function vehicleTotalMiles(vehicle) {
-
-    const trip = activeTripsById.get(vehicle.id);
-    const liveMiles = trip && trip.status === "DRIVING" ? trip.distance_miles : 0;
-
-    return vehicle.total_miles_traveled + liveMiles;
 }
 
 
@@ -1179,7 +1153,7 @@ function renderVehicleList() {
         const driving = vehicle.status === "DRIVING" || vehicle.status === "STRANDED";
         const ready = vehicle.status === "READY";
 
-        item.className = "vehicle-item list-row vehicle-row" +
+        item.className = "vehicle-item vehicle-row vehicle-card" +
             (driving || ready ? " clickable" : "") +
             (driving && vehicle.id === selectedVehicleId ? " selected" : "") +
             (ready && vehicle.id === selectedTripVehicleId ? " selected" : "");
@@ -1193,8 +1167,7 @@ function renderVehicleList() {
         const imageUrl = vehicle.spec ? specImageUrl(vehicle.spec.image) : null;
 
         //
-        // Trip-scoped, not the vehicle's lifetime odometer (that's what
-        // vehicleTotalMiles() is for, still used elsewhere) - these badges
+        // Trip-scoped, not the vehicle's lifetime odometer - these badges
         // mirror the In Route tab's own per-trip miles/gallons, so they
         // only render at all while this vehicle actually has an active
         // trip (activeTripsById), and show nothing otherwise.
@@ -1213,23 +1186,28 @@ function renderVehicleList() {
             : "";
 
         item.innerHTML =
-            `<span class="spec-item-label">` +
+            `<div class="vehicle-card-top">` +
             (imageUrl ? `<img class="spec-thumb" src="${imageUrl}">` : "") +
-            `<span>${vehicle.name}` +
+            `<div class="vehicle-card-title">` +
+            `<div class="vehicle-card-name">${vehicle.name}` +
             (vehicle.spec ? ` (${specLabel(vehicle.spec)})` : "") +
-            ` &middot; ${vehicle.current_location} ` +
-            (trip
-                ? `<span class="miles-badge">${Math.round(trip.distance_miles).toLocaleString()} mi</span>` +
-                  (gallonsUsed !== null
-                      ? ` <span class="gas-badge">&#9981; ${formatGallons(gallonsUsed)} gal</span>`
-                      : "") +
-                  " "
-                : "") +
+            `</div>` +
+            `<div class="vehicle-card-location">${vehicle.current_location}</div>` +
+            `</div>` +
             `<span class="status-badge status-${vehicle.status}">${vehicle.status}</span>` +
-            `</span>${fuelGauge}</span>` +
+            `</div>` +
+            (trip || fuelGauge
+                ? `<div class="vehicle-card-meta">` +
+                  (trip ? `<span class="miles-badge">${Math.round(trip.distance_miles).toLocaleString()} mi</span>` : "") +
+                  (gallonsUsed !== null ? `<span class="gas-badge">&#9981; ${formatGallons(gallonsUsed)} gal</span>` : "") +
+                  fuelGauge +
+                  `</div>`
+                : "") +
             (vehicle.status === "READY"
-                ? `<button class="refuel-button" data-id="${vehicle.id}">Refuel</button>` +
-                  `<button class="sell-button" data-id="${vehicle.id}">Sell</button>`
+                ? `<div class="vehicle-card-actions">` +
+                  `<button class="refuel-button" data-id="${vehicle.id}">Refuel</button>` +
+                  `<button class="sell-button" data-id="${vehicle.id}">Sell</button>` +
+                  `</div>`
                 : "");
 
         list.appendChild(item);
@@ -1265,73 +1243,6 @@ async function refuelVehicle(vehicleId) {
     }
 
     loadVehicles();
-}
-
-
-function renderAllVehicleList() {
-
-    const list = document.getElementById("all-vehicle-list");
-
-    list.innerHTML = "";
-
-    for (const vehicle of allVehiclesById.values()) {
-
-        const item = document.createElement("div");
-
-        item.className = "vehicle-item list-row vehicle-row clickable";
-
-        //
-        // Just pans to wherever the vehicle currently is - unlike
-        // selectVehicle() (the In Route "follow" flow) or
-        // selectTripVehicle() (path-select filtering for starting a
-        // trip), clicking here doesn't change tabs or keep following it
-        // every poll tick, just a one-time pan. It still clears any other
-        // focus first though, same as those - a driving vehicle already
-        // has its own live marker (see pollActiveTrips()), so the resting
-        // dot is only shown for one that isn't.
-        //
-        // A DRIVING vehicle's current_lat/current_lng is its settled
-        // pre-trip location (see current_location in README's "Vehicle
-        // location"), not where it actually is right now - pan to its
-        // live trip position instead, when the active-trips poll has
-        // already picked it up.
-        //
-        const driving = vehicle.status === "DRIVING" || vehicle.status === "STRANDED";
-
-        item.onclick = () => {
-
-            clearFocus();
-
-            const trip = driving ? activeTripsById.get(vehicle.id) : null;
-
-            map.panTo(trip ? trip.position : [vehicle.current_lat, vehicle.current_lng]);
-
-            if (!driving) {
-                showRestingVehicleMarker(vehicle);
-            }
-
-            renderFocusDependentViews();
-        };
-
-        const imageUrl = vehicle.spec ? specImageUrl(vehicle.spec.image) : null;
-
-        const trip = driving ? activeTripsById.get(vehicle.id) : null;
-        const fuelRemaining = trip ? tripFuelRemaining(trip) : vehicle.fuel_gallons;
-        const fuelBadge = fuelRemaining !== null && vehicle.spec
-            ? ` <span class="fuel-badge">&#9981; ${formatGallons(fuelRemaining)}/${vehicle.spec.fuel_tank_gallons} gal</span>`
-            : "";
-
-        item.innerHTML =
-            `<span class="spec-item-label">` +
-            (imageUrl ? `<img class="spec-thumb" src="${imageUrl}">` : "") +
-            `<span>${vehicle.name}` +
-            (vehicle.spec ? ` (${specLabel(vehicle.spec)})` : "") +
-            ` &middot; ${vehicle.current_location} ` +
-            `&middot; ${Math.round(vehicleTotalMiles(vehicle)).toLocaleString()} mi ` +
-            `<span class="status-badge status-${vehicle.status}">${vehicle.status}</span>${fuelBadge}</span></span>`;
-
-        list.appendChild(item);
-    }
 }
 
 
@@ -1526,11 +1437,11 @@ async function fetchCurrentCity() {
 
 
 //
-// Gas used so far on the current trip is derived client-side, the same way
-// vehicleTotalMiles() derives live odometer - trip.distance_miles (from
-// GET /api/trips/active's derive_position()) divided by the vehicle's own
-// spec.mpg, rather than a value stored/computed on the backend. Returns
-// null when the vehicle or its spec (and so its mpg) isn't known yet.
+// Gas used so far on the current trip is derived client-side -
+// trip.distance_miles (from GET /api/trips/active's derive_position())
+// divided by the vehicle's own spec.mpg, rather than a value stored/
+// computed on the backend. Returns null when the vehicle or its spec (and
+// so its mpg) isn't known yet.
 //
 function tripGallonsUsed(trip, vehicle) {
 
@@ -2670,7 +2581,6 @@ async function pollActiveTrips() {
     // ticking up live while driving, not just once the trip arrives.
     //
     renderVehicleList();
-    renderAllVehicleList();
 
     updateTimeMultiplierControlState();
 

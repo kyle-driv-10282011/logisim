@@ -169,7 +169,7 @@ duplicates.
 | `name`         | text    | server-generated as `"<year> <brand> <model> <n>"` from the vehicle's spec (see `create_vehicle()` in `app.py`) — not user-typed |
 | `place_id`     | integer | FK `places(id)` — where the vehicle currently is, matched against a path's `origin_place_id` to decide which paths it can start a trip on. Set at creation, then repointed at a trip's `destination_place_id` once that trip arrives (`settle_arrived_vehicles()`) — see [Vehicle location](#vehicle-location) below |
 | `spec_id`      | integer | FK `vehicle_specs(id)` — hauling specs (including type/brand/model) live on the spec, not duplicated per vehicle |
-| `sold`         | boolean | default `false`. Selling a vehicle sets this rather than deleting the row, so "All Vehicles" can show full history while "My Vehicles" filters to `sold = false` |
+| `sold`         | boolean | default `false`. Selling a vehicle sets this rather than deleting the row, preserving history (`GET /api/vehicles?include_sold=true`) while "My Vehicles" filters to `sold = false` |
 | `sold_at`      | timestamp | nullable                      |
 | `created`      | timestamp | default `NOW()`                |
 
@@ -480,7 +480,7 @@ All endpoints are on the `backend` service, default `http://localhost:5000`.
 | `GET /api/settings`             | Current game clock: `{time_multiplier, game_time}` |
 | `PUT /api/settings`             | Change `time_multiplier`. Body: `{time_multiplier}` — re-anchors the game clock at its current value so it speeds up/slows down rather than jumping. 409 if any vehicle is currently in route |
 | `POST /api/vehicles`            | Create a vehicle. Body: `{spec_id, current_location, starting_mileage?}` — `name` is server-generated (`"<year> <brand> <model> <n>"`), not part of the request. Response includes the generated `name`, resolved `spec`, and resolved `current_lat`/`current_lng`. 400 if `current_location` doesn't resolve |
-| `GET /api/vehicles`             | List vehicles with computed `status` (`READY`/`DRIVING`/`SOLD`), each vehicle's `spec`, and `current_location`/`current_lat`/`current_lng` derived from its place (settled first — see [Vehicle location](#vehicle-location)). Defaults to the current fleet (`sold = false`, "My Vehicles"); `?include_sold=true` returns full history ("All Vehicles") |
+| `GET /api/vehicles`             | List vehicles with computed `status` (`READY`/`DRIVING`/`SOLD`), each vehicle's `spec`, and `current_location`/`current_lat`/`current_lng` derived from its place (settled first — see [Vehicle location](#vehicle-location)). Defaults to the current fleet (`sold = false`, "My Vehicles"); `?include_sold=true` returns full history. No frontend tab currently surfaces the latter — the frontend only ever calls this without the flag |
 | `POST /api/vehicles/{id}/sell`  | Mark a vehicle sold (soft-delete). 409 if already sold or currently on a trip |
 | `DELETE /api/vehicles/{id}`     | Permanently delete a vehicle (cascades its trips) — distinct from selling; not used by the frontend |
 | `POST /api/vehicle-specs`       | Create a hauling-spec catalog entry. Body: `{year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, image?}` |
@@ -513,7 +513,7 @@ a normal FastAPI exception handler and still carry CORS headers).
 ## Frontend
 
 Plain JS + Leaflet, no build step, a single page (`frontend/app.js`,
-`frontend/index.html`). Seven tabs, collapsed into a dropdown menu in the
+`frontend/index.html`). Six tabs, collapsed into a dropdown menu in the
 side panel since they don't all fit as a row:
 
 - **Templates** — the hauling-spec catalog. Create specs
@@ -529,10 +529,9 @@ side panel since they don't all fit as a row:
   for a `READY` vehicle (the path dropdown only offers paths departing
   from that vehicle's current location — see [Vehicle
   location](#vehicle-location)), or sell a `READY` vehicle (soft-delete —
-  it moves off this list but stays visible in All Vehicles as `SOLD`).
-- **All Vehicles** — read-only history of every vehicle ever created,
-  sold or not, with its current status badge (`READY`/`DRIVING`/`SOLD`)
-  and location.
+  it moves off this list; there's no UI for viewing sold vehicles again,
+  though the data and `GET /api/vehicles?include_sold=true` still exist —
+  see [`vehicles`](#vehicles)).
 - **Paths** — create a path from an origin/destination, preview it on the
   map, remove existing paths. Previewing a path draws the *entire* route
   color-coded by effective speed limit (red &lt;45 mph, orange 45-64,
