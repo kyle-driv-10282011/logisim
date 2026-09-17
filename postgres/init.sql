@@ -285,11 +285,21 @@ CREATE TABLE trips (
     -- Set when this trip is a detour to a gas station (POST
     -- /api/vehicles/{id}/divert-to-gas-station) - the place this vehicle was
     -- actually trying to reach before the detour. Once this trip arrives,
-    -- settle_arrived_vehicles() auto-refuels the vehicle and kicks off a new
-    -- trip from here to this place (_run_resume_trip_job() in app.py), so a
-    -- refueling stop doesn't require the user to manually re-plan the rest
-    -- of the drive. NULL for an ordinary trip.
+    -- settle_arrived_vehicles() kicks off a new trip from here to this
+    -- place (_run_resume_trip_job() in app.py), so a refueling stop doesn't
+    -- require the user to manually re-plan the rest of the drive. NULL for
+    -- an ordinary trip.
     resume_destination_place_id INTEGER REFERENCES places(id),
+
+    -- Whether arriving at this trip's destination should top the tank back
+    -- up to full (settle_arrived_vehicles()) - true for both a
+    -- divert-to-gas-station detour and a POST /api/vehicles/{id}/refuel
+    -- drive-there-and-park, explicitly, rather than inferred from whether
+    -- the destination happens to have a gas_prices entry - a gas price can
+    -- be attached to an ordinary city (e.g. a bulk-uploaded price dataset),
+    -- and an otherwise-unrelated trip that happens to end there shouldn't
+    -- silently refuel just because of that coincidence.
+    auto_refuel BOOLEAN NOT NULL DEFAULT FALSE,
 
     -- Set instead of ever reaching realized_duration_seconds when a trip is
     -- abandoned mid-route for a diversion - a cancelled trip never "arrives"

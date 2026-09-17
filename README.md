@@ -250,6 +250,7 @@ user-specified simulated time).
 | `roadside_refuel_count`  | integer           | how many roadside refuels (`POST /api/vehicles/{id}/roadside-refuel`) have topped this trip back up after running dry mid-route — see [Fuel](#fuel) |
 | `paused_seconds`         | double precision  | real schedule-time "refunded" by a roadside refuel, so time spent STRANDED doesn't count as progress — see [Fuel](#fuel) |
 | `resume_destination_place_id` | integer FK `places(id)`, nullable | set when this trip is a detour to a gas station — the place the vehicle was actually trying to reach before the detour, so arriving at the station automatically starts a new trip onward to here — see [Divert to gas station](#divert-to-gas-station) |
+| `auto_refuel`            | boolean, default `false` | whether arriving at this trip's destination tops the tank back up to full — set explicitly by a diversion or a drive-to-refuel, never inferred from the destination happening to have a `gas_prices` entry — see [Fuel](#fuel) |
 | `cancelled_at`           | timestamp, nullable | set when a trip is abandoned mid-route for a diversion instead of ever arriving — excluded from every "is this vehicle currently on a trip" check, the same way an arrived trip is — see [Divert to gas station](#divert-to-gas-station) |
 
 A vehicle can only have one trip active at a time (enforced at the
@@ -509,10 +510,25 @@ money/budget system yet). It tops the tank back up (`roadside_refuel_count
 time spent stuck (`trips.paused_seconds`) so the trip resumes from where it
 stopped instead of jumping ahead by however long the user took to notice.
 
-**Refueling at a real station.** `POST /api/vehicles/{id}/refuel` only
-works for a `READY` vehicle sitting at a place with an entry in
-[`gas_prices`](#gas_prices) (i.e. a real gas station on the Gas Prices
-map) — it just tops the tank to full.
+**Refueling at a real station.** `POST /api/vehicles/{id}/refuel` works for
+any `READY` vehicle. If it's already sitting at a place with an entry in
+[`gas_prices`](#gas_prices) (a real gas station on the Gas Prices map), it
+just tops the tank to full in place. Otherwise it finds the closest gas
+station anywhere (`find_closest_gas_station()` — no detour-distance cutoff,
+unlike the "ahead" search below, since the vehicle isn't going anywhere yet
+to stay ahead *of*) and drives there instead — same background-job
+mechanics as [divert to gas station](#divert-to-gas-station), reusing
+`_resume_trip_after_refuel()`/`_run_resume_trip_job()` to start the trip.
+Arriving refuels and simply parks there (no `resume_destination_place_id`,
+so nothing auto-continues afterward — this drive *was* the point, unlike a
+mid-route detour).
+
+Whether an arrival tops off the tank is an explicit `trips.auto_refuel`
+flag, set only by these two flows — never inferred from whether a
+destination happens to have a `gas_prices` entry, since an ordinary trip
+ending at a place that's merely priced for gas (e.g. a bulk-uploaded
+citywide price dataset) shouldn't silently refuel just because of that
+coincidence.
 
 ### Divert to gas station
 
@@ -584,7 +600,7 @@ All endpoints are on the `backend` service, default `http://localhost:5000`.
 | `GET /api/vehicles`             | List vehicles with computed `status` (`READY`/`DRIVING`/`STRANDED`/`SOLD`), each vehicle's `vehicle_model`, `fuel_gallons`, and `current_location`/`current_lat`/`current_lng` derived from its place (settled first — see [Vehicle location](#vehicle-location)). Defaults to the current fleet (`sold = false`, "My Vehicles"); `?include_sold=true` returns full history. No frontend tab currently surfaces the latter — the frontend only ever calls this without the flag |
 | `POST /api/vehicles/{id}/sell`  | Mark a vehicle sold (soft-delete). 409 if already sold or currently on a trip |
 | `DELETE /api/vehicles/{id}`     | Permanently delete a vehicle (cascades its trips) — distinct from selling; not used by the frontend |
-| `POST /api/vehicles/{id}/refuel` | Top off a `READY` vehicle's tank to full. 409 if it's currently on a trip, or if its current place has no [`gas_prices`](#gas_prices) entry — see [Fuel](#fuel) |
+| `POST /api/vehicles/{id}/refuel` | Top off a `READY` vehicle's tank to full if it's already at a gas station, otherwise drives it to the closest one first (202, returns a `job_id` to poll). 409 if it's currently on a trip — see [Fuel](#fuel) |
 | `POST /api/vehicles/{id}/roadside-refuel` | Recover a `STRANDED` vehicle in place, no gas station required. Response includes `cost_usd` (a flat placeholder fee, not actually charged anywhere). 409 if the vehicle isn't currently `STRANDED` — see [Fuel](#fuel) |
 | `GET /api/vehicles/{id}/gas-station-ahead` | The closest gas station on the *remaining* portion of a `DRIVING` vehicle's route, if any (`{station: null}` otherwise) — see [Divert to gas station](#divert-to-gas-station) |
 | `POST /api/vehicles/{id}/divert-to-gas-station` | Detour a `DRIVING` vehicle to that station now; automatically resumes to its original destination once refueled there. 202, returns a `job_id` to poll (`GET /api/jobs/{id}`) — see [Divert to gas station](#divert-to-gas-station) |

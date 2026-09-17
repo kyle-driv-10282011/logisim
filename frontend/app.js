@@ -1401,7 +1401,9 @@ function renderVehicleList() {
                 : "") +
             (displayStatus === "READY"
                 ? `<div class="vehicle-card-actions">` +
-                  `<button class="refuel-button" data-id="${vehicle.id}">Refuel</button>` +
+                  (refuelInFlightVehicleId === vehicle.id
+                      ? `<button class="refuel-button" disabled>Refueling...</button>`
+                      : `<button class="refuel-button" data-id="${vehicle.id}">Refuel</button>`) +
                   `<button class="sell-button" data-id="${vehicle.id}">Sell</button>` +
                   `</div>`
                 : "");
@@ -1419,26 +1421,60 @@ function renderVehicleList() {
 
     for (const button of list.querySelectorAll(".refuel-button")) {
 
-        button.onclick = (event) => {
-            event.stopPropagation();
-            withSpinner(button, () => refuelVehicle(Number(button.dataset.id)));
-        };
+        //
+        // Not wrapped in withSpinner() - when refueling means driving to a
+        // station first (a multi-second background job), refuelVehicle()
+        // tracks that itself via refuelInFlightVehicleId so the "Refueling..."
+        // state survives every 1s poll-driven re-render of this list
+        // instead of being wiped by the very next one (see
+        // divertInFlightVehicleId in renderInRouteList() for the same fix
+        // applied to the In Route panel's own divert button).
+        //
+        if (!button.disabled) {
+            button.onclick = (event) => {
+                event.stopPropagation();
+                refuelVehicle(Number(button.dataset.id));
+            };
+        }
     }
 }
 
 
+//
+// When the vehicle isn't already at a gas station, POST .../refuel starts
+// a background job (drive there, refuel, park - see app.py) instead of
+// refueling instantly, so this has to poll it the same way createPath()
+// and divertToGasStation() do rather than treating every response as
+// already finished.
+//
+let refuelInFlightVehicleId = null;
+
 async function refuelVehicle(vehicleId) {
 
-    const response = await fetch(API + "/api/vehicles/" + vehicleId + "/refuel", { method: "POST" });
+    refuelInFlightVehicleId = vehicleId;
+    renderVehicleList();
 
-    if (!response.ok) {
+    try {
+
+        const response = await fetch(API + "/api/vehicles/" + vehicleId + "/refuel", { method: "POST" });
 
         const data = await response.json();
-        alert(data.detail || "Could not refuel vehicle");
-        return;
-    }
 
-    loadVehicles();
+        if (!response.ok) {
+            alert(data.detail || "Could not refuel vehicle");
+            return;
+        }
+
+        if (data.job_id) {
+            await pollJob(data.job_id);
+        }
+
+    } catch (e) {
+        alert(e.message);
+    } finally {
+        refuelInFlightVehicleId = null;
+        loadVehicles();
+    }
 }
 
 
@@ -1789,7 +1825,7 @@ function renderInRouteList() {
     const fuelRemaining = tripFuelRemaining(trip);
 
     const fuelLine = fuelRemaining !== null && vehicleModel
-        ? `Fuel: ${formatGallons(fuelRemaining)} / ${vehicleModel.fuel_tank_gallons} gal<br>`
+        ? `Fuel: ${fuelGaugeHtml(fuelRemaining, vehicleModel.fuel_tank_gallons)}<br>`
         : "";
 
     let statusLine;

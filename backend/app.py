@@ -202,20 +202,23 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
     # much real time passes - it's excluded here the same as everywhere else
     # a trip's "still in progress" state is checked.
     #
-    # A trip with resume_destination_place_id set is a detour to a gas
-    # station - arriving there also means auto-refueling (it's a real gas
-    # station, that's why it was chosen) and kicking off the next leg back
-    # toward wherever the vehicle actually still needs to go
-    # (_run_resume_trip_job()). That job needs a live OSRM/geocoding call, so
-    # it can't run inline here - this only detects the handful of vehicles
-    # settling into a gas station on this call and hands them off to
+    # auto_refuel (set explicitly by divert_to_gas_station()/POST
+    # /api/vehicles/{id}/refuel, never inferred from whether the
+    # destination happens to have a gas_prices entry - see the `trips`
+    # comment in init.sql) tops the tank back up to full on arrival. A trip
+    # with resume_destination_place_id set is specifically a detour that
+    # still owes the vehicle a way back to wherever it was actually headed -
+    # arriving there additionally kicks off that next leg
+    # (_run_resume_trip_job()). Both need a live OSRM/geocoding call, so
+    # neither can run inline here - this only detects the handful of
+    # vehicles settling on this call and hands the resumes off to
     # job_executor. Detected before the bulk UPDATE (while place_id still
-    # differs from the destination) so it fires exactly once per arrival,
+    # differs from the destination) so each fires exactly once per arrival,
     # never again once that same vehicle is already settled there.
     #
     cur.execute(
         """
-        SELECT v.id, p.destination_place_id, t.resume_destination_place_id
+        SELECT v.id, p.destination_place_id, t.resume_destination_place_id, t.auto_refuel
         FROM vehicles v
         JOIN trips t ON t.id = (
             SELECT t2.id FROM trips t2
@@ -225,14 +228,24 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
         )
         JOIN paths p ON p.id = t.path_id
         WHERE t.cancelled_at IS NULL
-        AND t.resume_destination_place_id IS NOT NULL
         AND (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) >= t.realized_duration_seconds
         AND v.place_id IS DISTINCT FROM p.destination_place_id
+        AND (t.resume_destination_place_id IS NOT NULL OR t.auto_refuel)
         """,
         (time_multiplier,)
     )
 
-    pending_resumes = cur.fetchall()
+    arriving_rows = cur.fetchall()
+
+    pending_resumes = [
+        (vehicle_id, gas_station_place_id, resume_destination_place_id)
+        for vehicle_id, gas_station_place_id, resume_destination_place_id, _ in arriving_rows
+        if resume_destination_place_id is not None
+    ]
+
+    refueling_vehicle_ids = [
+        vehicle_id for vehicle_id, _, _, auto_refuel in arriving_rows if auto_refuel
+    ]
 
     #
     # A single bulk UPDATE covers every vehicle at once rather than looping
@@ -242,10 +255,10 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
     # fuel_gallons is settled in the same statement: the tank's contents at
     # arrival are whatever this trip's total fuel budget (starting_fuel_gallons
     # plus one tank per roadside refuel used) had left once the full route's
-    # distance was paid for in gallons. A gas-station arrival (one of
-    # pending_resumes above) gets topped back up to full separately, right
-    # after - it wouldn't make sense to still show it arriving low on the
-    # very trip that was diverted there specifically to refuel.
+    # distance was paid for in gallons. An auto_refuel arrival (one of
+    # refueling_vehicle_ids above) gets topped back up to full separately,
+    # right after - it wouldn't make sense to still show it arriving low
+    # right where it can refuel.
     #
     cur.execute(
         """
@@ -273,7 +286,7 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
         (time_multiplier,)
     )
 
-    if pending_resumes:
+    if refueling_vehicle_ids:
 
         cur.execute(
             """
@@ -283,7 +296,7 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
             WHERE vm.id = v.vehicle_model_id
             AND v.id = ANY(%s)
             """,
-            ([row[0] for row in pending_resumes],)
+            (refueling_vehicle_ids,)
         )
 
     conn.commit()
@@ -291,7 +304,7 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
     for vehicle_id, gas_station_place_id, resume_destination_place_id in pending_resumes:
 
         job_id = create_job("resume_trip_after_refuel")
-        job_executor.submit(_run_resume_trip_job, job_id, vehicle_id, gas_station_place_id, resume_destination_place_id)
+        job_executor.submit(_run_resume_trip_job, job_id, vehicle_id, gas_station_place_id, resume_destination_place_id, False)
 
 
 def is_rush_hour(effective_dt):
@@ -966,6 +979,54 @@ def find_gas_station_ahead(cur, route, distances_miles, current_distance_miles):
 
 
 #
+# Used by POST /api/vehicles/{id}/refuel for a READY vehicle that isn't
+# already sitting at a gas station - unlike find_gas_station_ahead() above,
+# there's no route to stay "ahead" of (the vehicle isn't going anywhere
+# yet), so this just picks whichever priced place is physically closest,
+# with no detour-distance cutoff.
+#
+def find_closest_gas_station(cur, lat, lng):
+
+    cur.execute(
+        """
+        SELECT p.id, p.description, p.lat, p.lng, g.price_per_gallon
+        FROM gas_prices g
+        JOIN places p ON p.id = g.place_id
+        """
+    )
+
+    stations = cur.fetchall()
+
+    best = None
+    best_distance_miles = None
+
+    for place_id, description, lat_station, lng_station, price_per_gallon in stations:
+
+        distance_miles = haversine_miles(lat, lng, lat_station, lng_station)
+
+        if best_distance_miles is None or distance_miles < best_distance_miles:
+
+            best_distance_miles = distance_miles
+
+            best = {
+
+                "place_id": place_id,
+
+                "description": description,
+
+                "lat": lat_station,
+
+                "lng": lng_station,
+
+                "price_per_gallon": price_per_gallon,
+
+                "distance_miles": round(distance_miles, 1)
+            }
+
+    return best
+
+
+#
 # Central fuel/time bookkeeping for one trip, shared by settle_arrived_vehicles()
 # (bulk arrival check), list_vehicles() (fleet status), and derive_position()
 # (live position/map). Kept separate from derive_position's own lat/lon/road-name
@@ -1396,6 +1457,7 @@ def run_migrations():
     #
     cur.execute("ALTER TABLE trips ADD COLUMN IF NOT EXISTS resume_destination_place_id INTEGER REFERENCES places(id)")
     cur.execute("ALTER TABLE trips ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP")
+    cur.execute("ALTER TABLE trips ADD COLUMN IF NOT EXISTS auto_refuel BOOLEAN NOT NULL DEFAULT FALSE")
 
     conn.commit()
 
@@ -2403,11 +2465,17 @@ def sell_vehicle(id: int):
 
 
 #
-# Refuels a READY vehicle to its vehicle model's full tank capacity, but only while
-# it's sitting at a place that's actually a gas station - i.e. one with an
-# entry in gas_prices (the Gas Prices tab/map). A vehicle currently
-# DRIVING or STRANDED has to use POST /api/vehicles/{id}/roadside-refuel
-# instead, since it isn't at any place to check.
+# Refuels a READY vehicle. If it's already sitting at a real gas station
+# (a place with an entry in gas_prices - the Gas Prices tab/map), this just
+# tops the tank off in place, same as always. Otherwise it drives there
+# first: finds the closest gas station anywhere (find_closest_gas_station()),
+# starts a trip to it, and once it actually arrives, settle_arrived_vehicles()
+# auto-refuels it and leaves it parked (no resume_destination_place_id, so
+# nothing auto-continues afterward - unlike a divert-to-gas-station detour,
+# this was the whole point of the drive). A vehicle currently DRIVING or
+# STRANDED has to use POST /api/vehicles/{id}/roadside-refuel or
+# divert-to-gas-station instead - this is only for a vehicle that isn't
+# going anywhere yet.
 #
 @app.post("/api/vehicles/{id}/refuel")
 def refuel_vehicle(id: int):
@@ -2453,24 +2521,39 @@ def refuel_vehicle(id: int):
 
     cur.execute("SELECT 1 FROM gas_prices WHERE place_id=%s", (place_id,))
 
-    if cur.fetchone() is None:
+    if cur.fetchone() is not None:
+
+        fuel_tank_gallons = fetch_vehicle_models_by_id(cur, [vehicle_model_id])[vehicle_model_id]["fuel_tank_gallons"]
+
+        cur.execute("UPDATE vehicles SET fuel_gallons = %s WHERE id = %s", (fuel_tank_gallons, id))
+
+        conn.commit()
+
+        cur.close()
+        conn.close()
+
+        return {"id": id, "fuel_gallons": fuel_tank_gallons}
+
+    current_place = fetch_places_by_id(cur, [place_id])[place_id]
+
+    station = find_closest_gas_station(cur, current_place["lat"], current_place["lng"])
+
+    if station is None:
         cur.close()
         conn.close()
         raise HTTPException(
-            status_code=409,
-            detail="Vehicle isn't at a priced gas station - add a gas price for this location on the Gas Prices tab first"
+            status_code=404,
+            detail="No gas stations found - add one on the Gas Prices tab first"
         )
-
-    fuel_tank_gallons = fetch_vehicle_models_by_id(cur, [vehicle_model_id])[vehicle_model_id]["fuel_tank_gallons"]
-
-    cur.execute("UPDATE vehicles SET fuel_gallons = %s WHERE id = %s", (fuel_tank_gallons, id))
-
-    conn.commit()
 
     cur.close()
     conn.close()
 
-    return {"id": id, "fuel_gallons": fuel_tank_gallons}
+    job_id = create_job("drive_to_refuel")
+
+    job_executor.submit(_run_resume_trip_job, job_id, id, place_id, station["place_id"], True)
+
+    return {"job_id": job_id, "station": station}
 
 
 
@@ -3438,7 +3521,7 @@ def start_diversion_trip(
     conn, cur, vehicle_id,
     origin_place_id, origin_lat, origin_lng,
     destination_place_id, destination_lat, destination_lng,
-    starting_fuel_gallons, resume_destination_place_id
+    starting_fuel_gallons, resume_destination_place_id, auto_refuel
 ):
 
     path_id, route, distances_miles, max_speeds_mph = find_or_create_path_between_places(
@@ -3454,11 +3537,11 @@ def start_diversion_trip(
     cur.execute(
         """
         INSERT INTO trips
-        (vehicle_id, path_id, traffic_base_datetime, traffic_bias, zones_snapshot, starting_fuel_gallons, resume_destination_place_id)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        (vehicle_id, path_id, traffic_base_datetime, traffic_bias, zones_snapshot, starting_fuel_gallons, resume_destination_place_id, auto_refuel)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
-        (vehicle_id, path_id, game_time, 1.0, json.dumps(zones), starting_fuel_gallons, resume_destination_place_id)
+        (vehicle_id, path_id, game_time, 1.0, json.dumps(zones), starting_fuel_gallons, resume_destination_place_id, auto_refuel)
     )
 
     trip_id = cur.fetchone()[0]
@@ -3509,7 +3592,7 @@ def _divert_to_gas_station(
             conn, cur, vehicle_id,
             origin_place_id, lat, lng,
             gas_station_place_id, station["lat"], station["lng"],
-            current_fuel_gallons, resume_destination_place_id
+            current_fuel_gallons, resume_destination_place_id, True
         )
 
         conn.commit()
@@ -3543,12 +3626,18 @@ def _run_divert_job(
 
 
 #
-# Triggered from settle_arrived_vehicles() the moment a gas-station detour
-# actually arrives (already auto-refueled by then) - routes onward from the
-# gas station to wherever the vehicle was really trying to get to, exactly
-# like a fresh trip the user started themselves.
+# Starts a fresh trip from origin_place_id to destination_place_id with no
+# resume_destination_place_id of its own - used two ways: triggered from
+# settle_arrived_vehicles() the moment a gas-station detour actually
+# arrives (already auto-refueled by then), to route onward to wherever the
+# vehicle was really trying to get to (auto_refuel=False - that
+# destination is whatever the vehicle was originally headed to, not
+# necessarily a gas station at all); and directly from POST
+# /api/vehicles/{id}/refuel when a READY vehicle isn't already at a gas
+# station, to drive it to the closest one and simply park there
+# (auto_refuel=True - see settle_arrived_vehicles()).
 #
-def _resume_trip_after_refuel(vehicle_id, origin_place_id, destination_place_id):
+def _resume_trip_after_refuel(vehicle_id, origin_place_id, destination_place_id, auto_refuel):
 
     conn = db()
     cur = conn.cursor()
@@ -3566,7 +3655,7 @@ def _resume_trip_after_refuel(vehicle_id, origin_place_id, destination_place_id)
             conn, cur, vehicle_id,
             origin_place_id, origin["lat"], origin["lng"],
             destination_place_id, destination["lat"], destination["lng"],
-            fuel_gallons, None
+            fuel_gallons, None, auto_refuel
         )
 
         conn.commit()
@@ -3578,12 +3667,12 @@ def _resume_trip_after_refuel(vehicle_id, origin_place_id, destination_place_id)
         conn.close()
 
 
-def _run_resume_trip_job(job_id, vehicle_id, origin_place_id, destination_place_id):
+def _run_resume_trip_job(job_id, vehicle_id, origin_place_id, destination_place_id, auto_refuel):
 
     update_job(job_id, status="running")
 
     try:
-        result = _resume_trip_after_refuel(vehicle_id, origin_place_id, destination_place_id)
+        result = _resume_trip_after_refuel(vehicle_id, origin_place_id, destination_place_id, auto_refuel)
     except Exception as e:
         update_job(job_id, status="error", error=getattr(e, "detail", str(e)))
         return
