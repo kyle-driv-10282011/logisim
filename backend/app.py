@@ -4091,6 +4091,7 @@ def active_trips():
             t.starting_fuel_gallons,
             t.roadside_refuel_count,
             t.paused_seconds,
+            t.resume_destination_place_id,
             EXTRACT(EPOCH FROM (NOW() - t.started_at))
         FROM trips t
         JOIN vehicles v ON v.id = t.vehicle_id
@@ -4103,6 +4104,13 @@ def active_trips():
     )
 
     rows = cur.fetchall()
+
+    #
+    # Resolved once, in bulk, rather than per-row - only a divert-to-gas-
+    # station leg ever has a resume_destination_place_id at all, so this is
+    # usually empty.
+    #
+    resume_places_by_id = fetch_places_by_id(cur, [row[-2] for row in rows if row[-2] is not None])
 
     cur.close()
     conn.close()
@@ -4129,6 +4137,7 @@ def active_trips():
         starting_fuel_gallons,
         roadside_refuel_count,
         paused_seconds,
+        resume_destination_place_id,
         elapsed_real_seconds
     ) in rows:
 
@@ -4164,6 +4173,18 @@ def active_trips():
             "path_id": path_id,
 
             "route": route,
+
+            #
+            # Set only while this trip is a gas-station detour - the
+            # frontend uses this to show that a vehicle mid-route is
+            # actually en route to refuel, not off-course or stuck, and
+            # what it'll automatically resume to once it gets there (see
+            # settle_arrived_vehicles()).
+            #
+            "resume_destination": (
+                resume_places_by_id[resume_destination_place_id]["description"]
+                if resume_destination_place_id is not None else None
+            ),
 
             **derived
         })

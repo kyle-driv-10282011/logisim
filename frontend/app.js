@@ -1807,13 +1807,30 @@ function renderInRouteList() {
             ? gasStationAhead.station
             : null;
 
+        const diverting = divertInFlightVehicleId === trip.vehicle_id;
+
+        //
+        // Set by the backend only while this trip is itself a gas-station
+        // detour (see active_trips() in app.py) - without this, a vehicle
+        // that successfully diverted just looks like any other vehicle
+        // driving somewhere, with nothing distinguishing "headed to
+        // refuel" from "still on its original trip".
+        //
+        const refuelingDetourLine = trip.resume_destination
+            ? `&#9981; Refueling detour - resuming to ${trip.resume_destination} after<br>`
+            : "";
+
         statusLine =
+            refuelingDetourLine +
             `Speed: ${Math.round(trip.speed_mph)} mph<br>` +
             `Arriving in: ${formatHMS(trip.remaining_sim_seconds)}` +
-            (station
-                ? `<br><button id="divert-gas-station-button" data-id="${trip.vehicle_id}">` +
-                  `Divert to ${station.description} ($${station.price_per_gallon.toFixed(2)}/gal, ` +
-                  `${station.distance_miles} mi away)</button>`
+            (station || diverting
+                ? `<br><button id="divert-gas-station-button" data-id="${trip.vehicle_id}" ${diverting ? "disabled" : ""}>` +
+                  (diverting
+                      ? "Diverting..."
+                      : `Divert to ${station.description} ($${station.price_per_gallon.toFixed(2)}/gal, ` +
+                        `${station.distance_miles} mi away)`) +
+                  `</button>`
                 : "");
     }
 
@@ -1841,8 +1858,14 @@ function renderInRouteList() {
 
     const divertButton = document.getElementById("divert-gas-station-button");
 
-    if (divertButton) {
-        divertButton.onclick = () => withSpinner(divertButton, () => divertToGasStation(Number(divertButton.dataset.id)));
+    //
+    // Not wrapped in withSpinner() like other buttons - divertToGasStation()
+    // already re-renders this whole panel itself via divertInFlightVehicleId,
+    // so a second, independent spinner/disabled mechanism on the same
+    // (about to be replaced) button would just be redundant.
+    //
+    if (divertButton && !divertButton.disabled) {
+        divertButton.onclick = () => divertToGasStation(Number(divertButton.dataset.id));
     }
 }
 
@@ -1854,21 +1877,43 @@ function renderInRouteList() {
 // request. Once it resolves, the next 1s active-trips poll just picks up
 // the new leg on its own - no extra handling needed here.
 //
+//
+// Diverting runs as a background job (a couple of seconds - a live reverse
+// geocode plus an OSRM route), but renderInRouteList() rebuilds the whole
+// details panel from scratch on every 1s active-trips poll regardless -
+// without tracking this separately, that next poll tick would just
+// overwrite withSpinner()'s disabled/spinning button with a fresh one
+// before the click had any visible effect at all, making it look like
+// nothing happened even though the job was quietly running the whole
+// time. divertInFlightVehicleId makes the in-progress state part of what
+// renderInRouteList() itself renders, so it survives every re-render
+// instead of being clobbered by the very next one.
+//
+let divertInFlightVehicleId = null;
+
 async function divertToGasStation(vehicleId) {
 
-    const response = await fetch(API + "/api/vehicles/" + vehicleId + "/divert-to-gas-station", { method: "POST" });
-
-    const submitted = await response.json();
-
-    if (!response.ok) {
-        alert(submitted.detail || "Could not divert to gas station");
-        return;
-    }
+    divertInFlightVehicleId = vehicleId;
+    renderInRouteList();
 
     try {
+
+        const response = await fetch(API + "/api/vehicles/" + vehicleId + "/divert-to-gas-station", { method: "POST" });
+
+        const submitted = await response.json();
+
+        if (!response.ok) {
+            alert(submitted.detail || "Could not divert to gas station");
+            return;
+        }
+
         await pollJob(submitted.job_id);
+
     } catch (e) {
         alert(e.message);
+    } finally {
+        divertInFlightVehicleId = null;
+        renderInRouteList();
     }
 }
 
@@ -3024,7 +3069,23 @@ setInterval(() => {
 
     if (selectedVehicleId !== null) {
         fetchCurrentCity();
-        fetchGasStationAhead();
     }
 
 }, 7000);
+
+//
+// Unlike fetchCurrentCity() above, this has no external rate-limited
+// geocoding call behind it (find_gas_station_ahead() is pure DB/geometry
+// work) - the 7s cadence they used to share was only ever needed for the
+// city lookup's sake, and made the "Divert to gas station" button take
+// noticeably long to appear after selecting a vehicle or clearing a
+// previous detour. A few seconds still keeps this well clear of hammering
+// the backend with its per-station route-distance scan on every 1s poll.
+//
+setInterval(() => {
+
+    if (selectedVehicleId !== null) {
+        fetchGasStationAhead();
+    }
+
+}, 3000);
