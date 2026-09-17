@@ -280,5 +280,26 @@ CREATE TABLE trips (
     -- Real seconds' worth of schedule progress "refunded" by a roadside
     -- refuel, so the trip's clock doesn't count time spent stranded as
     -- distance covered. See resolve_trip_progress() in app.py.
-    paused_seconds DOUBLE PRECISION NOT NULL DEFAULT 0
+    paused_seconds DOUBLE PRECISION NOT NULL DEFAULT 0,
+
+    -- Set when this trip is a detour to a gas station (POST
+    -- /api/vehicles/{id}/divert-to-gas-station) - the place this vehicle was
+    -- actually trying to reach before the detour. Once this trip arrives,
+    -- settle_arrived_vehicles() auto-refuels the vehicle and kicks off a new
+    -- trip from here to this place (_run_resume_trip_job() in app.py), so a
+    -- refueling stop doesn't require the user to manually re-plan the rest
+    -- of the drive. NULL for an ordinary trip.
+    resume_destination_place_id INTEGER REFERENCES places(id),
+
+    -- Set instead of ever reaching realized_duration_seconds when a trip is
+    -- abandoned mid-route for a diversion - a cancelled trip never "arrives"
+    -- (see settle_arrived_vehicles()) and is excluded from every "is this
+    -- vehicle currently on a trip" check (list_vehicles(), start_trip(),
+    -- sell_vehicle(), update_settings(), active_trips(), etc.), the same way
+    -- an ordinary trip is excluded once it's arrived. The distance already
+    -- driven on it is folded directly into vehicles.starting_mileage at
+    -- cancellation time (see divert_to_gas_station()) instead of being
+    -- double-counted through the normal completed-trip-miles summing, since
+    -- a cancelled trip never satisfies that logic's own arrival condition.
+    cancelled_at TIMESTAMP
 );

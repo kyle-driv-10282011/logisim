@@ -246,9 +246,17 @@ user-specified simulated time).
 | `zones_snapshot`         | jsonb             | the path's `road_zones` as they existed the moment this trip was created — frozen so a zone added/removed later doesn't retroactively contradict a schedule already computed for a trip in progress |
 | `realized_seconds`       | jsonb             | cumulative **real** seconds to reach each `route` point *for this specific trip*, computed once at trip creation from `distances_miles` and the traffic model (`build_trip_schedule()` — see [Position and speed](#position-and-speed)) |
 | `realized_duration_seconds` | double precision | `realized_seconds[-1]` — this trip's actual total drive time under the traffic model in effect when it started |
+| `starting_fuel_gallons`  | double precision  | the vehicle's `fuel_gallons` at the moment this trip started, frozen the same way `traffic_bias`/`zones_snapshot` are — see [Fuel](#fuel) |
+| `roadside_refuel_count`  | integer           | how many roadside refuels (`POST /api/vehicles/{id}/roadside-refuel`) have topped this trip back up after running dry mid-route — see [Fuel](#fuel) |
+| `paused_seconds`         | double precision  | real schedule-time "refunded" by a roadside refuel, so time spent STRANDED doesn't count as progress — see [Fuel](#fuel) |
+| `resume_destination_place_id` | integer FK `places(id)`, nullable | set when this trip is a detour to a gas station — the place the vehicle was actually trying to reach before the detour, so arriving at the station automatically starts a new trip onward to here — see [Divert to gas station](#divert-to-gas-station) |
+| `cancelled_at`           | timestamp, nullable | set when a trip is abandoned mid-route for a diversion instead of ever arriving — excluded from every "is this vehicle currently on a trip" check, the same way an arrived trip is — see [Divert to gas station](#divert-to-gas-station) |
 
 A vehicle can only have one trip active at a time (enforced at the
-application level in `POST /api/trips`, not a DB constraint).
+application level in `POST /api/trips`, not a DB constraint) — a cancelled
+trip doesn't count as active, so diverting immediately frees the vehicle up
+for the replacement trip `POST /api/vehicles/{id}/divert-to-gas-station`
+starts in its place.
 
 ## How the simulation works
 
@@ -470,10 +478,90 @@ path dropdown for starting a trip (`renderPathSelectForTripVehicle()` in
 `current_location`, with a hint to create one in the Paths tab if none
 exist yet — mirroring the backend's own restriction rather than letting
 the user pick an invalid path and only find out on submit. Clicking a
-vehicle (in My Vehicles, selecting it to start a trip, or in All
-Vehicles, which is otherwise read-only) pans the map to
+vehicle to select it (in My Vehicles) pans the map to
 `current_lat`/`current_lng`; a `DRIVING` vehicle instead pans to its live
 trip position (`selectVehicle()`), same as before.
+
+### Fuel
+
+Every vehicle has a tank (`vehicle_models.fuel_tank_gallons`, configured
+per template) that drains at `distance / mpg` as it drives and is tracked
+per-vehicle (`vehicles.fuel_gallons`). Starting a trip doesn't check
+whether there's enough fuel for the whole route — a vehicle is allowed to
+depart under-fueled and simply run dry partway there.
+
+**Running out mid-route.** `resolve_trip_progress()` treats a trip's total
+fuel budget (`starting_fuel_gallons` plus one more tank per roadside refuel
+used, see below) as a fixed distance the vehicle can cover
+(`gallons × mpg`). If that's less than the route's full length, the
+vehicle's status becomes `STRANDED` at exactly that distance — frozen
+there (not still trying to creep forward) until it's refueled one way or
+another. Because gallons are consumed by distance, not time, this is
+independent of traffic/speed and computed the same way regardless of how
+long the vehicle sits there in real time.
+
+**Roadside refuel.** `POST /api/vehicles/{id}/roadside-refuel` recovers a
+`STRANDED` vehicle in place — no gas station required, since there isn't
+one out on the open road — for a flat placeholder fee
+(`ROADSIDE_ASSIST_FEE_USD`, not actually charged anywhere; there's no
+money/budget system yet). It tops the tank back up (`roadside_refuel_count
++= 1`, extending the trip's total range) and "refunds" the real schedule
+time spent stuck (`trips.paused_seconds`) so the trip resumes from where it
+stopped instead of jumping ahead by however long the user took to notice.
+
+**Refueling at a real station.** `POST /api/vehicles/{id}/refuel` only
+works for a `READY` vehicle sitting at a place with an entry in
+[`gas_prices`](#gas_prices) (i.e. a real gas station on the Gas Prices
+map) — it just tops the tank to full.
+
+### Divert to gas station
+
+`POST /api/vehicles/{id}/divert-to-gas-station` lets a `DRIVING` vehicle
+proactively pull off for gas before it ever runs dry, rather than waiting
+to strand and calling roadside assistance.
+
+**Picking a station.** `GET /api/vehicles/{id}/gas-station-ahead` (polled
+by the frontend on the same 7-second timer as the [nearby city
+lookup](#nearby-city-lookup), for whichever vehicle is selected) reports
+the best candidate via `find_gas_station_ahead()`: only the *remaining*
+(not-yet-driven) portion of the current route is considered, so a station
+behind the vehicle is never offered — no backtracking. Among stations
+within `MAX_GAS_STATION_DETOUR_MILES` (15) of that remaining route, it
+picks whichever is physically closest to the vehicle's live position right
+now (not whichever comes up soonest along the original route), since the
+diversion itself is a fresh, direct, OSRM-routed drive from here to the
+station, not a continuation of the original one. The frontend only shows
+the "Divert to gas station" button (next to "Send roadside fuel" in the In
+Route panel) when this returns a station.
+
+**Making the detour.** `POST /api/vehicles/{id}/divert-to-gas-station`:
+
+1. Cancels the vehicle's current trip (`trips.cancelled_at`) rather than
+   letting it run to completion — a cancelled trip is excluded from every
+   "is this vehicle currently on a trip" check the same way an arrived one
+   is, and the distance already covered on it is folded directly into
+   `vehicles.starting_mileage` (the odometer baseline) since a cancelled
+   trip never satisfies the normal completed-trip-miles summing.
+2. Turns the vehicle's exact live position into a place
+   (`find_or_create_place_by_coords()`) — a reverse geocode, since only
+   coordinates are known, not a typed description.
+3. Routes there to the gas station (OSRM, same as any other path) and
+   starts a new trip, remembering the place the vehicle was *actually*
+   trying to reach (`resume_destination_place_id`) — its previous
+   destination, or, if it was already mid-detour, whatever that detour was
+   itself trying to get back to.
+
+All of this needs live geocoding/routing calls, so — like creating any
+other path — it runs as a background job (`job_executor`), and the
+frontend polls it the same way `createPath()` does.
+
+**Resuming automatically.** Once that trip actually arrives at the gas
+station, `settle_arrived_vehicles()` recognizes `resume_destination_place_id`
+is set, tops the tank back up to full (it's a real gas station — that's
+why it was chosen), and hands off to `_run_resume_trip_job()` to route
+onward from the station to that remembered destination and start a new
+trip — automatically continuing the original drive without the user
+having to re-plan it.
 
 ### Nearby city lookup
 
@@ -493,9 +581,13 @@ All endpoints are on the `backend` service, default `http://localhost:5000`.
 | `GET /api/settings`             | Current game clock: `{time_multiplier, game_time}` |
 | `PUT /api/settings`             | Change `time_multiplier`. Body: `{time_multiplier}` — re-anchors the game clock at its current value so it speeds up/slows down rather than jumping. 409 if any vehicle is currently in route |
 | `POST /api/vehicles`            | Create a vehicle. Body: `{vehicle_model_id, current_location, starting_mileage?}` — `name` is server-generated (`"<year> <brand> <model> <n>"`), not part of the request. Response includes the generated `name`, resolved `vehicle_model`, and resolved `current_lat`/`current_lng`. 400 if `current_location` doesn't resolve |
-| `GET /api/vehicles`             | List vehicles with computed `status` (`READY`/`DRIVING`/`SOLD`), each vehicle's `vehicle_model`, and `current_location`/`current_lat`/`current_lng` derived from its place (settled first — see [Vehicle location](#vehicle-location)). Defaults to the current fleet (`sold = false`, "My Vehicles"); `?include_sold=true` returns full history. No frontend tab currently surfaces the latter — the frontend only ever calls this without the flag |
+| `GET /api/vehicles`             | List vehicles with computed `status` (`READY`/`DRIVING`/`STRANDED`/`SOLD`), each vehicle's `vehicle_model`, `fuel_gallons`, and `current_location`/`current_lat`/`current_lng` derived from its place (settled first — see [Vehicle location](#vehicle-location)). Defaults to the current fleet (`sold = false`, "My Vehicles"); `?include_sold=true` returns full history. No frontend tab currently surfaces the latter — the frontend only ever calls this without the flag |
 | `POST /api/vehicles/{id}/sell`  | Mark a vehicle sold (soft-delete). 409 if already sold or currently on a trip |
 | `DELETE /api/vehicles/{id}`     | Permanently delete a vehicle (cascades its trips) — distinct from selling; not used by the frontend |
+| `POST /api/vehicles/{id}/refuel` | Top off a `READY` vehicle's tank to full. 409 if it's currently on a trip, or if its current place has no [`gas_prices`](#gas_prices) entry — see [Fuel](#fuel) |
+| `POST /api/vehicles/{id}/roadside-refuel` | Recover a `STRANDED` vehicle in place, no gas station required. Response includes `cost_usd` (a flat placeholder fee, not actually charged anywhere). 409 if the vehicle isn't currently `STRANDED` — see [Fuel](#fuel) |
+| `GET /api/vehicles/{id}/gas-station-ahead` | The closest gas station on the *remaining* portion of a `DRIVING` vehicle's route, if any (`{station: null}` otherwise) — see [Divert to gas station](#divert-to-gas-station) |
+| `POST /api/vehicles/{id}/divert-to-gas-station` | Detour a `DRIVING` vehicle to that station now; automatically resumes to its original destination once refueled there. 202, returns a `job_id` to poll (`GET /api/jobs/{id}`) — see [Divert to gas station](#divert-to-gas-station) |
 | `POST /api/vehicle-models`       | Create a hauling-vehicle-model catalog entry. Body: `{year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, image?}` |
 | `GET /api/vehicle-models`        | List all vehicle models |
 | `DELETE /api/vehicle-models/{id}`| Delete a vehicle model. 409 if any vehicle still references it |
@@ -578,7 +670,10 @@ side panel since they don't all fit as a row:
   clickable to select/edit and with its own delete button.
 - **In Route** — list of currently-driving vehicles; selecting one follows
   it on the map and shows status, nearest city, position, current road,
-  speed, and time remaining.
+  speed, time remaining, and fuel level. A `STRANDED` vehicle gets a "Send
+  roadside fuel" button; a `DRIVING` one gets a "Divert to gas station"
+  button whenever one's within range ahead on the route (see
+  [Fuel](#fuel) and [Divert to gas station](#divert-to-gas-station)).
 - **Gas Prices** — a persistent map overlay, not a selection-driven marker
   like the Places tab: every priced place gets its own always-on circle
   marker, color-graded green (cheapest currently loaded) to red (priciest)

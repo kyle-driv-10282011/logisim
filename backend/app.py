@@ -16,6 +16,7 @@ import bisect
 import csv
 import io
 import logging
+import math
 import random
 import re
 import threading
@@ -196,15 +197,55 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
     # schedule-time refunded by a roadside refuel - see resolve_trip_progress())
     # as well as elapsed real time, so a vehicle currently STRANDED (out of
     # fuel, paused_seconds not yet advanced) never gets mistaken for arrived
-    # no matter how long it sits there in real time. A single bulk UPDATE
-    # covers every vehicle at once rather than looping per vehicle;
-    # IS DISTINCT FROM skips vehicles already settled at that destination so
-    # this is cheap to call on every read.
+    # no matter how long it sits there in real time. A cancelled trip (see
+    # divert_to_gas_station()) never counts as arrived either, no matter how
+    # much real time passes - it's excluded here the same as everywhere else
+    # a trip's "still in progress" state is checked.
+    #
+    # A trip with resume_destination_place_id set is a detour to a gas
+    # station - arriving there also means auto-refueling (it's a real gas
+    # station, that's why it was chosen) and kicking off the next leg back
+    # toward wherever the vehicle actually still needs to go
+    # (_run_resume_trip_job()). That job needs a live OSRM/geocoding call, so
+    # it can't run inline here - this only detects the handful of vehicles
+    # settling into a gas station on this call and hands them off to
+    # job_executor. Detected before the bulk UPDATE (while place_id still
+    # differs from the destination) so it fires exactly once per arrival,
+    # never again once that same vehicle is already settled there.
+    #
+    cur.execute(
+        """
+        SELECT v.id, p.destination_place_id, t.resume_destination_place_id
+        FROM vehicles v
+        JOIN trips t ON t.id = (
+            SELECT t2.id FROM trips t2
+            WHERE t2.vehicle_id = v.id
+            ORDER BY t2.started_at DESC
+            LIMIT 1
+        )
+        JOIN paths p ON p.id = t.path_id
+        WHERE t.cancelled_at IS NULL
+        AND t.resume_destination_place_id IS NOT NULL
+        AND (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) >= t.realized_duration_seconds
+        AND v.place_id IS DISTINCT FROM p.destination_place_id
+        """,
+        (time_multiplier,)
+    )
+
+    pending_resumes = cur.fetchall()
+
+    #
+    # A single bulk UPDATE covers every vehicle at once rather than looping
+    # per vehicle; IS DISTINCT FROM skips vehicles already settled at that
+    # destination so this is cheap to call on every read.
     #
     # fuel_gallons is settled in the same statement: the tank's contents at
     # arrival are whatever this trip's total fuel budget (starting_fuel_gallons
     # plus one tank per roadside refuel used) had left once the full route's
-    # distance was paid for in gallons.
+    # distance was paid for in gallons. A gas-station arrival (one of
+    # pending_resumes above) gets topped back up to full separately, right
+    # after - it wouldn't make sense to still show it arriving low on the
+    # very trip that was diverted there specifically to refuel.
     #
     cur.execute(
         """
@@ -225,13 +266,32 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
             LIMIT 1
         )
         AND t.vehicle_id = v.id
+        AND t.cancelled_at IS NULL
         AND (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) >= t.realized_duration_seconds
         AND v.place_id IS DISTINCT FROM p.destination_place_id
         """,
         (time_multiplier,)
     )
 
+    if pending_resumes:
+
+        cur.execute(
+            """
+            UPDATE vehicles v
+            SET fuel_gallons = vm.fuel_tank_gallons
+            FROM vehicle_models vm
+            WHERE vm.id = v.vehicle_model_id
+            AND v.id = ANY(%s)
+            """,
+            ([row[0] for row in pending_resumes],)
+        )
+
     conn.commit()
+
+    for vehicle_id, gas_station_place_id, resume_destination_place_id in pending_resumes:
+
+        job_id = create_job("resume_trip_after_refuel")
+        job_executor.submit(_run_resume_trip_job, job_id, vehicle_id, gas_station_place_id, resume_destination_place_id)
 
 
 def is_rush_hour(effective_dt):
@@ -616,6 +676,49 @@ def find_or_create_place(cur, description):
 
 
 #
+# The divert-to-gas-station equivalent of find_or_create_place() - the
+# vehicle's live position mid-route is already a set of real coordinates,
+# not free text, so there's no forward-geocode step at all here, just the
+# same dedup-by-rounded-coordinates check and a reverse geocode (full
+# addressdetails, unlike the plain-string reverse_geocode() above) to give
+# the new place a human-readable label and the same continent/country/
+# state/city breakdown every other place gets.
+#
+def find_or_create_place_by_coords(cur, lat, lng):
+
+    lat = round_coord(lat)
+    lng = round_coord(lng)
+
+    cur.execute("SELECT id FROM places WHERE lat = %s AND lng = %s", (lat, lng))
+
+    existing = cur.fetchone()
+
+    if existing is not None:
+        return existing[0]
+
+    geocode_throttle_gate()
+    location = reverse_geocode_limited((lat, lng), zoom=14, language="en")
+
+    raw_address = location.raw.get("address", {}) if location is not None else {}
+    continent, country, state, city = extract_address_components(raw_address)
+
+    label = city or country
+    description = f"En route near {label}" if label else "En route"
+    address = location.address if location is not None else description
+
+    cur.execute(
+        """
+        INSERT INTO places (description, address, lat, lng, continent, country, state, city)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """,
+        (description, address, lat, lng, continent, country, state, city)
+    )
+
+    return cur.fetchone()[0]
+
+
+#
 # Reverse-geocoding the same rounded coordinates always used to mean the
 # same real-world place, so caching by (rounded lat, rounded lng) avoids
 # re-hitting Nominatim's rate-limited endpoint on every poll of the same
@@ -745,6 +848,121 @@ def interpolate_seconds_at_distance(distances_miles, realized_seconds, target_di
     fraction = 0 if d1 == d0 else (target_distance_miles - d0) / (d1 - d0)
 
     return t0 + (t1 - t0) * fraction
+
+
+#
+# The distance-domain twin of the segment interpolation derive_position()
+# does in the time domain - used by find_gas_station_ahead() to turn a
+# trip's current cumulative distance (from resolve_trip_progress) into an
+# actual lat/lon, since that's all it has to work with (no elapsed_seconds
+# of its own to bisect realized_seconds with).
+#
+def interpolate_position_at_distance(route, distances_miles, target_distance_miles):
+
+    segment_index = bisect.bisect_right(distances_miles, target_distance_miles) - 1
+    segment_index = max(0, min(segment_index, len(distances_miles) - 2))
+
+    d0, d1 = distances_miles[segment_index], distances_miles[segment_index + 1]
+    fraction = 0 if d1 == d0 else (target_distance_miles - d0) / (d1 - d0)
+
+    lat1, lon1 = route[segment_index]
+    lat2, lon2 = route[segment_index + 1]
+
+    return [lat1 + (lat2 - lat1) * fraction, lon1 + (lon2 - lon1) * fraction]
+
+
+EARTH_RADIUS_MILES = 3958.7613
+
+
+def haversine_miles(lat1, lon1, lat2, lon2):
+
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    d_phi = math.radians(lat2 - lat1)
+    d_lambda = math.radians(lon2 - lon1)
+
+    a = math.sin(d_phi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda / 2) ** 2
+
+    return 2 * EARTH_RADIUS_MILES * math.asin(math.sqrt(a))
+
+
+#
+# How far off the actual route a gas station can be and still count as
+# "near" it for find_gas_station_ahead() below - a station 15 miles from
+# the nearest point on the remaining route is a real detour; one much
+# farther than that almost certainly isn't meant for this stretch of road.
+#
+MAX_GAS_STATION_DETOUR_MILES = 15
+
+
+#
+# Picks the gas station to offer for POST /api/vehicles/{id}/divert-to-gas-station -
+# never one behind the vehicle (see the ahead_route slice below, which
+# only ever considers the remaining, not-yet-driven part of the route), and
+# among the eligible ones, whichever is physically closest to the vehicle's
+# current position right now, not whichever comes up soonest along the
+# route - the diversion itself is a fresh, direct (OSRM-routed) drive from
+# here to the station, not a continuation of the current route, so straight-
+# line distance from here is what actually determines how long that detour
+# takes.
+#
+def find_gas_station_ahead(cur, route, distances_miles, current_distance_miles):
+
+    cur.execute(
+        """
+        SELECT p.id, p.description, p.lat, p.lng, g.price_per_gallon
+        FROM gas_prices g
+        JOIN places p ON p.id = g.place_id
+        """
+    )
+
+    stations = cur.fetchall()
+
+    if not stations:
+        return None
+
+    current_lat, current_lng = interpolate_position_at_distance(route, distances_miles, current_distance_miles)
+
+    ahead_start_index = bisect.bisect_left(distances_miles, current_distance_miles)
+    ahead_route = route[ahead_start_index:]
+
+    if not ahead_route:
+        return None
+
+    best = None
+    best_distance_miles = None
+
+    for place_id, description, lat, lng, price_per_gallon in stations:
+
+        nearest_gap_miles = min(
+            haversine_miles(lat, lng, point_lat, point_lng)
+            for point_lat, point_lng in ahead_route
+        )
+
+        if nearest_gap_miles > MAX_GAS_STATION_DETOUR_MILES:
+            continue
+
+        distance_from_vehicle_miles = haversine_miles(current_lat, current_lng, lat, lng)
+
+        if best_distance_miles is None or distance_from_vehicle_miles < best_distance_miles:
+
+            best_distance_miles = distance_from_vehicle_miles
+
+            best = {
+
+                "place_id": place_id,
+
+                "description": description,
+
+                "lat": lat,
+
+                "lng": lng,
+
+                "price_per_gallon": price_per_gallon,
+
+                "distance_miles": round(distance_from_vehicle_miles, 1)
+            }
+
+    return best
 
 
 #
@@ -1171,6 +1389,13 @@ def run_migrations():
     cur.execute("ALTER TABLE places ADD COLUMN IF NOT EXISTS country TEXT")
     cur.execute("ALTER TABLE places ADD COLUMN IF NOT EXISTS state TEXT")
     cur.execute("ALTER TABLE places ADD COLUMN IF NOT EXISTS city TEXT")
+
+    #
+    # Divert-to-gas-station support - additive/nullable, safe against both a
+    # pre-existing DB and a fresh one (where init.sql already created them).
+    #
+    cur.execute("ALTER TABLE trips ADD COLUMN IF NOT EXISTS resume_destination_place_id INTEGER REFERENCES places(id)")
+    cur.execute("ALTER TABLE trips ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP")
 
     conn.commit()
 
@@ -1730,7 +1955,8 @@ def update_settings(req: UpdateSettingsRequest):
         """
         SELECT 1
         FROM trips t
-        WHERE (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) < t.realized_duration_seconds
+        WHERE t.cancelled_at IS NULL
+        AND (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) < t.realized_duration_seconds
         LIMIT 1
         """,
         (time_multiplier,)
@@ -1973,6 +2199,7 @@ def fetch_live_trip_progress(cur, vehicle_ids, time_multiplier):
         JOIN vehicles v ON v.id = t.vehicle_id
         JOIN vehicle_models vs ON vs.id = v.vehicle_model_id
         WHERE t.vehicle_id = ANY(%s)
+        AND t.cancelled_at IS NULL
         ORDER BY t.vehicle_id, t.started_at DESC
         """,
         (vehicle_ids,)
@@ -2040,6 +2267,7 @@ def list_vehicles(include_sold: bool = False):
                     SELECT 1
                     FROM trips t
                     WHERE t.vehicle_id = v.id
+                    AND t.cancelled_at IS NULL
                     AND (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) < t.realized_duration_seconds
                 ) THEN 'DRIVING'
                 ELSE 'READY'
@@ -2050,7 +2278,8 @@ def list_vehicles(include_sold: bool = False):
             SELECT t.vehicle_id, SUM((p.distances_miles ->> -1)::double precision) AS miles
             FROM trips t
             JOIN paths p ON p.id = t.path_id
-            WHERE (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) >= t.realized_duration_seconds
+            WHERE t.cancelled_at IS NULL
+            AND (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) >= t.realized_duration_seconds
             GROUP BY t.vehicle_id
         ) ctm ON ctm.vehicle_id = v.id
         {"" if include_sold else "WHERE v.sold = FALSE"}
@@ -2148,6 +2377,7 @@ def sell_vehicle(id: int):
         SELECT 1
         FROM trips t
         WHERE t.vehicle_id = %s
+        AND t.cancelled_at IS NULL
         AND (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) < t.realized_duration_seconds
         """,
         (id, time_multiplier)
@@ -2210,6 +2440,7 @@ def refuel_vehicle(id: int):
         SELECT 1
         FROM trips t
         WHERE t.vehicle_id = %s
+        AND t.cancelled_at IS NULL
         AND (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) < t.realized_duration_seconds
         """,
         (id, time_multiplier)
@@ -2286,6 +2517,7 @@ def roadside_refuel_vehicle(id: int):
         JOIN vehicles v ON v.id = t.vehicle_id
         JOIN vehicle_models vs ON vs.id = v.vehicle_model_id
         WHERE t.vehicle_id = %s
+        AND t.cancelled_at IS NULL
         ORDER BY t.started_at DESC
         LIMIT 1
         """,
@@ -2348,6 +2580,172 @@ def roadside_refuel_vehicle(id: int):
 
         "cost_usd": ROADSIDE_ASSIST_FEE_USD
     }
+
+
+
+#
+# Shared by GET /api/vehicles/{id}/gas-station-ahead and POST
+# /api/vehicles/{id}/divert-to-gas-station - both need the vehicle's
+# current (non-cancelled) trip's route geometry plus its live
+# resolve_trip_progress(), so the two endpoints can never disagree about
+# where the vehicle actually is or whether it's genuinely DRIVING (as
+# opposed to READY, STRANDED, or already ARRIVED) right now.
+#
+def fetch_active_trip_for_diversion(cur, vehicle_id, time_multiplier):
+
+    cur.execute(
+        """
+        SELECT
+            t.id, p.route, p.distances_miles, p.max_speeds_mph,
+            t.realized_seconds, t.realized_duration_seconds, t.starting_fuel_gallons,
+            t.roadside_refuel_count, t.paused_seconds, t.resume_destination_place_id,
+            p.destination_place_id, vm.mpg, vm.fuel_tank_gallons,
+            EXTRACT(EPOCH FROM (NOW() - t.started_at))
+        FROM trips t
+        JOIN paths p ON p.id = t.path_id
+        JOIN vehicles v ON v.id = t.vehicle_id
+        JOIN vehicle_models vm ON vm.id = v.vehicle_model_id
+        WHERE t.vehicle_id = %s
+        AND t.cancelled_at IS NULL
+        ORDER BY t.started_at DESC
+        LIMIT 1
+        """,
+        (vehicle_id,)
+    )
+
+    row = cur.fetchone()
+
+    if row is None:
+        return None
+
+    (
+        trip_id, route, distances_miles, max_speeds_mph,
+        realized_seconds, realized_duration_seconds, starting_fuel_gallons,
+        roadside_refuel_count, paused_seconds, resume_destination_place_id,
+        destination_place_id, mpg, fuel_tank_gallons, elapsed_real_seconds
+    ) = row
+
+    progress = resolve_trip_progress(
+        distances_miles, realized_seconds, realized_duration_seconds,
+        mpg, fuel_tank_gallons, starting_fuel_gallons, roadside_refuel_count, paused_seconds,
+        float(elapsed_real_seconds), time_multiplier
+    )
+
+    return {
+        "trip_id": trip_id,
+        "route": route,
+        "distances_miles": distances_miles,
+        "resume_destination_place_id": resume_destination_place_id,
+        "destination_place_id": destination_place_id,
+        "progress": progress
+    }
+
+
+#
+# Polled by the frontend for whichever vehicle is currently selected in the
+# In Route tab (same cadence as its city lookup - see GET
+# /api/vehicles/{id}/city) to decide whether to show a "Divert to gas
+# station" button at all, and what to label it. {"station": null} (not a
+# 404) whenever there's nothing to offer - not driving, or nothing within
+# MAX_GAS_STATION_DETOUR_MILES of the remaining route - since that's a
+# perfectly normal thing for this to report, not an error.
+#
+@app.get("/api/vehicles/{id}/gas-station-ahead")
+def gas_station_ahead(id: int):
+
+    conn = db()
+    cur = conn.cursor()
+
+    time_multiplier, _ = get_settings(conn, cur)
+
+    settle_arrived_vehicles(conn, cur, time_multiplier)
+
+    context = fetch_active_trip_for_diversion(cur, id, time_multiplier)
+
+    if context is None or context["progress"]["status"] != "DRIVING":
+        cur.close()
+        conn.close()
+        return {"station": None}
+
+    station = find_gas_station_ahead(
+        cur, context["route"], context["distances_miles"], context["progress"]["distance_miles"]
+    )
+
+    cur.close()
+    conn.close()
+
+    return {"station": station}
+
+
+#
+# Diverts a DRIVING vehicle to the gas station GET .../gas-station-ahead
+# would offer right now, remembering wherever it was actually headed (its
+# current destination, or - if it's already mid-detour - whatever it was
+# trying to get to before that) so the trip there resumes automatically
+# once the vehicle has refueled (see settle_arrived_vehicles()). The actual
+# work (cancelling the current trip, reverse-geocoding the live position,
+# routing to the station) needs live network calls, so it runs in
+# job_executor like every other geocode/route operation - this only
+# validates and hands off.
+#
+@app.post("/api/vehicles/{id}/divert-to-gas-station", status_code=202)
+def divert_to_gas_station(id: int):
+
+    conn = db()
+    cur = conn.cursor()
+
+    time_multiplier, _ = get_settings(conn, cur)
+
+    settle_arrived_vehicles(conn, cur, time_multiplier)
+
+    cur.execute("SELECT sold FROM vehicles WHERE id=%s", (id,))
+
+    row = cur.fetchone()
+
+    if row is None:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=404, detail="Vehicle not found")
+
+    if row[0]:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=409, detail="Vehicle has been sold")
+
+    context = fetch_active_trip_for_diversion(cur, id, time_multiplier)
+
+    if context is None or context["progress"]["status"] != "DRIVING":
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=409, detail="Vehicle is not currently driving")
+
+    station = find_gas_station_ahead(
+        cur, context["route"], context["distances_miles"], context["progress"]["distance_miles"]
+    )
+
+    if station is None:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=404, detail="No gas station found ahead on this route")
+
+    resume_destination_place_id = context["resume_destination_place_id"] or context["destination_place_id"]
+
+    lat, lng = interpolate_position_at_distance(
+        context["route"], context["distances_miles"], context["progress"]["distance_miles"]
+    )
+
+    cur.close()
+    conn.close()
+
+    job_id = create_job("divert_to_gas_station")
+
+    job_executor.submit(
+        _run_divert_job, job_id, id, context["trip_id"], lat, lng,
+        context["progress"]["distance_miles"], context["progress"]["fuel_gallons_remaining"] or 0.0,
+        station["place_id"], resume_destination_place_id
+    )
+
+    return {"job_id": job_id, "station": station}
 
 
 
@@ -2414,6 +2812,7 @@ def vehicle_city(id: int):
         JOIN vehicles v ON v.id = t.vehicle_id
         JOIN vehicle_models vs ON vs.id = v.vehicle_model_id
         WHERE t.vehicle_id = %s
+        AND t.cancelled_at IS NULL
         AND (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) < t.realized_duration_seconds + %s * %s
         ORDER BY t.started_at DESC
         LIMIT 1
@@ -2975,6 +3374,223 @@ def _build_path_result(origin, destination):
         conn.close()
 
 
+#
+# Shared by _divert_to_gas_station() (current live position -> a chosen gas
+# station) and _resume_trip_after_refuel() (that gas station -> wherever
+# the vehicle actually still needs to go) - both already have real place
+# ids and coordinates for both ends (no free-text geocoding needed, unlike
+# _build_path_result() above), so this only ever does the OSRM routing
+# step, reusing an existing path between the same two places instead of
+# re-routing one that's already been driven.
+#
+def find_or_create_path_between_places(
+    cur, origin_place_id, origin_lat, origin_lng, destination_place_id, destination_lat, destination_lng
+):
+
+    cur.execute(
+        "SELECT id, route, distances_miles, max_speeds_mph FROM paths WHERE origin_place_id = %s AND destination_place_id = %s",
+        (origin_place_id, destination_place_id)
+    )
+
+    existing = cur.fetchone()
+
+    if existing is not None:
+        return existing
+
+    route, distances_miles, max_speeds_mph, road_names, road_name_boundary_miles = road_route(
+        (origin_lat, origin_lng), (destination_lat, destination_lng)
+    )
+
+    cur.execute(
+        """
+        INSERT INTO paths
+        (origin_place_id, destination_place_id, route, distances_miles, max_speeds_mph, road_names, road_name_boundary_miles)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """,
+        (
+            origin_place_id,
+            destination_place_id,
+            json.dumps(route),
+            json.dumps(distances_miles),
+            json.dumps(max_speeds_mph),
+            json.dumps(road_names),
+            json.dumps(road_name_boundary_miles)
+        )
+    )
+
+    path_id = cur.fetchone()[0]
+
+    return path_id, route, distances_miles, max_speeds_mph
+
+
+#
+# Starts a brand-new trip that repositions a vehicle directly to
+# origin_place_id, rather than picking it up from wherever it last
+# settled - used for both legs of a gas-station detour (a divert away from
+# the vehicle's live mid-route position, and the automatic resume once
+# refueled). Neither goes through POST /api/trips's normal same-place
+# invariant (the vehicle's place_id is set here, to origin_place_id,
+# instead of being checked against it) since a live position isn't
+# somewhere the vehicle was ever "settled" the normal way.
+#
+def start_diversion_trip(
+    conn, cur, vehicle_id,
+    origin_place_id, origin_lat, origin_lng,
+    destination_place_id, destination_lat, destination_lng,
+    starting_fuel_gallons, resume_destination_place_id
+):
+
+    path_id, route, distances_miles, max_speeds_mph = find_or_create_path_between_places(
+        cur, origin_place_id, origin_lat, origin_lng, destination_place_id, destination_lat, destination_lng
+    )
+
+    cur.execute("UPDATE vehicles SET place_id = %s WHERE id = %s", (origin_place_id, vehicle_id))
+
+    _, game_time = get_settings(conn, cur)
+
+    zones = fetch_zones_for_paths(cur, [path_id]).get(path_id, [])
+
+    cur.execute(
+        """
+        INSERT INTO trips
+        (vehicle_id, path_id, traffic_base_datetime, traffic_bias, zones_snapshot, starting_fuel_gallons, resume_destination_place_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """,
+        (vehicle_id, path_id, game_time, 1.0, json.dumps(zones), starting_fuel_gallons, resume_destination_place_id)
+    )
+
+    trip_id = cur.fetchone()[0]
+
+    realized_seconds = build_trip_schedule(distances_miles, max_speeds_mph, zones, game_time, 1.0, trip_id)
+    realized_duration_seconds = realized_seconds[-1]
+
+    cur.execute(
+        "UPDATE trips SET realized_seconds = %s, realized_duration_seconds = %s WHERE id = %s",
+        (json.dumps(realized_seconds), realized_duration_seconds, trip_id)
+    )
+
+    return trip_id
+
+
+#
+# The divert action itself - cancels the vehicle's current trip, folds the
+# distance it already covered on that trip into its permanent odometer
+# (starting_mileage), and starts a fresh trip from its live position to the
+# chosen gas station. All the actual geocoding/routing calls this needs
+# (find_or_create_place_by_coords(), road_route() inside
+# start_diversion_trip()) are why this only ever runs inside job_executor
+# (see _run_divert_job() below), not inline in the request that triggers it.
+#
+def _divert_to_gas_station(
+    vehicle_id, current_trip_id, lat, lng,
+    partial_miles_driven, current_fuel_gallons,
+    gas_station_place_id, resume_destination_place_id
+):
+
+    conn = db()
+    cur = conn.cursor()
+
+    try:
+
+        cur.execute("UPDATE trips SET cancelled_at = NOW() WHERE id = %s", (current_trip_id,))
+
+        cur.execute(
+            "UPDATE vehicles SET starting_mileage = starting_mileage + %s, fuel_gallons = %s WHERE id = %s",
+            (partial_miles_driven, current_fuel_gallons, vehicle_id)
+        )
+
+        origin_place_id = find_or_create_place_by_coords(cur, lat, lng)
+
+        station = fetch_places_by_id(cur, [gas_station_place_id])[gas_station_place_id]
+
+        trip_id = start_diversion_trip(
+            conn, cur, vehicle_id,
+            origin_place_id, lat, lng,
+            gas_station_place_id, station["lat"], station["lng"],
+            current_fuel_gallons, resume_destination_place_id
+        )
+
+        conn.commit()
+
+        return {"vehicle_id": vehicle_id, "trip_id": trip_id}
+
+    finally:
+        cur.close()
+        conn.close()
+
+
+def _run_divert_job(
+    job_id, vehicle_id, current_trip_id, lat, lng,
+    partial_miles_driven, current_fuel_gallons,
+    gas_station_place_id, resume_destination_place_id
+):
+
+    update_job(job_id, status="running")
+
+    try:
+        result = _divert_to_gas_station(
+            vehicle_id, current_trip_id, lat, lng,
+            partial_miles_driven, current_fuel_gallons,
+            gas_station_place_id, resume_destination_place_id
+        )
+    except Exception as e:
+        update_job(job_id, status="error", error=getattr(e, "detail", str(e)))
+        return
+
+    update_job(job_id, status="done", result=result)
+
+
+#
+# Triggered from settle_arrived_vehicles() the moment a gas-station detour
+# actually arrives (already auto-refueled by then) - routes onward from the
+# gas station to wherever the vehicle was really trying to get to, exactly
+# like a fresh trip the user started themselves.
+#
+def _resume_trip_after_refuel(vehicle_id, origin_place_id, destination_place_id):
+
+    conn = db()
+    cur = conn.cursor()
+
+    try:
+
+        places_by_id = fetch_places_by_id(cur, [origin_place_id, destination_place_id])
+        origin = places_by_id[origin_place_id]
+        destination = places_by_id[destination_place_id]
+
+        cur.execute("SELECT fuel_gallons FROM vehicles WHERE id = %s", (vehicle_id,))
+        fuel_gallons = cur.fetchone()[0]
+
+        trip_id = start_diversion_trip(
+            conn, cur, vehicle_id,
+            origin_place_id, origin["lat"], origin["lng"],
+            destination_place_id, destination["lat"], destination["lng"],
+            fuel_gallons, None
+        )
+
+        conn.commit()
+
+        return {"vehicle_id": vehicle_id, "trip_id": trip_id}
+
+    finally:
+        cur.close()
+        conn.close()
+
+
+def _run_resume_trip_job(job_id, vehicle_id, origin_place_id, destination_place_id):
+
+    update_job(job_id, status="running")
+
+    try:
+        result = _resume_trip_after_refuel(vehicle_id, origin_place_id, destination_place_id)
+    except Exception as e:
+        update_job(job_id, status="error", error=getattr(e, "detail", str(e)))
+        return
+
+    update_job(job_id, status="done", result=result)
+
+
 def _run_create_path_job(job_id, origin, destination):
 
     update_job(job_id, status="running")
@@ -3353,6 +3969,7 @@ def start_trip(req: StartTripRequest):
         SELECT 1
         FROM trips t
         WHERE t.vehicle_id = %s
+        AND t.cancelled_at IS NULL
         AND (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) < t.realized_duration_seconds
         """,
         (req.vehicle_id, time_multiplier)
@@ -3479,7 +4096,8 @@ def active_trips():
         JOIN vehicles v ON v.id = t.vehicle_id
         JOIN paths p ON p.id = t.path_id
         JOIN vehicle_models vs ON vs.id = v.vehicle_model_id
-        WHERE (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) < t.realized_duration_seconds + %s * %s
+        WHERE t.cancelled_at IS NULL
+        AND (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) < t.realized_duration_seconds + %s * %s
         """,
         (time_multiplier, ARRIVAL_GRACE_SECONDS, time_multiplier)
     )

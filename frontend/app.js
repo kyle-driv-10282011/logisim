@@ -1584,6 +1584,7 @@ function selectVehicle(vehicleId) {
     clearFocus();
 
     currentCity = null;
+    gasStationAhead = null;
 
     if (!alreadySelected) {
 
@@ -1602,6 +1603,7 @@ function selectVehicle(vehicleId) {
 
         showTab("inroute");
         fetchCurrentCity();
+        fetchGasStationAhead();
     }
 
     renderFocusDependentViews();
@@ -1635,6 +1637,37 @@ async function fetchCurrentCity() {
     //
     if (selectedVehicleId === vehicleId) {
         currentCity = { vehicleId, city: data.city };
+        renderInRouteList();
+    }
+}
+
+
+//
+// Same idea (and cadence) as fetchCurrentCity() above - only checked for
+// the one selected vehicle, on its own slow timer, since it involves real
+// geometry work server-side (find_gas_station_ahead()) rather than
+// something cheap enough for the 1s active-trips poll.
+//
+let gasStationAhead = null; // { vehicleId, station }
+
+async function fetchGasStationAhead() {
+
+    const vehicleId = selectedVehicleId;
+
+    if (vehicleId === null) {
+        return;
+    }
+
+    const response = await fetch(API + "/api/vehicles/" + vehicleId + "/gas-station-ahead");
+
+    if (!response.ok) {
+        return;
+    }
+
+    const data = await response.json();
+
+    if (selectedVehicleId === vehicleId) {
+        gasStationAhead = { vehicleId, station: data.station };
         renderInRouteList();
     }
 }
@@ -1769,9 +1802,19 @@ function renderInRouteList() {
             `<button id="roadside-refuel-button" data-id="${trip.vehicle_id}">` +
             `Send roadside fuel ($${ROADSIDE_ASSIST_FEE_USD})</button>`;
     } else {
+
+        const station = gasStationAhead && gasStationAhead.vehicleId === trip.vehicle_id
+            ? gasStationAhead.station
+            : null;
+
         statusLine =
             `Speed: ${Math.round(trip.speed_mph)} mph<br>` +
-            `Arriving in: ${formatHMS(trip.remaining_sim_seconds)}`;
+            `Arriving in: ${formatHMS(trip.remaining_sim_seconds)}` +
+            (station
+                ? `<br><button id="divert-gas-station-button" data-id="${trip.vehicle_id}">` +
+                  `Divert to ${station.description} ($${station.price_per_gallon.toFixed(2)}/gal, ` +
+                  `${station.distance_miles} mi away)</button>`
+                : "");
     }
 
     details.innerHTML =
@@ -1794,6 +1837,38 @@ function renderInRouteList() {
 
     if (roadsideButton) {
         roadsideButton.onclick = () => withSpinner(roadsideButton, () => roadsideRefuel(Number(roadsideButton.dataset.id)));
+    }
+
+    const divertButton = document.getElementById("divert-gas-station-button");
+
+    if (divertButton) {
+        divertButton.onclick = () => withSpinner(divertButton, () => divertToGasStation(Number(divertButton.dataset.id)));
+    }
+}
+
+
+//
+// The diversion itself runs as a background job (it needs a live reverse-
+// geocode and OSRM route, same as creating any other path), so this polls
+// it the same way createPath() does rather than waiting on one long
+// request. Once it resolves, the next 1s active-trips poll just picks up
+// the new leg on its own - no extra handling needed here.
+//
+async function divertToGasStation(vehicleId) {
+
+    const response = await fetch(API + "/api/vehicles/" + vehicleId + "/divert-to-gas-station", { method: "POST" });
+
+    const submitted = await response.json();
+
+    if (!response.ok) {
+        alert(submitted.detail || "Could not divert to gas station");
+        return;
+    }
+
+    try {
+        await pollJob(submitted.job_id);
+    } catch (e) {
+        alert(e.message);
     }
 }
 
@@ -2949,6 +3024,7 @@ setInterval(() => {
 
     if (selectedVehicleId !== null) {
         fetchCurrentCity();
+        fetchGasStationAhead();
     }
 
 }, 7000);
