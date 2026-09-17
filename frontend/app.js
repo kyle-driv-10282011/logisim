@@ -819,12 +819,25 @@ function renderPlaceFilterChips() {
 
     container.innerHTML = "";
 
-    PLACE_FILTER_LEVELS.forEach((level, levelIndex) => {
+    for (const [levelIndex, level] of PLACE_FILTER_LEVELS.entries()) {
+
+        //
+        // Progressive reveal: Country only appears once a Continent chip is
+        // picked, State only once Country is picked, and so on - rather than
+        // dumping all four rows on screen at once before there's any real
+        // narrowing to show. The first level (Continent) has no prior level
+        // to wait on, so it always renders as soon as there's a value for it.
+        //
+        const previousLevel = PLACE_FILTER_LEVELS[levelIndex - 1];
+
+        if (previousLevel && placesFilter[previousLevel] === null) {
+            break;
+        }
 
         const values = distinctValuesAtLevel(levelIndex);
 
         if (values.length === 0) {
-            return;
+            break;
         }
 
         const row = document.createElement("div");
@@ -848,7 +861,7 @@ function renderPlaceFilterChips() {
         }
 
         container.appendChild(row);
-    });
+    }
 }
 
 
