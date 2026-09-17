@@ -873,6 +873,22 @@ function renderPlaceList() {
 
     list.innerHTML = "";
 
+    //
+    // Picking a continent is the entry point into the list, not an optional
+    // narrowing on top of an already-shown flat list - with a lot of saved
+    // places, showing everything by default is exactly the wall of rows the
+    // filter chips exist to avoid.
+    //
+    if (placesFilter.continent === null) {
+
+        const hint = document.createElement("div");
+        hint.className = "list-item-details";
+        hint.textContent = "Pick a continent above to see places.";
+
+        list.appendChild(hint);
+        return;
+    }
+
     for (const place of placesById.values()) {
 
         if (!placePassesAllFilters(place)) {
@@ -1513,7 +1529,12 @@ function renderPathSelectForTripVehicle() {
         select.value = previousValue;
     }
 
-    hint.style.display = matching.length === 0 ? "" : "none";
+    //
+    // Shown whenever a vehicle is selected, not just when it has zero
+    // matching paths - there's always a reason to jump straight to making
+    // another path from here, even if some already exist.
+    //
+    hint.style.display = "";
 
     //
     // showTab("paths") already prefills Origin from whichever vehicle is
@@ -1523,8 +1544,11 @@ function renderPathSelectForTripVehicle() {
     // link lands right where a "create one" click implies: a path form
     // already started from this vehicle's location.
     //
-    hint.innerHTML = `No paths from ${vehicle.current_location} yet - ` +
-        `<a href="#" class="hint-link" onclick="showTab('paths'); return false;">create one in the Paths tab</a>.`;
+    hint.innerHTML = (
+        matching.length === 0
+            ? `No paths from ${vehicle.current_location} yet - `
+            : `Need another path from ${vehicle.current_location}? `
+    ) + `<a href="#" class="hint-link" onclick="showTab('paths'); return false;">create one in the Paths tab</a>.`;
 
     updateStartTripVisibility();
 }
