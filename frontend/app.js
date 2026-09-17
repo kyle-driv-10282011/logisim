@@ -147,6 +147,18 @@ let selectedPlaceId = null;        // place id focused in the Places tab
 let selectedPathId = null;         // path id currently previewed in the Paths tab
 
 //
+// Set by createPath() when it was reached via a vehicle's "create one in
+// the Paths tab" hint (see renderPathSelectForTripVehicle()), so the Paths
+// tab can offer a way back to that vehicle once the new path exists -
+// previewPath() (which createPath() calls right after creating one) clears
+// selectedTripVehicleId via clearFocus(), so this is the only place that
+// remembers where the user came from. null means "didn't come from a
+// vehicle", not just "no path created yet" - cleared by clearFocus() itself
+// so it doesn't linger past whatever focus change happens next.
+//
+let pathCreatedFromVehicleId = null;
+
+//
 // Places tab's continent/country/state/city filter (see renderPlaceFilterChips()
 // below) - null at a level means "no filter chosen there yet". Persists across
 // re-renders (a poll tick, adding/removing a place) so the chosen chips don't
@@ -253,6 +265,7 @@ function clearFocus() {
     selectedVehicleId = null;
     selectedTripVehicleId = null;
     selectedPlaceId = null;
+    pathCreatedFromVehicleId = null;
 
     clearRestingVehicleMarker();
     clearPlaceMarker();
@@ -266,6 +279,7 @@ function renderFocusDependentViews() {
     renderInRouteList();
     renderVehicleList();
     renderPathSelectForTripVehicle();
+    renderBackToVehicleHint();
 }
 
 
@@ -2579,6 +2593,13 @@ function swapOriginDestination() {
 
 async function createPath() {
 
+    //
+    // previewPath() below clears selectedTripVehicleId (via clearFocus()),
+    // so this is captured before that happens - it's how renderBackToVehicleHint()
+    // knows to offer a way back once the new path exists.
+    //
+    const originVehicleId = selectedTripVehicleId;
+
     const response = await fetch(API + "/api/paths", {
 
         method: "POST",
@@ -2615,11 +2636,47 @@ async function createPath() {
 
     previewPath(path);
 
+    pathCreatedFromVehicleId = originVehicleId;
+    renderBackToVehicleHint();
+
     await loadPaths();
     loadPlaces();
 
     document.getElementById("path-select").value = path.id;
     updateStartTripVisibility();
+}
+
+
+//
+// Only shown right after creating a path that was reached from a vehicle's
+// own "create one in the Paths tab" hint (see renderPathSelectForTripVehicle()) -
+// re-validated against the vehicle's current status every render (not just
+// once at creation) since it could have been sold or started driving via
+// another tab/session in the meantime.
+//
+function renderBackToVehicleHint() {
+
+    const hint = document.getElementById("back-to-vehicle-hint");
+
+    const vehicle = pathCreatedFromVehicleId !== null ? vehiclesById.get(pathCreatedFromVehicleId) : null;
+
+    if (!vehicle || vehicle.status !== "READY") {
+        hint.style.display = "none";
+        return;
+    }
+
+    hint.style.display = "";
+
+    hint.innerHTML =
+        `<a href="#" class="hint-link" onclick="backToVehicle(${vehicle.id}); return false;">` +
+        `&larr; Back to ${vehicle.name}</a>`;
+}
+
+
+function backToVehicle(vehicleId) {
+
+    showTab("myvehicles");
+    selectTripVehicle(vehicleId);
 }
 
 
