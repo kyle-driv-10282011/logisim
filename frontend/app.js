@@ -145,6 +145,15 @@ let selectedTripVehicleId = null;  // vehicle id chosen (in the Vehicles tab) to
 let selectedSpecId = null;         // spec id highlighted in the Templates tab (purely visual, no map focus)
 let selectedPlaceId = null;        // place id focused in the Places tab
 let selectedPathId = null;         // path id currently previewed in the Paths tab
+
+//
+// Places tab's continent/country/state/city filter (see renderPlaceFilterChips()
+// below) - null at a level means "no filter chosen there yet". Persists across
+// re-renders (a poll tick, adding/removing a place) so the chosen chips don't
+// reset out from under the user; only cleared by clicking an active chip again.
+//
+const PLACE_FILTER_LEVELS = ["continent", "country", "state", "city"];
+let placesFilter = { continent: null, country: null, state: null, city: null };
 let restingVehicleMarker = null;   // dot marking a clicked non-driving vehicle's resting location
 let placeMarker = null;            // dot marking a clicked place's location
 
@@ -716,13 +725,146 @@ async function loadPlaces() {
 }
 
 
+//
+// A place matches up to (but not including) levelIndex when every filter
+// level *before* it either isn't set or matches this place - i.e. "is this
+// place still a valid candidate for picking a value at levelIndex", not "does
+// it match levelIndex's own filter too". That's what lets the chip row for a
+// level keep showing every sibling value (so you can jump straight from one
+// country to another) instead of only the one currently selected there.
+//
+function placeMatchesFiltersUpTo(place, levelIndex) {
+
+    for (let i = 0; i < levelIndex; i++) {
+
+        const level = PLACE_FILTER_LEVELS[i];
+
+        if (placesFilter[level] !== null && place[level] !== placesFilter[level]) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+
+function placePassesAllFilters(place) {
+    return placeMatchesFiltersUpTo(place, PLACE_FILTER_LEVELS.length);
+}
+
+
+function distinctValuesAtLevel(levelIndex) {
+
+    const level = PLACE_FILTER_LEVELS[levelIndex];
+    const values = new Set();
+
+    for (const place of placesById.values()) {
+
+        if (place[level] && placeMatchesFiltersUpTo(place, levelIndex)) {
+            values.add(place[level]);
+        }
+    }
+
+    return [...values].sort();
+}
+
+
+//
+// If a place backing the currently-selected chip at some level disappeared
+// (deleted, or a filter above it just changed to something incompatible),
+// that level - and everything below it, since their candidates depend on
+// it - falls back to "not filtered" instead of silently showing an empty
+// list with no obvious way out.
+//
+function sanitizePlacesFilter() {
+
+    PLACE_FILTER_LEVELS.forEach((level, levelIndex) => {
+
+        if (placesFilter[level] !== null && !distinctValuesAtLevel(levelIndex).includes(placesFilter[level])) {
+
+            for (let i = levelIndex; i < PLACE_FILTER_LEVELS.length; i++) {
+                placesFilter[PLACE_FILTER_LEVELS[i]] = null;
+            }
+        }
+    });
+}
+
+
+function setPlaceFilter(level, value) {
+
+    const levelIndex = PLACE_FILTER_LEVELS.indexOf(level);
+
+    if (placesFilter[level] === value) {
+
+        placesFilter[level] = null;
+
+    } else {
+
+        placesFilter[level] = value;
+
+        for (let i = levelIndex + 1; i < PLACE_FILTER_LEVELS.length; i++) {
+            placesFilter[PLACE_FILTER_LEVELS[i]] = null;
+        }
+    }
+
+    renderPlaceList();
+}
+
+
+function renderPlaceFilterChips() {
+
+    sanitizePlacesFilter();
+
+    const container = document.getElementById("place-filter-chips");
+
+    container.innerHTML = "";
+
+    PLACE_FILTER_LEVELS.forEach((level, levelIndex) => {
+
+        const values = distinctValuesAtLevel(levelIndex);
+
+        if (values.length === 0) {
+            return;
+        }
+
+        const row = document.createElement("div");
+        row.className = "place-filter-row";
+
+        const label = document.createElement("span");
+        label.className = "place-filter-label";
+        label.textContent = level.charAt(0).toUpperCase() + level.slice(1) + ":";
+        row.appendChild(label);
+
+        for (const value of values) {
+
+            const chip = document.createElement("button");
+
+            chip.type = "button";
+            chip.className = "place-filter-chip" + (placesFilter[level] === value ? " active" : "");
+            chip.textContent = value;
+            chip.onclick = () => setPlaceFilter(level, value);
+
+            row.appendChild(chip);
+        }
+
+        container.appendChild(row);
+    });
+}
+
+
 function renderPlaceList() {
+
+    renderPlaceFilterChips();
 
     const list = document.getElementById("place-list");
 
     list.innerHTML = "";
 
     for (const place of placesById.values()) {
+
+        if (!placePassesAllFilters(place)) {
+            continue;
+        }
 
         const item = document.createElement("div");
 

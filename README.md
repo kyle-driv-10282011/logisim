@@ -139,12 +139,25 @@ with a different name.
 | `description` | text    | free text as typed — an address, or a description like "Target near Minneapolis" |
 | `address`     | text    | Nominatim's own formatted address for `description`, resolved once at creation |
 | `lat` / `lng` | double precision | rounded to `ROUND_DECIMALS`     |
+| `continent` / `country` / `state` / `city` | text | nullable — structured breakdown of the same location, derived from Nominatim's `addressdetails` (`extract_address_components()` in `app.py`; `continent` isn't something Nominatim returns at all, so it's derived from the country code via a static lookup, `CONTINENT_BY_COUNTRY_CODE`). Powers the Places tab's filter chips. A place created before these columns existed starts out `NULL` here and gets backfilled — see below |
 | `created`     | timestamp | default `NOW()`                |
 
 Every free-text location box in the frontend (vehicle starting location,
 path origin/destination) has a `<datalist>` of these places wired to it via
 its `list` attribute, so a saved place can be picked back up by name
 without giving up the ability to type a brand-new description.
+
+A place missing `continent`/`country`/`state`/`city` (any pre-existing row
+from before those columns existed) is backfilled by re-reverse-geocoding its
+own already-known `lat`/`lng` — `_run_backfill_place_locations_job()` in
+`app.py`, triggered from `run_migrations()` at every startup but gated on
+`WHERE country IS NULL`, so it's a no-op once everything's backfilled and
+self-healing (retries) for any place that failed the first time. Like every
+other bulk geocoding operation (see `job_executor` in `app.py`) it runs as a
+background job, tracked in the `jobs` table and pollable via
+`GET /api/jobs/{id}` (or the Background Jobs tab), not inline — backfilling
+a lot of pre-existing places could otherwise take a while at Nominatim's 1
+request/second limit.
 
 ### `gas_prices`
 
@@ -513,7 +526,7 @@ a normal FastAPI exception handler and still carry CORS headers).
 ## Frontend
 
 Plain JS + Leaflet, no build step, a single page (`frontend/app.js`,
-`frontend/index.html`). Six tabs, collapsed into a dropdown menu in the
+`frontend/index.html`). Seven tabs, collapsed into a dropdown menu in the
 side panel since they don't all fit as a row:
 
 - **Templates** — the hauling-spec catalog. Create specs
@@ -523,6 +536,15 @@ side panel since they don't all fit as a row:
   dropping in `frontend/images/2026-Chevy-Express.png` and setting
   `image` to `2026-Chevy-Express.png`) — nginx serves that directory
   alongside the rest of the static frontend, no separate upload endpoint.
+- **Places** — the saved-places bank (see [`places`](#places)). Add one
+  directly, or just let it fill in from vehicle/path locations as they're
+  typed elsewhere. A row of filter chips above the list — one row per
+  continent/country/state/city that's actually present — lets you drill
+  down instead of scrolling a flat list once there are a lot of saved
+  places; clicking a chip narrows the list and the chip rows below it to
+  just what's still reachable, clicking it again clears that level (and
+  anything chosen below it). `renderPlaceFilterChips()`/`setPlaceFilter()`
+  in `app.js`.
 - **My Vehicles** — the current fleet (not sold). Add a vehicle by
   picking a template from a dropdown (required — templates must exist
   first) and giving it a starting location, pick a path and start a trip

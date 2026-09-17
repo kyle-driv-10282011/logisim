@@ -461,16 +461,105 @@ def round_coord(value):
 PLACE_IN_PATTERN = re.compile(r"\s+(?:in|near)\s+", re.IGNORECASE)
 
 
+#
+# Nominatim's addressdetails never includes a continent - only a
+# country_code (ISO 3166-1 alpha-2) - so the Places tab's continent filter
+# has to derive it from a static lookup instead. Covers every currently
+# assigned alpha-2 code; a code not in here (a very new/unusual one) just
+# leaves continent unset rather than failing the whole geocode.
+#
+CONTINENT_BY_COUNTRY_CODE = {
+
+    **{cc: "Africa" for cc in (
+        "DZ", "AO", "BJ", "BW", "BF", "BI", "CV", "CM", "CF", "TD", "KM", "CG", "CD",
+        "CI", "DJ", "EG", "GQ", "ER", "SZ", "ET", "GA", "GM", "GH", "GN", "GW", "KE",
+        "LS", "LR", "LY", "MG", "MW", "ML", "MR", "MU", "YT", "MA", "MZ", "NA", "NE",
+        "NG", "RE", "RW", "SH", "ST", "SN", "SC", "SL", "SO", "ZA", "SS", "SD", "TZ",
+        "TG", "TN", "UG", "EH", "ZM", "ZW"
+    )},
+
+    **{cc: "Antarctica" for cc in ("AQ", "BV", "TF", "HM", "GS")},
+
+    **{cc: "Asia" for cc in (
+        "AF", "AM", "AZ", "BH", "BD", "BT", "BN", "KH", "CN", "CY", "GE", "HK", "IN",
+        "ID", "IR", "IQ", "IL", "JP", "JO", "KZ", "KP", "KR", "KW", "KG", "LA", "LB",
+        "MO", "MY", "MV", "MN", "MM", "NP", "OM", "PK", "PS", "PH", "QA", "SA", "SG",
+        "LK", "SY", "TW", "TJ", "TH", "TL", "TR", "TM", "AE", "UZ", "VN", "YE"
+    )},
+
+    **{cc: "Europe" for cc in (
+        "AX", "AL", "AD", "AT", "BY", "BE", "BA", "BG", "HR", "CZ", "DK", "EE", "FO",
+        "FI", "FR", "DE", "GI", "GR", "GG", "VA", "HU", "IS", "IE", "IM", "IT", "JE",
+        "XK", "LV", "LI", "LT", "LU", "MT", "MD", "MC", "ME", "NL", "MK", "NO", "PL",
+        "PT", "RO", "RU", "SM", "RS", "SK", "SI", "ES", "SJ", "SE", "CH", "UA", "GB"
+    )},
+
+    **{cc: "North America" for cc in (
+        "AI", "AG", "AW", "BS", "BB", "BZ", "BM", "VG", "CA", "KY", "CR", "CU", "CW",
+        "DM", "DO", "SV", "GL", "GD", "GP", "GT", "HT", "HN", "JM", "MQ", "MX", "MS",
+        "NI", "PA", "PR", "BL", "KN", "LC", "MF", "PM", "VC", "SX", "TT", "TC", "US",
+        "VI", "BQ"
+    )},
+
+    **{cc: "Oceania" for cc in (
+        "AS", "AU", "CX", "CC", "CK", "FJ", "PF", "GU", "KI", "MH", "FM", "NR", "NC",
+        "NZ", "NU", "NF", "MP", "PW", "PG", "PN", "WS", "SB", "TK", "TO", "TV", "UM",
+        "VU", "WF"
+    )},
+
+    **{cc: "South America" for cc in (
+        "AR", "BO", "BR", "CL", "CO", "EC", "FK", "GF", "GY", "PY", "PE", "SR", "UY", "VE"
+    )},
+}
+
+
+#
+# Shared by find_or_create_place() (a fresh place, from Nominatim's forward-
+# geocode addressdetails) and _run_backfill_place_locations_job() (an
+# existing place, re-derived from its own lat/lng via reverse geocoding) -
+# both hand this the same shape of raw_address dict Nominatim returns
+# either way, so the two paths can never disagree on how a field falls back.
+#
+def extract_address_components(raw_address):
+
+    country_code = (raw_address.get("country_code") or "").upper()
+
+    continent = CONTINENT_BY_COUNTRY_CODE.get(country_code)
+    country = raw_address.get("country")
+
+    state = (
+        raw_address.get("state")
+        or raw_address.get("region")
+        or raw_address.get("state_district")
+        or raw_address.get("province")
+    )
+
+    #
+    # Same fallback chain as reverse_geocode()'s own city guess below, for
+    # the same reason - not every place has an OSM node tagged "city".
+    #
+    city = (
+        raw_address.get("city")
+        or raw_address.get("town")
+        or raw_address.get("village")
+        or raw_address.get("municipality")
+        or raw_address.get("hamlet")
+        or raw_address.get("county")
+    )
+
+    return continent, country, state, city
+
+
 def geocode_full(place):
 
     normalized_place = PLACE_IN_PATTERN.sub(", ", place)
 
     geocode_throttle_gate()
-    location = geocode_limited(normalized_place)
+    location = geocode_limited(normalized_place, addressdetails=True)
 
     if location is None and normalized_place != place:
         geocode_throttle_gate()
-        location = geocode_limited(place)
+        location = geocode_limited(place, addressdetails=True)
 
     if location is None:
         raise HTTPException(
@@ -478,7 +567,7 @@ def geocode_full(place):
             detail=f"Could not geocode location: {place}"
         )
 
-    return (location.latitude, location.longitude, location.address)
+    return (location.latitude, location.longitude, location.address, location.raw.get("address", {}))
 
 
 #
@@ -500,7 +589,7 @@ def geocode_full(place):
 #
 def find_or_create_place(cur, description):
 
-    lat, lng, address = geocode_full(description)
+    lat, lng, address, raw_address = geocode_full(description)
 
     lat = round_coord(lat)
     lng = round_coord(lng)
@@ -512,9 +601,15 @@ def find_or_create_place(cur, description):
     if existing is not None:
         return existing[0], lat, lng
 
+    continent, country, state, city = extract_address_components(raw_address)
+
     cur.execute(
-        "INSERT INTO places (description, address, lat, lng) VALUES (%s, %s, %s, %s) RETURNING id",
-        (description, address, lat, lng)
+        """
+        INSERT INTO places (description, address, lat, lng, continent, country, state, city)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """,
+        (description, address, lat, lng, continent, country, state, city)
     )
 
     return cur.fetchone()[0], lat, lng
@@ -1032,10 +1127,39 @@ def run_migrations():
         """
     )
 
+    #
+    # Places tab filter-chip support - additive nullable columns, safe
+    # against both a pre-existing DB and a fresh one (where init.sql already
+    # created them).
+    #
+    cur.execute("ALTER TABLE places ADD COLUMN IF NOT EXISTS continent TEXT")
+    cur.execute("ALTER TABLE places ADD COLUMN IF NOT EXISTS country TEXT")
+    cur.execute("ALTER TABLE places ADD COLUMN IF NOT EXISTS state TEXT")
+    cur.execute("ALTER TABLE places ADD COLUMN IF NOT EXISTS city TEXT")
+
     conn.commit()
+
+    cur.execute("SELECT COUNT(*) FROM places WHERE country IS NULL")
+    places_needing_backfill = cur.fetchone()[0]
 
     cur.close()
     conn.close()
+
+    #
+    # A place created before the columns above existed (or one whose
+    # geocode simply didn't resolve a country) has no continent/country/
+    # state/city yet - backfill it from its own already-known lat/lng via
+    # reverse geocoding, same as a live vehicle's city lookup does, just
+    # once per place rather than on every poll. Runs in the same
+    # rate-limited background-job pool as every other bulk geocoding
+    # operation (see job_executor below) rather than blocking startup;
+    # `country IS NULL` makes this safe to re-trigger on every container
+    # restart - already-backfilled places are simply skipped.
+    #
+    if places_needing_backfill:
+
+        job_id = create_job("backfill_place_locations", total=places_needing_backfill)
+        job_executor.submit(_run_backfill_place_locations_job, job_id)
 
 
 #
@@ -1284,6 +1408,9 @@ def fetch_zones_for_paths(cur, path_ids):
     return zones_by_path
 
 
+PLACE_COLUMNS = "id, description, address, lat, lng, continent, country, state, city"
+
+
 def place_dict(row):
 
     return {
@@ -1296,7 +1423,21 @@ def place_dict(row):
 
         "lat": row[3],
 
-        "lng": row[4]
+        "lng": row[4],
+
+        #
+        # Structured breakdown for the Places tab's filter chips - null
+        # until extract_address_components() has run for this row, either
+        # at creation or via the backfill job (see init.sql's `places`
+        # comment).
+        #
+        "continent": row[5],
+
+        "country": row[6],
+
+        "state": row[7],
+
+        "city": row[8]
     }
 
 
@@ -1348,7 +1489,7 @@ def fetch_places_by_id(cur, place_ids):
         return {}
 
     cur.execute(
-        "SELECT id, description, address, lat, lng FROM places WHERE id = ANY(%s)",
+        f"SELECT {PLACE_COLUMNS} FROM places WHERE id = ANY(%s)",
         (place_ids,)
     )
 
@@ -2338,7 +2479,7 @@ def list_places():
     conn = db()
     cur = conn.cursor()
 
-    cur.execute("SELECT id, description, address, lat, lng FROM places ORDER BY description")
+    cur.execute(f"SELECT {PLACE_COLUMNS} FROM places ORDER BY description")
 
     rows = cur.fetchall()
 
@@ -2356,7 +2497,7 @@ def create_place(req: CreatePlaceRequest):
 
     place_id, _, _ = find_or_create_place(cur, req.description)
 
-    cur.execute("SELECT id, description, address, lat, lng FROM places WHERE id=%s", (place_id,))
+    cur.execute(f"SELECT {PLACE_COLUMNS} FROM places WHERE id=%s", (place_id,))
 
     place = place_dict(cur.fetchone())
 
@@ -2473,6 +2614,65 @@ def delete_gas_price(place_id: int):
         raise HTTPException(status_code=404, detail="Gas price not found for that place")
 
     return {"deleted": place_id}
+
+
+#
+# One-time (per place) backfill triggered from run_migrations() - see the
+# `places` table comment in init.sql. Reverse-geocodes each place missing
+# structured location data from its own already-known lat/lng, the same way
+# a live vehicle's city lookup does (reverse_geocode()), just persisted
+# instead of only ever used for a single display string. Runs sequentially
+# through geocode_throttle_gate() like every other geocode call, so this
+# can take a while for a lot of backlogged places - that's fine, it's a
+# background job (GET /api/jobs/{id}) that never blocks the request that
+# triggered it (here, app startup).
+#
+def _run_backfill_place_locations_job(job_id):
+
+    update_job(job_id, status="running")
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("SELECT id, lat, lng FROM places WHERE country IS NULL ORDER BY id")
+    rows = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    updated = 0
+
+    for index, (place_id, lat, lng) in enumerate(rows):
+
+        try:
+
+            geocode_throttle_gate()
+            location = reverse_geocode_limited((lat, lng), zoom=18, language="en")
+
+            raw_address = location.raw.get("address", {}) if location is not None else {}
+            continent, country, state, city = extract_address_components(raw_address)
+
+            conn = db()
+            cur = conn.cursor()
+
+            cur.execute(
+                "UPDATE places SET continent=%s, country=%s, state=%s, city=%s WHERE id=%s",
+                (continent, country, state, city, place_id)
+            )
+
+            conn.commit()
+
+            cur.close()
+            conn.close()
+
+            updated += 1
+
+        except Exception:
+            logger.exception(f"Failed to backfill location for place {place_id}")
+
+        update_job(job_id, progress_current=index + 1)
+
+    update_job(job_id, status="done", result={"updated": updated, "total": len(rows)})
 
 
 #

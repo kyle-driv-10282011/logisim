@@ -78,6 +78,21 @@ CREATE TABLE places (
 
     lng DOUBLE PRECISION NOT NULL,
 
+    -- Structured breakdown of the same location, for the Places tab's
+    -- continent/country/state/city filter chips - extracted from
+    -- Nominatim's addressdetails (extract_address_components() in app.py)
+    -- at creation, or backfilled after the fact for older rows by
+    -- reverse-geocoding their own lat/lng (_run_backfill_place_locations_job()).
+    -- Nullable: a place created before this existed, or one Nominatim
+    -- couldn't break down, just doesn't filter into anything until backfilled.
+    continent TEXT,
+
+    country TEXT,
+
+    state TEXT,
+
+    city TEXT,
+
     created TIMESTAMP DEFAULT NOW()
 );
 
