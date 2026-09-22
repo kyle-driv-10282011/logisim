@@ -193,32 +193,30 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
     #
     # A vehicle's place only updates once its most recent trip has actually
     # arrived - not the instant a trip is created, and not continuously
-    # while driving. "Arrived" now accounts for paused_seconds (real
-    # schedule-time refunded by a roadside refuel - see resolve_trip_progress())
-    # as well as elapsed real time, so a vehicle currently STRANDED (out of
-    # fuel, paused_seconds not yet advanced) never gets mistaken for arrived
-    # no matter how long it sits there in real time. A cancelled trip (see
-    # divert_to_gas_station()) never counts as arrived either, no matter how
-    # much real time passes - it's excluded here the same as everywhere else
-    # a trip's "still in progress" state is checked.
+    # while driving. "Arrived" is decided by calling resolve_trip_progress()
+    # for every vehicle with an unsettled (non-cancelled) trip, the exact
+    # same function GET /api/trips/active and GET /api/vehicles use for
+    # their own live status - not a plain elapsed-time check. That used to
+    # be a plain SQL "has realized_duration_seconds passed" condition, which
+    # ignored fuel entirely: a route longer than the vehicle's tank could
+    # cover would still get marked arrived (with fuel_gallons clamped to
+    # 0 by a GREATEST()) once enough real time passed, instead of staying
+    # STRANDED partway there and waiting on a refuel like it should. Calling
+    # the real progress function here is what keeps that from happening -
+    # a vehicle that's actually STRANDED is simply left alone, exactly like
+    # a vehicle that's simply still DRIVING.
     #
-    # auto_refuel (set explicitly by divert_to_gas_station()/POST
-    # /api/vehicles/{id}/refuel, never inferred from whether the
-    # destination happens to have a gas_prices entry - see the `trips`
-    # comment in init.sql) tops the tank back up to full on arrival. A trip
-    # with resume_destination_place_id set is specifically a detour that
-    # still owes the vehicle a way back to wherever it was actually headed -
-    # arriving there additionally kicks off that next leg
-    # (_run_resume_trip_job()). Both need a live OSRM/geocoding call, so
-    # neither can run inline here - this only detects the handful of
-    # vehicles settling on this call and hands the resumes off to
-    # job_executor. Detected before the bulk UPDATE (while place_id still
-    # differs from the destination) so each fires exactly once per arrival,
-    # never again once that same vehicle is already settled there.
+    # A cancelled trip (see divert_to_gas_station()) never counts as arrived
+    # either, no matter how much real time passes - it's excluded here the
+    # same as everywhere else a trip's "still in progress" state is checked.
     #
     cur.execute(
         """
-        SELECT v.id, p.destination_place_id, t.resume_destination_place_id, t.auto_refuel
+        SELECT
+            v.id, t.id, p.destination_place_id, t.resume_destination_place_id, t.auto_refuel,
+            p.distances_miles, t.realized_seconds, t.realized_duration_seconds,
+            t.starting_fuel_gallons, t.roadside_refuel_count, t.paused_seconds,
+            vm.mpg, vm.fuel_tank_gallons, EXTRACT(EPOCH FROM (NOW() - t.started_at))
         FROM vehicles v
         JOIN trips t ON t.id = (
             SELECT t2.id FROM trips t2
@@ -227,65 +225,63 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
             LIMIT 1
         )
         JOIN paths p ON p.id = t.path_id
+        JOIN vehicle_models vm ON vm.id = v.vehicle_model_id
         WHERE t.cancelled_at IS NULL
-        AND (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) >= t.realized_duration_seconds
         AND v.place_id IS DISTINCT FROM p.destination_place_id
-        AND (t.resume_destination_place_id IS NOT NULL OR t.auto_refuel)
-        """,
-        (time_multiplier,)
+        """
     )
 
-    arriving_rows = cur.fetchall()
-
-    pending_resumes = [
-        (vehicle_id, gas_station_place_id, resume_destination_place_id)
-        for vehicle_id, gas_station_place_id, resume_destination_place_id, _ in arriving_rows
-        if resume_destination_place_id is not None
-    ]
-
-    refueling_vehicle_ids = [
-        vehicle_id for vehicle_id, _, _, auto_refuel in arriving_rows if auto_refuel
-    ]
+    rows = cur.fetchall()
 
     #
-    # A single bulk UPDATE covers every vehicle at once rather than looping
-    # per vehicle; IS DISTINCT FROM skips vehicles already settled at that
-    # destination so this is cheap to call on every read.
+    # auto_refuel (set explicitly by divert_to_gas_station()/POST
+    # /api/vehicles/{id}/refuel, never inferred from whether the
+    # destination happens to have a gas_prices entry - see the `trips`
+    # comment in init.sql) tops the tank back up to full on arrival. A trip
+    # with resume_destination_place_id set is specifically a detour that
+    # still owes the vehicle a way back to wherever it was actually headed -
+    # arriving there additionally kicks off that next leg
+    # (_run_resume_trip_job()), which needs a live OSRM/geocoding call and
+    # so can't run inline here - collected into pending_resumes and handed
+    # to job_executor once every actual arrival below has been committed.
     #
-    # fuel_gallons is settled in the same statement: the tank's contents at
-    # arrival are whatever this trip's total fuel budget (starting_fuel_gallons
-    # plus one tank per roadside refuel used) had left once the full route's
-    # distance was paid for in gallons. An auto_refuel arrival (one of
-    # refueling_vehicle_ids above) gets topped back up to full separately,
-    # right after - it wouldn't make sense to still show it arriving low
+    pending_resumes = []
+    refueling_vehicle_ids = []
+
+    for (
+        vehicle_id, trip_id, destination_place_id, resume_destination_place_id, auto_refuel,
+        distances_miles, realized_seconds, realized_duration_seconds,
+        starting_fuel_gallons, roadside_refuel_count, paused_seconds,
+        mpg, fuel_tank_gallons, elapsed_real_seconds
+    ) in rows:
+
+        progress = resolve_trip_progress(
+            distances_miles, realized_seconds, realized_duration_seconds,
+            mpg, fuel_tank_gallons, starting_fuel_gallons, roadside_refuel_count, paused_seconds,
+            float(elapsed_real_seconds), time_multiplier
+        )
+
+        if progress["status"] != "ARRIVED":
+            continue
+
+        fuel_gallons_remaining = progress["fuel_gallons_remaining"]
+
+        cur.execute(
+            "UPDATE vehicles SET place_id = %s, fuel_gallons = %s WHERE id = %s",
+            (destination_place_id, fuel_gallons_remaining if fuel_gallons_remaining is not None else 0.0, vehicle_id)
+        )
+
+        if auto_refuel:
+            refueling_vehicle_ids.append(vehicle_id)
+
+        if resume_destination_place_id is not None:
+            pending_resumes.append((vehicle_id, destination_place_id, resume_destination_place_id))
+
+    #
+    # An auto_refuel arrival gets topped back up to full separately, right
+    # after settling - it wouldn't make sense to still show it arriving low
     # right where it can refuel.
     #
-    cur.execute(
-        """
-        UPDATE vehicles v
-        SET place_id = p.destination_place_id,
-            fuel_gallons = GREATEST(
-                0.0,
-                t.starting_fuel_gallons + t.roadside_refuel_count * vs.fuel_tank_gallons
-                - (p.distances_miles ->> -1)::double precision / vs.mpg
-            )
-        FROM trips t
-        JOIN paths p ON p.id = t.path_id
-        JOIN vehicle_models vs ON vs.id = (SELECT vehicle_model_id FROM vehicles WHERE id = t.vehicle_id)
-        WHERE t.id = (
-            SELECT t2.id FROM trips t2
-            WHERE t2.vehicle_id = v.id
-            ORDER BY t2.started_at DESC
-            LIMIT 1
-        )
-        AND t.vehicle_id = v.id
-        AND t.cancelled_at IS NULL
-        AND (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) >= t.realized_duration_seconds
-        AND v.place_id IS DISTINCT FROM p.destination_place_id
-        """,
-        (time_multiplier,)
-    )
-
     if refueling_vehicle_ids:
 
         cur.execute(
