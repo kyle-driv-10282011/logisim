@@ -415,6 +415,34 @@
             vertical-align: middle;
         }
 
+        /*
+         * A collapsed-by-default section header (currently just the Gas
+         * Prices tab's station list, which can run into the hundreds after
+         * a bulk import) - click to expand/collapse.
+         */
+        .collapsible-header {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 8px;
+            margin-bottom: 6px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: bold;
+            background: #f5f5f5;
+        }
+
+        .collapsible-header:hover {
+            background: #eee;
+        }
+
+        .collapsible-arrow {
+            font-size: 10px;
+            color: #555;
+        }
+
         #zone-range-label {
             font-weight: bold;
             font-size: 12px;
@@ -629,7 +657,11 @@
             <span class="legend-swatch" style="background:#e03131"></span>priciest
         </div>
 
-        <div id="gasprice-list"></div>
+        <div id="gasprice-list-header" class="collapsible-header" onclick="toggleGasPriceList()">
+            <span class="collapsible-arrow" id="gasprice-list-arrow">&#9656;</span>
+            <span id="gasprice-list-summary">Gas Stations</span>
+        </div>
+        <div id="gasprice-list" style="display:none"></div>
 
         <div class="panel-form">
             <input id="gasprice-description" list="places-list" placeholder="A description (Shell near Minneapolis) or an address">

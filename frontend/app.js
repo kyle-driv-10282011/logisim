@@ -1183,11 +1183,44 @@ function toggleGasPriceOverlay() {
 }
 
 
+//
+// Collapsed by default - a bulk-imported price CSV can run into the
+// hundreds of rows (see the Bulk import form below), which would otherwise
+// dump a wall of list items into the tab the moment it's opened. Nothing
+// resets this back to collapsed on its own - it stays however the user
+// last left it across re-renders (a poll tick, adding/removing a price).
+//
+let gasPriceListExpanded = false;
+
+function toggleGasPriceList() {
+
+    gasPriceListExpanded = !gasPriceListExpanded;
+
+    renderGasPriceList();
+}
+
+
 function renderGasPriceList() {
 
     const list = document.getElementById("gasprice-list");
+    const arrow = document.getElementById("gasprice-list-arrow");
+    const summary = document.getElementById("gasprice-list-summary");
+
+    const count = gasPricesByPlaceId.size;
+
+    summary.textContent = `Gas Stations (${count})`;
+    arrow.innerHTML = gasPriceListExpanded ? "&#9662;" : "&#9656;";
+    list.style.display = gasPriceListExpanded ? "" : "none";
 
     list.innerHTML = "";
+
+    //
+    // Skip building the (potentially hundreds of) row elements at all while
+    // collapsed - no point paying for DOM nodes nobody can see yet.
+    //
+    if (!gasPriceListExpanded) {
+        return;
+    }
 
     const sorted = [...gasPricesByPlaceId.values()].sort((a, b) => a.price_per_gallon - b.price_per_gallon);
 
