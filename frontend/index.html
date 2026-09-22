@@ -591,7 +591,11 @@
             <button onclick="withSpinner(this, createPath)">Create Path</button>
         </div>
 
-        <div id="path-list"></div>
+        <div id="path-list-header" class="collapsible-header" onclick="togglePathList()">
+            <span class="collapsible-arrow" id="path-list-arrow">&#9656;</span>
+            <span id="path-list-summary">Paths</span>
+        </div>
+        <div id="path-list" style="display:none"></div>
 
         <div id="zone-editor" style="display:none">
 

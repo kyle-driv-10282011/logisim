@@ -2149,11 +2149,40 @@ async function loadPaths() {
 }
 
 
+//
+// Collapsed by default, same reasoning (and pattern) as the Gas Prices
+// tab's station list - a fleet that's been driving routes all over the
+// place can build up a long list of paths, and there's no reason to dump
+// all of it into the tab the moment it's opened. previewPath() expands
+// this itself (see below) whenever a path is actually selected - clicking
+// an already-visible row, or a brand-new path just created - so the
+// highlighted selection is never hidden behind a collapsed list.
+//
+let pathListExpanded = false;
+
+function togglePathList() {
+
+    pathListExpanded = !pathListExpanded;
+
+    renderPathList();
+}
+
+
 function renderPathList() {
 
     const list = document.getElementById("path-list");
+    const arrow = document.getElementById("path-list-arrow");
+    const summary = document.getElementById("path-list-summary");
+
+    summary.textContent = `Paths (${pathsById.size})`;
+    arrow.innerHTML = pathListExpanded ? "&#9662;" : "&#9656;";
+    list.style.display = pathListExpanded ? "" : "none";
 
     list.innerHTML = "";
+
+    if (!pathListExpanded) {
+        return;
+    }
 
     for (const path of pathsById.values()) {
 
@@ -2826,6 +2855,7 @@ function previewPath(path) {
     renderFocusDependentViews();
 
     selectedPathId = path.id;
+    pathListExpanded = true;
     renderPathList();
 
     map.fitBounds(L.latLngBounds(path.route));
