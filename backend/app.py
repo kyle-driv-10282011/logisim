@@ -1886,6 +1886,22 @@ class CreatePathRequest(BaseModel):
     origin: str
     destination: str
 
+    #
+    # Set by the frontend when Origin was prefilled from a selected
+    # vehicle's own current place (see showTab()'s vehicle-aware branch in
+    # app.js), rather than typed fresh - takes priority over `origin` and
+    # skips geocoding it entirely. Re-geocoding that vehicle's own already-
+    # resolved address text was the bug this exists to avoid: Nominatim
+    # doesn't reliably return the exact same coordinates for the same query
+    # twice, so re-resolving it could land a hair outside ROUND_DECIMALS of
+    # the vehicle's actual place, silently creating a near-duplicate place
+    # a few meters off - the new path's origin then no longer matches the
+    # vehicle it was created from (coordsMatch() in app.js), so it never
+    # shows up as a path that vehicle can take. NULL for an ordinary path
+    # typed (or picked from the datalist) with no vehicle behind it.
+    #
+    origin_place_id: Optional[int] = None
+
 
 
 class CreatePlaceRequest(BaseModel):
@@ -2378,6 +2394,13 @@ def list_vehicles(include_sold: bool = False):
             # independent reverse_geocode() call that could drift from
             # whatever the Places tab shows for the same spot.
             #
+            # place_id itself is also exposed so the frontend can create a
+            # path FROM this exact place (POST /api/paths's origin_place_id)
+            # without re-geocoding current_location as free text - see that
+            # field's own comment for why that matters.
+            #
+            "place_id": row[3],
+
             "current_location": places_by_id[row[3]]["description"],
 
             "current_lat": places_by_id[row[3]]["lat"],
@@ -3315,14 +3338,31 @@ async def upload_gas_prices(file: UploadFile = File(...)):
 # is only ever called from job_executor (see _run_create_path_job()),
 # which stores it on the job row for the frontend to poll for instead.
 #
-def _build_path_result(origin, destination):
+def _build_path_result(origin, destination, origin_place_id=None):
 
     conn = db()
     cur = conn.cursor()
 
     try:
 
-        origin_place_id, origin_lat, origin_lng = find_or_create_place(cur, origin)
+        if origin_place_id is not None:
+
+            #
+            # Already know exactly which place this is (see
+            # CreatePathRequest.origin_place_id's own comment) - skip
+            # geocoding `origin` as free text entirely.
+            #
+            place = fetch_places_by_id(cur, [origin_place_id]).get(origin_place_id)
+
+            if place is None:
+                raise HTTPException(status_code=404, detail="origin_place_id not found")
+
+            origin_lat, origin_lng = place["lat"], place["lng"]
+            origin = place["description"]
+
+        else:
+            origin_place_id, origin_lat, origin_lng = find_or_create_place(cur, origin)
+
         destination_place_id, destination_lat, destination_lng = find_or_create_place(cur, destination)
 
         #
@@ -3676,12 +3716,12 @@ def _run_resume_trip_job(job_id, vehicle_id, origin_place_id, destination_place_
     update_job(job_id, status="done", result=result)
 
 
-def _run_create_path_job(job_id, origin, destination):
+def _run_create_path_job(job_id, origin, destination, origin_place_id=None):
 
     update_job(job_id, status="running")
 
     try:
-        result = _build_path_result(origin, destination)
+        result = _build_path_result(origin, destination, origin_place_id)
     except Exception as e:
         update_job(job_id, status="error", error=getattr(e, "detail", str(e)))
         return
@@ -3694,7 +3734,7 @@ def create_path(req: CreatePathRequest):
 
     job_id = create_job("create_path")
 
-    job_executor.submit(_run_create_path_job, job_id, req.origin, req.destination)
+    job_executor.submit(_run_create_path_job, job_id, req.origin, req.destination, req.origin_place_id)
 
     return {"job_id": job_id}
 

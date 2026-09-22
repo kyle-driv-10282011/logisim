@@ -159,6 +159,22 @@ let selectedPathId = null;         // path id currently previewed in the Paths t
 let pathCreatedFromVehicleId = null;
 
 //
+// Set alongside the Origin field whenever it's prefilled from a selected
+// vehicle's own place (showTab()'s vehicle-aware branch below), so
+// createPath() can send it straight through as origin_place_id instead of
+// re-geocoding whatever text ends up in the box. Re-geocoding a vehicle's
+// own already-resolved address was a real bug: Nominatim doesn't reliably
+// return the exact same coordinates for the same query twice, so the new
+// path's origin could land a hair outside ROUND_DECIMALS of the vehicle's
+// actual place - a near-duplicate place a few meters off, invisible to
+// coordsMatch() and so never offered as a path that vehicle can take.
+// Cleared the moment the user edits Origin by hand (see the "input"
+// listener near the bottom of this file), since at that point whatever
+// they're typing may no longer describe that vehicle's place at all.
+//
+let originPlaceId = null;
+
+//
 // Places tab's continent/country/state/city filter (see renderPlaceFilterChips()
 // below) - null at a level means "no filter chosen there yet". Persists across
 // re-renders (a poll tick, adding/removing a place) so the chosen chips don't
@@ -481,6 +497,20 @@ document.addEventListener("click", (event) => {
 });
 
 
+//
+// Typing over a vehicle-prefilled Origin means the user wants a different
+// starting point than that vehicle's own place - drop originPlaceId so
+// createPath() falls back to geocoding whatever's actually in the box,
+// instead of silently ignoring the edit and creating a path from the
+// vehicle's place anyway. Setting .value from JS (as showTab()/
+// fillOriginWithFullAddress() both do) doesn't fire "input", so this only
+// reacts to genuine typing.
+//
+document.getElementById("origin").addEventListener("input", () => {
+    originPlaceId = null;
+});
+
+
 function showTab(tab) {
 
     for (const name of ["vehiclemodels", "places", "myvehicles", "paths", "inroute", "gasprices", "jobs"]) {
@@ -509,10 +539,18 @@ function showTab(tab) {
             // between same-named cities in different states - fill it in
             // right away so Origin isn't left blank, then swap in the full
             // street address once it resolves (reverse-geocoding is rate
-            // limited on the backend, so this can take a moment).
+            // limited on the backend, so this can take a moment). Either
+            // way, origin_place_id (set below) is what actually determines
+            // where the path starts from - this text is just what the user
+            // sees.
             document.getElementById("origin").value = vehicle.current_location;
+            originPlaceId = vehicle.place_id;
 
             fillOriginWithFullAddress(vehicle.id);
+
+        } else {
+
+            originPlaceId = null;
         }
     }
 }
@@ -2744,6 +2782,14 @@ function swapOriginDestination() {
     const temp = originInput.value;
     originInput.value = destinationInput.value;
     destinationInput.value = temp;
+
+    //
+    // Whatever now sits in Origin came from the Destination box, which has
+    // no known place_id behind it - keeping the old one would silently
+    // create the path from the vehicle's place instead of the text now
+    // actually shown.
+    //
+    originPlaceId = null;
 }
 
 
@@ -2767,6 +2813,8 @@ async function createPath() {
         body: JSON.stringify({
 
             origin: document.getElementById("origin").value,
+
+            origin_place_id: originPlaceId,
 
             destination: document.getElementById("destination").value
 
