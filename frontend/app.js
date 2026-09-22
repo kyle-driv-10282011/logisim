@@ -1719,10 +1719,12 @@ async function fetchCurrentCity() {
 //
 // Same idea (and cadence) as fetchCurrentCity() above - only checked for
 // the one selected vehicle, on its own slow timer, since it involves real
-// geometry work server-side (find_gas_station_ahead()) rather than
-// something cheap enough for the 1s active-trips poll.
+// geometry work server-side (find_gas_station_options()) rather than
+// something cheap enough for the 1s active-trips poll. A list, not a
+// single auto-picked station, so the user can choose between whichever
+// ones are near the remaining route or just near the vehicle right now.
 //
-let gasStationAhead = null; // { vehicleId, station }
+let gasStationAhead = null; // { vehicleId, stations }
 
 async function fetchGasStationAhead() {
 
@@ -1741,7 +1743,7 @@ async function fetchGasStationAhead() {
     const data = await response.json();
 
     if (selectedVehicleId === vehicleId) {
-        gasStationAhead = { vehicleId, station: data.station };
+        gasStationAhead = { vehicleId, stations: data.stations };
         renderInRouteList();
     }
 }
@@ -1877,8 +1879,8 @@ function renderInRouteList() {
             `Send roadside fuel ($${ROADSIDE_ASSIST_FEE_USD})</button>`;
     } else {
 
-        const station = gasStationAhead && gasStationAhead.vehicleId === trip.vehicle_id
-            ? gasStationAhead.station
+        const stations = gasStationAhead && gasStationAhead.vehicleId === trip.vehicle_id
+            ? gasStationAhead.stations
             : null;
 
         const diverting = divertInFlightVehicleId === trip.vehicle_id;
@@ -1898,14 +1900,7 @@ function renderInRouteList() {
             refuelingDetourLine +
             `Speed: ${Math.round(trip.speed_mph)} mph<br>` +
             `Arriving in: ${formatHMS(trip.remaining_sim_seconds)}` +
-            (station || diverting
-                ? `<br><button id="divert-gas-station-button" data-id="${trip.vehicle_id}" ${diverting ? "disabled" : ""}>` +
-                  (diverting
-                      ? "Diverting..."
-                      : `Divert to ${station.description} ($${station.price_per_gallon.toFixed(2)}/gal, ` +
-                        `${station.distance_miles} mi away)`) +
-                  `</button>`
-                : "");
+            gasStationOptionsHtml(trip.vehicle_id, stations, diverting);
     }
 
     details.innerHTML =
@@ -1930,27 +1925,47 @@ function renderInRouteList() {
         roadsideButton.onclick = () => withSpinner(roadsideButton, () => roadsideRefuel(Number(roadsideButton.dataset.id)));
     }
 
-    const divertButton = document.getElementById("divert-gas-station-button");
-
     //
     // Not wrapped in withSpinner() like other buttons - divertToGasStation()
     // already re-renders this whole panel itself via divertInFlightVehicleId,
     // so a second, independent spinner/disabled mechanism on the same
-    // (about to be replaced) button would just be redundant.
+    // (about to be replaced) buttons would just be redundant.
     //
-    if (divertButton && !divertButton.disabled) {
-        divertButton.onclick = () => divertToGasStation(Number(divertButton.dataset.id));
+    for (const button of details.querySelectorAll(".divert-gas-station-button")) {
+
+        if (!button.disabled) {
+            button.onclick = () => divertToGasStation(Number(button.dataset.vehicleId), Number(button.dataset.placeId));
+        }
     }
 }
 
 
 //
-// The diversion itself runs as a background job (it needs a live reverse-
-// geocode and OSRM route, same as creating any other path), so this polls
-// it the same way createPath() does rather than waiting on one long
-// request. Once it resolves, the next 1s active-trips poll just picks up
-// the new leg on its own - no extra handling needed here.
+// Builds the "Divert to gas station" option list (or its single disabled
+// "Diverting..." placeholder while one's in flight) for the DRIVING status
+// line above - stations is find_gas_station_options()'s full list, not
+// just one auto-picked choice, so the user can pick between several: some
+// near the remaining route, some just near the vehicle right now (see
+// MAX_GAS_STATION_DETOUR_MILES/NEARBY_GAS_STATION_MILES in app.py).
 //
+function gasStationOptionsHtml(vehicleId, stations, diverting) {
+
+    if (diverting) {
+        return `<br><button class="divert-gas-station-button" disabled>Diverting...</button>`;
+    }
+
+    if (!stations || stations.length === 0) {
+        return "";
+    }
+
+    return stations.map((station) =>
+        `<br><button class="divert-gas-station-button" data-vehicle-id="${vehicleId}" data-place-id="${station.place_id}">` +
+        `Divert to ${station.description} ($${station.price_per_gallon.toFixed(2)}/gal, ` +
+        `${station.distance_miles} mi${station.ahead ? "" : ", off-route"})</button>`
+    ).join("");
+}
+
+
 //
 // Diverting runs as a background job (a couple of seconds - a live reverse
 // geocode plus an OSRM route), but renderInRouteList() rebuilds the whole
@@ -1965,14 +1980,26 @@ function renderInRouteList() {
 //
 let divertInFlightVehicleId = null;
 
-async function divertToGasStation(vehicleId) {
+async function divertToGasStation(vehicleId, gasStationPlaceId) {
 
     divertInFlightVehicleId = vehicleId;
     renderInRouteList();
 
     try {
 
-        const response = await fetch(API + "/api/vehicles/" + vehicleId + "/divert-to-gas-station", { method: "POST" });
+        const response = await fetch(API + "/api/vehicles/" + vehicleId + "/divert-to-gas-station", {
+
+            method: "POST",
+
+            headers: {
+                "Content-Type": "application/json"
+            },
+
+            body: JSON.stringify({
+                gas_station_place_id: gasStationPlaceId
+            })
+
+        });
 
         const submitted = await response.json();
 

@@ -861,7 +861,7 @@ def interpolate_seconds_at_distance(distances_miles, realized_seconds, target_di
 
 #
 # The distance-domain twin of the segment interpolation derive_position()
-# does in the time domain - used by find_gas_station_ahead() to turn a
+# does in the time domain - used by find_gas_station_options() to turn a
 # trip's current cumulative distance (from resolve_trip_progress) into an
 # actual lat/lon, since that's all it has to work with (no elapsed_seconds
 # of its own to bisect realized_seconds with).
@@ -896,25 +896,38 @@ def haversine_miles(lat1, lon1, lat2, lon2):
 
 #
 # How far off the actual route a gas station can be and still count as
-# "near" it for find_gas_station_ahead() below - a station 15 miles from
+# "near" it for find_gas_station_options() below - a station 15 miles from
 # the nearest point on the remaining route is a real detour; one much
 # farther than that almost certainly isn't meant for this stretch of road.
 #
 MAX_GAS_STATION_DETOUR_MILES = 15
 
+#
+# A second, independent way for a station to qualify: physically close to
+# the vehicle right now, regardless of which direction it's in. 15 miles of
+# "ahead" is judged against the road actually being driven, so a station a
+# short hop behind (or just off to the side) never qualifies through that
+# path alone - this exists specifically so a genuinely nearby option still
+# shows up rather than being excluded purely for being in the "wrong"
+# direction, since a 10-mile round trip is a reasonable one to offer even
+# though it's not "on the way".
+#
+NEARBY_GAS_STATION_MILES = 10
+
 
 #
-# Picks the gas station to offer for POST /api/vehicles/{id}/divert-to-gas-station -
-# never one behind the vehicle (see the ahead_route slice below, which
-# only ever considers the remaining, not-yet-driven part of the route), and
-# among the eligible ones, whichever is physically closest to the vehicle's
-# current position right now, not whichever comes up soonest along the
-# route - the diversion itself is a fresh, direct (OSRM-routed) drive from
-# here to the station, not a continuation of the current route, so straight-
-# line distance from here is what actually determines how long that detour
-# takes.
+# Every gas station worth offering for POST /api/vehicles/{id}/divert-to-gas-station -
+# not just one auto-picked "best" one - so the user can choose between
+# several. A station qualifies either by being near the *remaining* (not
+# yet driven) part of the route (MAX_GAS_STATION_DETOUR_MILES) or by simply
+# being close to the vehicle's current position (NEARBY_GAS_STATION_MILES),
+# whichever direction that is. Sorted by straight-line distance from the
+# vehicle's current position, since the diversion itself is a fresh, direct
+# (OSRM-routed) drive from here to the station, not a continuation of the
+# current route - that's what actually determines how long each option's
+# detour takes, not how soon a station comes up along the original route.
 #
-def find_gas_station_ahead(cur, route, distances_miles, current_distance_miles):
+def find_gas_station_options(cur, route, distances_miles, current_distance_miles):
 
     cur.execute(
         """
@@ -927,56 +940,60 @@ def find_gas_station_ahead(cur, route, distances_miles, current_distance_miles):
     stations = cur.fetchall()
 
     if not stations:
-        return None
+        return []
 
     current_lat, current_lng = interpolate_position_at_distance(route, distances_miles, current_distance_miles)
 
     ahead_start_index = bisect.bisect_left(distances_miles, current_distance_miles)
     ahead_route = route[ahead_start_index:]
 
-    if not ahead_route:
-        return None
-
-    best = None
-    best_distance_miles = None
+    options = []
 
     for place_id, description, lat, lng, price_per_gallon in stations:
 
-        nearest_gap_miles = min(
-            haversine_miles(lat, lng, point_lat, point_lng)
-            for point_lat, point_lng in ahead_route
-        )
-
-        if nearest_gap_miles > MAX_GAS_STATION_DETOUR_MILES:
-            continue
-
         distance_from_vehicle_miles = haversine_miles(current_lat, current_lng, lat, lng)
 
-        if best_distance_miles is None or distance_from_vehicle_miles < best_distance_miles:
+        ahead = False
 
-            best_distance_miles = distance_from_vehicle_miles
+        if ahead_route:
 
-            best = {
+            nearest_gap_miles = min(
+                haversine_miles(lat, lng, point_lat, point_lng)
+                for point_lat, point_lng in ahead_route
+            )
 
-                "place_id": place_id,
+            ahead = nearest_gap_miles <= MAX_GAS_STATION_DETOUR_MILES
 
-                "description": description,
+        nearby = distance_from_vehicle_miles <= NEARBY_GAS_STATION_MILES
 
-                "lat": lat,
+        if not (ahead or nearby):
+            continue
 
-                "lng": lng,
+        options.append({
 
-                "price_per_gallon": price_per_gallon,
+            "place_id": place_id,
 
-                "distance_miles": round(distance_from_vehicle_miles, 1)
-            }
+            "description": description,
 
-    return best
+            "lat": lat,
+
+            "lng": lng,
+
+            "price_per_gallon": price_per_gallon,
+
+            "distance_miles": round(distance_from_vehicle_miles, 1),
+
+            "ahead": ahead
+        })
+
+    options.sort(key=lambda option: option["distance_miles"])
+
+    return options
 
 
 #
 # Used by POST /api/vehicles/{id}/refuel for a READY vehicle that isn't
-# already sitting at a gas station - unlike find_gas_station_ahead() above,
+# already sitting at a gas station - unlike find_gas_station_options() above,
 # there's no route to stay "ahead" of (the vehicle isn't going anywhere
 # yet), so this just picks whichever priced place is physically closest,
 # with no detour-distance cutoff.
@@ -1954,6 +1971,17 @@ class RoadZoneRequest(BaseModel):
 
 
 
+class DivertToGasStationRequest(BaseModel):
+
+    #
+    # Which of the GET /api/vehicles/{id}/gas-station-ahead options the user
+    # picked - find_gas_station_options() returns several, not just one
+    # auto-picked "best" choice, so the caller has to say which.
+    #
+    gas_station_place_id: int
+
+
+
 class StartTripRequest(BaseModel):
 
     vehicle_id: int
@@ -2747,10 +2775,11 @@ def fetch_active_trip_for_diversion(cur, vehicle_id, time_multiplier):
 # Polled by the frontend for whichever vehicle is currently selected in the
 # In Route tab (same cadence as its city lookup - see GET
 # /api/vehicles/{id}/city) to decide whether to show a "Divert to gas
-# station" button at all, and what to label it. {"station": null} (not a
-# 404) whenever there's nothing to offer - not driving, or nothing within
-# MAX_GAS_STATION_DETOUR_MILES of the remaining route - since that's a
-# perfectly normal thing for this to report, not an error.
+# station" option at all, and what to offer. {"stations": []} (not a 404)
+# whenever there's nothing to offer - not driving, or nothing within
+# MAX_GAS_STATION_DETOUR_MILES of the remaining route or
+# NEARBY_GAS_STATION_MILES of the vehicle's current position - since that's
+# a perfectly normal thing for this to report, not an error.
 #
 @app.get("/api/vehicles/{id}/gas-station-ahead")
 def gas_station_ahead(id: int):
@@ -2767,31 +2796,31 @@ def gas_station_ahead(id: int):
     if context is None or context["progress"]["status"] != "DRIVING":
         cur.close()
         conn.close()
-        return {"station": None}
+        return {"stations": []}
 
-    station = find_gas_station_ahead(
+    stations = find_gas_station_options(
         cur, context["route"], context["distances_miles"], context["progress"]["distance_miles"]
     )
 
     cur.close()
     conn.close()
 
-    return {"station": station}
+    return {"stations": stations}
 
 
 #
-# Diverts a DRIVING vehicle to the gas station GET .../gas-station-ahead
-# would offer right now, remembering wherever it was actually headed (its
-# current destination, or - if it's already mid-detour - whatever it was
-# trying to get to before that) so the trip there resumes automatically
-# once the vehicle has refueled (see settle_arrived_vehicles()). The actual
-# work (cancelling the current trip, reverse-geocoding the live position,
-# routing to the station) needs live network calls, so it runs in
-# job_executor like every other geocode/route operation - this only
-# validates and hands off.
+# Diverts a DRIVING vehicle to whichever gas station the user picked from
+# GET .../gas-station-ahead's list (req.gas_station_place_id), remembering
+# wherever it was actually headed (its current destination, or - if it's
+# already mid-detour - whatever it was trying to get to before that) so the
+# trip there resumes automatically once the vehicle has refueled (see
+# settle_arrived_vehicles()). The actual work (cancelling the current trip,
+# reverse-geocoding the live position, routing to the station) needs live
+# network calls, so it runs in job_executor like every other geocode/route
+# operation - this only validates and hands off.
 #
 @app.post("/api/vehicles/{id}/divert-to-gas-station", status_code=202)
-def divert_to_gas_station(id: int):
+def divert_to_gas_station(id: int, req: DivertToGasStationRequest):
 
     conn = db()
     cur = conn.cursor()
@@ -2821,14 +2850,27 @@ def divert_to_gas_station(id: int):
         conn.close()
         raise HTTPException(status_code=409, detail="Vehicle is not currently driving")
 
-    station = find_gas_station_ahead(
-        cur, context["route"], context["distances_miles"], context["progress"]["distance_miles"]
+    #
+    # Trusts the client's choice of place as long as it's a real gas
+    # station - not re-derived from find_gas_station_options() here, since
+    # the user already picked from exactly that list a moment ago and
+    # re-deriving it would just risk rejecting a perfectly good choice over
+    # a transient difference (e.g. the vehicle having moved slightly since
+    # that GET).
+    #
+    cur.execute(
+        "SELECT p.id, p.description, p.lat, p.lng FROM gas_prices g JOIN places p ON p.id = g.place_id WHERE p.id = %s",
+        (req.gas_station_place_id,)
     )
 
-    if station is None:
+    station_row = cur.fetchone()
+
+    if station_row is None:
         cur.close()
         conn.close()
-        raise HTTPException(status_code=404, detail="No gas station found ahead on this route")
+        raise HTTPException(status_code=404, detail="That place isn't a priced gas station")
+
+    station_place_id, station_description, station_lat, station_lng = station_row
 
     resume_destination_place_id = context["resume_destination_place_id"] or context["destination_place_id"]
 
@@ -2844,10 +2886,18 @@ def divert_to_gas_station(id: int):
     job_executor.submit(
         _run_divert_job, job_id, id, context["trip_id"], lat, lng,
         context["progress"]["distance_miles"], context["progress"]["fuel_gallons_remaining"] or 0.0,
-        station["place_id"], resume_destination_place_id
+        station_place_id, resume_destination_place_id
     )
 
-    return {"job_id": job_id, "station": station}
+    return {
+        "job_id": job_id,
+        "station": {
+            "place_id": station_place_id,
+            "description": station_description,
+            "lat": station_lat,
+            "lng": station_lng
+        }
+    }
 
 
 

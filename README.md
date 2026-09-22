@@ -537,20 +537,29 @@ proactively pull off for gas before it ever runs dry, rather than waiting
 to strand and calling roadside assistance.
 
 **Picking a station.** `GET /api/vehicles/{id}/gas-station-ahead` (polled
-by the frontend on the same 7-second timer as the [nearby city
-lookup](#nearby-city-lookup), for whichever vehicle is selected) reports
-the best candidate via `find_gas_station_ahead()`: only the *remaining*
-(not-yet-driven) portion of the current route is considered, so a station
-behind the vehicle is never offered — no backtracking. Among stations
-within `MAX_GAS_STATION_DETOUR_MILES` (15) of that remaining route, it
-picks whichever is physically closest to the vehicle's live position right
-now (not whichever comes up soonest along the original route), since the
-diversion itself is a fresh, direct, OSRM-routed drive from here to the
-station, not a continuation of the original one. The frontend only shows
-the "Divert to gas station" button (next to "Send roadside fuel" in the In
-Route panel) when this returns a station.
+by the frontend every 3 seconds for whichever vehicle is selected — a
+separate, faster timer than the [nearby city lookup](#nearby-city-lookup)'s
+7 seconds, since this involves no external rate-limited geocoding call, just
+local DB/geometry work) reports every candidate via
+`find_gas_station_options()`, not just one auto-picked choice. A station
+qualifies either of two ways: it's within `MAX_GAS_STATION_DETOUR_MILES`
+(15) of the *remaining* (not-yet-driven) portion of the route — so a
+station behind the vehicle never qualifies through this path, no
+backtracking — or it's simply within `NEARBY_GAS_STATION_MILES` (10) of the
+vehicle's current position, in any direction, since a short trip to a truly
+close station is reasonable even off-route. Results are sorted by
+straight-line distance from the vehicle's live position (not whichever
+comes up soonest along the original route), since the diversion itself is
+a fresh, direct, OSRM-routed drive from here to the station, not a
+continuation of the original one. The frontend lists every option (next to
+"Send roadside fuel" in the In Route panel) as its own "Divert to ..."
+button, tagging any that only qualified via the nearby check (not ahead on
+the route) as "off-route".
 
-**Making the detour.** `POST /api/vehicles/{id}/divert-to-gas-station`:
+**Making the detour.** `POST /api/vehicles/{id}/divert-to-gas-station`,
+body `{gas_station_place_id}` (whichever option the user picked — trusted
+as-is once it's confirmed to be a real `gas_prices` place, not re-derived
+from `find_gas_station_options()` again):
 
 1. Cancels the vehicle's current trip (`trips.cancelled_at`) rather than
    letting it run to completion — a cancelled trip is excluded from every
@@ -561,8 +570,8 @@ Route panel) when this returns a station.
 2. Turns the vehicle's exact live position into a place
    (`find_or_create_place_by_coords()`) — a reverse geocode, since only
    coordinates are known, not a typed description.
-3. Routes there to the gas station (OSRM, same as any other path) and
-   starts a new trip, remembering the place the vehicle was *actually*
+3. Routes there to the chosen gas station (OSRM, same as any other path)
+   and starts a new trip, remembering the place the vehicle was *actually*
    trying to reach (`resume_destination_place_id`) — its previous
    destination, or, if it was already mid-detour, whatever that detour was
    itself trying to get back to.
@@ -602,8 +611,8 @@ All endpoints are on the `backend` service, default `http://localhost:5000`.
 | `DELETE /api/vehicles/{id}`     | Permanently delete a vehicle (cascades its trips) — distinct from selling; not used by the frontend |
 | `POST /api/vehicles/{id}/refuel` | Top off a `READY` vehicle's tank to full if it's already at a gas station, otherwise drives it to the closest one first (202, returns a `job_id` to poll). 409 if it's currently on a trip — see [Fuel](#fuel) |
 | `POST /api/vehicles/{id}/roadside-refuel` | Recover a `STRANDED` vehicle in place, no gas station required. Response includes `cost_usd` (a flat placeholder fee, not actually charged anywhere). 409 if the vehicle isn't currently `STRANDED` — see [Fuel](#fuel) |
-| `GET /api/vehicles/{id}/gas-station-ahead` | The closest gas station on the *remaining* portion of a `DRIVING` vehicle's route, if any (`{station: null}` otherwise) — see [Divert to gas station](#divert-to-gas-station) |
-| `POST /api/vehicles/{id}/divert-to-gas-station` | Detour a `DRIVING` vehicle to that station now; automatically resumes to its original destination once refueled there. 202, returns a `job_id` to poll (`GET /api/jobs/{id}`) — see [Divert to gas station](#divert-to-gas-station) |
+| `GET /api/vehicles/{id}/gas-station-ahead` | Every gas station near the *remaining* portion of a `DRIVING` vehicle's route or just near its current position, sorted by distance: `{stations: [{place_id, description, lat, lng, price_per_gallon, distance_miles, ahead}, ...]}` (`ahead: false` means it only qualified via proximity, not the route) — see [Divert to gas station](#divert-to-gas-station) |
+| `POST /api/vehicles/{id}/divert-to-gas-station` | Detour a `DRIVING` vehicle to a chosen station now. Body: `{gas_station_place_id}`. Automatically resumes to its original destination once refueled there. 202, returns a `job_id` to poll (`GET /api/jobs/{id}`) — see [Divert to gas station](#divert-to-gas-station) |
 | `POST /api/vehicle-models`       | Create a hauling-vehicle-model catalog entry. Body: `{year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, image?}` |
 | `GET /api/vehicle-models`        | List all vehicle models |
 | `DELETE /api/vehicle-models/{id}`| Delete a vehicle model. 409 if any vehicle still references it |
@@ -688,8 +697,8 @@ side panel since they don't all fit as a row:
   it on the map and shows status, nearest city, position, current road,
   speed, time remaining, and fuel level. A `STRANDED` vehicle gets a "Send
   roadside fuel" button; a `DRIVING` one gets a "Divert to gas station"
-  button whenever one's within range ahead on the route (see
-  [Fuel](#fuel) and [Divert to gas station](#divert-to-gas-station)).
+  button for every nearby station (see [Fuel](#fuel) and [Divert to gas
+  station](#divert-to-gas-station)).
 - **Gas Prices** — a persistent map overlay, not a selection-driven marker
   like the Places tab: every priced place gets its own always-on circle
   marker, color-graded green (cheapest currently loaded) to red (priciest)
