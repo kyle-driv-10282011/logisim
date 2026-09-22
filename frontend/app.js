@@ -3176,9 +3176,24 @@ setInterval(updateSimClock, 1000);
 //
 setInterval(loadSettings, 5000);
 
+//
+// Gated on the selected vehicle actually still being in activeTripsById,
+// not just selectedVehicleId being set - both endpoints 404/no-op for a
+// vehicle that isn't currently driving (READY, SOLD, or just arrived and
+// past its grace period), and a vehicle stays "selected" in the In Route
+// tab long after it stops driving (nothing ever clears the selection on
+// its own). Without this check, either poll would keep firing every tick
+// forever for a long-idle selection, filling the browser console with
+// failed-request noise that no amount of try/catch on the JS side can
+// suppress - the browser logs the network failure itself.
+//
+function selectedVehicleIsDriving() {
+    return selectedVehicleId !== null && activeTripsById.has(selectedVehicleId);
+}
+
 setInterval(() => {
 
-    if (selectedVehicleId !== null) {
+    if (selectedVehicleIsDriving()) {
         fetchCurrentCity();
     }
 
@@ -3195,7 +3210,7 @@ setInterval(() => {
 //
 setInterval(() => {
 
-    if (selectedVehicleId !== null) {
+    if (selectedVehicleIsDriving()) {
         fetchGasStationAhead();
     }
 
