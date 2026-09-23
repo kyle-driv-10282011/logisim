@@ -3373,6 +3373,58 @@ def _run_gas_price_upload_job(job_id, entries):
     update_job(job_id, status="done", result={"created": created, "errors": errors})
 
 
+#
+# csv.DictReader always treats row 0 as field names, whatever it contains -
+# so a file with no header row silently turns its first data row's values
+# into the field names, and every row (including that one) then fails
+# find_or_create_place()'s entry.get("description")/... lookups with
+# "missing description/address/location", instantly (no geocode throttle
+# hit yet), which is why a bad upload looks like it "finishes fast and does
+# nothing" rather than erroring loudly. Detect a real header by checking
+# whether row 0 actually contains one of the recognized column names
+# (loosely - case/spacing/punctuation-insensitive, so "Price Per Gallon" or
+# "price_per_gallon" both match); if not, assume the file is headerless and
+# fall back to the common description/address, price[, brand] column order.
+#
+CSV_HEADER_ALIASES = {
+    "description": "description",
+    "address": "description",
+    "location": "description",
+    "name": "brand",
+    "brand": "brand",
+    "price": "price_per_gallon",
+    "priceper gallon": "price_per_gallon",
+    "pricepergallon": "price_per_gallon",
+}
+
+
+def normalize_csv_header_cell(cell):
+    return re.sub(r"[^a-z0-9]", "", (cell or "").strip().lower())
+
+
+def parse_gas_price_csv(text):
+
+    rows = list(csv.reader(io.StringIO(text)))
+
+    if not rows:
+        return []
+
+    header_map = {i: CSV_HEADER_ALIASES.get(normalize_csv_header_cell(cell)) for i, cell in enumerate(rows[0])}
+    has_header = any(canonical is not None for canonical in header_map.values())
+
+    if has_header:
+        fieldnames = [header_map[i] or normalize_csv_header_cell(cell) for i, cell in enumerate(rows[0])]
+        data_rows = rows[1:]
+    else:
+        fieldnames = ["description", "price_per_gallon", "brand"]
+        data_rows = rows
+
+    return [
+        {fieldnames[i]: value for i, value in enumerate(row) if i < len(fieldnames)}
+        for row in data_rows
+    ]
+
+
 @app.post("/api/gas-prices/upload", status_code=202)
 async def upload_gas_prices(file: UploadFile = File(...)):
 
@@ -3398,7 +3450,7 @@ async def upload_gas_prices(file: UploadFile = File(...)):
 
     else:
 
-        entries = list(csv.DictReader(io.StringIO(text)))
+        entries = parse_gas_price_csv(text)
 
     job_id = create_job("gas_prices_upload", total=len(entries))
 
