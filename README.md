@@ -172,6 +172,7 @@ duplicates.
 |---------------------|---------|----------------------------------|
 | `place_id`          | integer | primary key, FK `places(id)`, `ON DELETE CASCADE` |
 | `price_per_gallon`  | double precision | must be positive (enforced in the API, not a DB constraint) |
+| `brand`             | text, nullable | chain ("Shell", "Costco Gas") or plain name for an unbranded station, distinct from the place's own description/address; shown ahead of the description wherever a station is listed (map tooltip, price list, divert options) |
 | `updated`           | timestamp | default `NOW()`, refreshed on every upsert |
 
 ### `vehicles`
@@ -611,7 +612,7 @@ All endpoints are on the `backend` service, default `http://localhost:5000`.
 | `DELETE /api/vehicles/{id}`     | Permanently delete a vehicle (cascades its trips) — distinct from selling; not used by the frontend |
 | `POST /api/vehicles/{id}/refuel` | Top off a `READY` vehicle's tank to full if it's already at a gas station, otherwise drives it to the closest one first (202, returns a `job_id` to poll). 409 if it's currently on a trip — see [Fuel](#fuel) |
 | `POST /api/vehicles/{id}/roadside-refuel` | Recover a `STRANDED` vehicle in place, no gas station required. Response includes `cost_usd` (a flat placeholder fee, not actually charged anywhere). 409 if the vehicle isn't currently `STRANDED` — see [Fuel](#fuel) |
-| `GET /api/vehicles/{id}/gas-station-ahead` | Every gas station near the *remaining* portion of a `DRIVING` vehicle's route or just near its current position, sorted by distance: `{stations: [{place_id, description, lat, lng, price_per_gallon, distance_miles, ahead}, ...]}` (`ahead: false` means it only qualified via proximity, not the route) — see [Divert to gas station](#divert-to-gas-station) |
+| `GET /api/vehicles/{id}/gas-station-ahead` | Every gas station near the *remaining* portion of a `DRIVING` vehicle's route or just near its current position, sorted by distance: `{stations: [{place_id, description, brand, lat, lng, price_per_gallon, distance_miles, ahead}, ...]}` (`ahead: false` means it only qualified via proximity, not the route) — see [Divert to gas station](#divert-to-gas-station) |
 | `POST /api/vehicles/{id}/divert-to-gas-station` | Detour a `DRIVING` vehicle to a chosen station now. Body: `{gas_station_place_id}`. Automatically resumes to its original destination once refueled there. 202, returns a `job_id` to poll (`GET /api/jobs/{id}`) — see [Divert to gas station](#divert-to-gas-station) |
 | `POST /api/vehicle-models`       | Create a hauling-vehicle-model catalog entry. Body: `{year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, image?}` |
 | `GET /api/vehicle-models`        | List all vehicle models |
@@ -629,10 +630,10 @@ All endpoints are on the `backend` service, default `http://localhost:5000`.
 | `DELETE /api/zones/{id}`        | Delete a road zone |
 | `POST /api/trips`               | Start a trip. Body: `{vehicle_id, path_id, simulated_datetime?, traffic_bias?}`. 409 if the vehicle is already driving, sold, or not at the path's origin |
 | `GET /api/trips/active`         | Poll all currently-active trips, each with live position/speed/road name |
-| `GET /api/gas-prices`           | List all priced places, each with `price_per_gallon` and the place's `description`/`lat`/`lng` |
-| `POST /api/gas-prices`          | Set the price at a place. Body: `{description, price_per_gallon}` — resolved via `find_or_create_place()` like a vehicle/path location. Upserts: re-submitting for the same place updates its price rather than duplicating it. 400 if `price_per_gallon` isn't positive or the location doesn't resolve |
+| `GET /api/gas-prices`           | List all priced places, each with `price_per_gallon`, `brand`, and the place's `description`/`lat`/`lng` |
+| `POST /api/gas-prices`          | Set the price at a place. Body: `{description, price_per_gallon, brand?}` — resolved via `find_or_create_place()` like a vehicle/path location. Upserts: re-submitting for the same place updates its price (and brand) rather than duplicating it. 400 if `price_per_gallon` isn't positive or the location doesn't resolve |
 | `DELETE /api/gas-prices/{place_id}` | Remove a place's price. 404 if that place has none |
-| `POST /api/gas-prices/upload`   | Bulk-set prices from an uploaded CSV or JSON file (multipart `file` field; `.json` filename parses as JSON, otherwise CSV). Each row/object needs a description/address (`description`, `address`, or `location`) and a price (`price_per_gallon` or `price`). Rows commit independently, so one bad row doesn't roll back the rest — response is `{created, errors: [{row, description, error}, ...]}` |
+| `POST /api/gas-prices/upload`   | Bulk-set prices from an uploaded CSV or JSON file (multipart `file` field; `.json` filename parses as JSON, otherwise CSV). Each row/object needs a description/address (`description`, `address`, or `location`), a price (`price_per_gallon` or `price`), and optionally a brand/name (`brand` or `name`). Rows commit independently, so one bad row doesn't roll back the rest — response is `{created, errors: [{row, description, error}, ...]}` |
 
 Every response is JSON. Any unhandled backend exception returns a generic
 `500 {"detail": "Internal server error"}` — the real traceback is only in

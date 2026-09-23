@@ -1119,6 +1119,18 @@ async function loadGasPrices() {
 // pollActiveTrips() diffs tripLayers, rather than tearing down and
 // rebuilding every marker on each refresh.
 //
+//
+// Shared by the map marker tooltip, the Gas Prices list, and the divert-to-
+// gas-station button labels - brand ("Shell") is optional (see CreateGasPriceRequest.brand
+// in app.py), so this is the one place that decides how to show a station
+// when it's missing, rather than three separate ad-hoc fallbacks drifting
+// apart.
+//
+function gasStationLabel(brand, description) {
+    return brand ? `${brand} - ${description}` : description;
+}
+
+
 function renderGasPriceMarkers() {
 
     const seen = new Set();
@@ -1129,7 +1141,7 @@ function renderGasPriceMarkers() {
         seen.add(gasPrice.place_id);
 
         const color = gasPriceColor(gasPrice.price_per_gallon, allPrices);
-        const label = `${gasPrice.description}: $${gasPrice.price_per_gallon.toFixed(2)}/gal`;
+        const label = `${gasStationLabel(gasPrice.brand, gasPrice.description)}: $${gasPrice.price_per_gallon.toFixed(2)}/gal`;
 
         let marker = gasPriceMarkers.get(gasPrice.place_id);
 
@@ -1243,7 +1255,7 @@ function renderGasPriceList() {
         };
 
         item.innerHTML =
-            `<span class="list-item-label"><span>${gasPrice.description}` +
+            `<span class="list-item-label"><span>${gasStationLabel(gasPrice.brand, gasPrice.description)}` +
             `<div class="list-item-details">$${gasPrice.price_per_gallon.toFixed(2)}/gal</div></span></span>` +
             `<button class="remove-gasprice-button" data-id="${gasPrice.place_id}">Delete</button>`;
 
@@ -1263,6 +1275,7 @@ function renderGasPriceList() {
 async function addGasPrice() {
 
     const descriptionInput = document.getElementById("gasprice-description");
+    const brandInput = document.getElementById("gasprice-brand");
     const priceInput = document.getElementById("gasprice-price");
 
     const response = await fetch(API + "/api/gas-prices", {
@@ -1275,6 +1288,7 @@ async function addGasPrice() {
 
         body: JSON.stringify({
             description: descriptionInput.value,
+            brand: brandInput.value || null,
             price_per_gallon: Number(priceInput.value)
         })
 
@@ -1288,6 +1302,7 @@ async function addGasPrice() {
     }
 
     descriptionInput.value = "";
+    brandInput.value = "";
     priceInput.value = "";
 
     loadGasPrices();
@@ -1993,7 +2008,7 @@ function gasStationOptionsHtml(vehicleId, stations, diverting) {
 
     return stations.map((station) =>
         `<br><button class="divert-gas-station-button" data-vehicle-id="${vehicleId}" data-place-id="${station.place_id}">` +
-        `Divert to ${station.description} ($${station.price_per_gallon.toFixed(2)}/gal, ` +
+        `Divert to ${gasStationLabel(station.brand, station.description)} ($${station.price_per_gallon.toFixed(2)}/gal, ` +
         `${station.distance_miles} mi${station.ahead ? "" : ", off-route"})</button>`
     ).join("");
 }

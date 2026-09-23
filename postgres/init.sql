@@ -109,6 +109,13 @@ CREATE TABLE gas_prices (
 
     price_per_gallon DOUBLE PRECISION NOT NULL,
 
+    -- The chain ("Shell", "Costco Gas") or a plain name for an unbranded
+    -- station - distinct from the place's own description/address, which
+    -- might just be whatever location text was typed in, not what's
+    -- actually on the sign. Nullable: not every priced place has one (e.g.
+    -- a bulk-uploaded citywide price dataset).
+    brand TEXT,
+
     updated TIMESTAMP NOT NULL DEFAULT NOW()
 );
 

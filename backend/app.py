@@ -931,7 +931,7 @@ def find_gas_station_options(cur, route, distances_miles, current_distance_miles
 
     cur.execute(
         """
-        SELECT p.id, p.description, p.lat, p.lng, g.price_per_gallon
+        SELECT p.id, p.description, p.lat, p.lng, g.price_per_gallon, g.brand
         FROM gas_prices g
         JOIN places p ON p.id = g.place_id
         """
@@ -949,7 +949,7 @@ def find_gas_station_options(cur, route, distances_miles, current_distance_miles
 
     options = []
 
-    for place_id, description, lat, lng, price_per_gallon in stations:
+    for place_id, description, lat, lng, price_per_gallon, brand in stations:
 
         distance_from_vehicle_miles = haversine_miles(current_lat, current_lng, lat, lng)
 
@@ -974,6 +974,8 @@ def find_gas_station_options(cur, route, distances_miles, current_distance_miles
             "place_id": place_id,
 
             "description": description,
+
+            "brand": brand,
 
             "lat": lat,
 
@@ -1002,7 +1004,7 @@ def find_closest_gas_station(cur, lat, lng):
 
     cur.execute(
         """
-        SELECT p.id, p.description, p.lat, p.lng, g.price_per_gallon
+        SELECT p.id, p.description, p.lat, p.lng, g.price_per_gallon, g.brand
         FROM gas_prices g
         JOIN places p ON p.id = g.place_id
         """
@@ -1013,7 +1015,7 @@ def find_closest_gas_station(cur, lat, lng):
     best = None
     best_distance_miles = None
 
-    for place_id, description, lat_station, lng_station, price_per_gallon in stations:
+    for place_id, description, lat_station, lng_station, price_per_gallon, brand in stations:
 
         distance_miles = haversine_miles(lat, lng, lat_station, lng_station)
 
@@ -1026,6 +1028,8 @@ def find_closest_gas_station(cur, lat, lng):
                 "place_id": place_id,
 
                 "description": description,
+
+                "brand": brand,
 
                 "lat": lat_station,
 
@@ -1472,6 +1476,12 @@ def run_migrations():
     cur.execute("ALTER TABLE trips ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP")
     cur.execute("ALTER TABLE trips ADD COLUMN IF NOT EXISTS auto_refuel BOOLEAN NOT NULL DEFAULT FALSE")
 
+    #
+    # Gas station brand/name - additive/nullable, safe against both a
+    # pre-existing DB and a fresh one (where init.sql already created it).
+    #
+    cur.execute("ALTER TABLE gas_prices ADD COLUMN IF NOT EXISTS brand TEXT")
+
     conn.commit()
 
     cur.execute("SELECT COUNT(*) FROM places WHERE country IS NULL")
@@ -1790,29 +1800,34 @@ def gas_price_dict(row):
 
         "lat": row[4],
 
-        "lng": row[5]
+        "lng": row[5],
+
+        "brand": row[6]
     }
 
 
-GAS_PRICE_COLUMNS = "g.place_id, g.price_per_gallon, g.updated, p.description, p.lat, p.lng"
+GAS_PRICE_COLUMNS = "g.place_id, g.price_per_gallon, g.updated, p.description, p.lat, p.lng, g.brand"
 
 
-def upsert_gas_price_row(cur, place_id, price_per_gallon):
+def upsert_gas_price_row(cur, place_id, price_per_gallon, brand=None):
 
     #
-    # One current price per place, not a history - re-submitting for a
-    # place that already has one (single POST, or a re-uploaded CSV/JSON
-    # row referencing the same place) refreshes it in place instead of
-    # accumulating stale duplicates.
+    # One current price (and brand) per place, not a history - re-submitting
+    # for a place that already has one (single POST, or a re-uploaded
+    # CSV/JSON row referencing the same place) refreshes it in place
+    # instead of accumulating stale duplicates. brand is set to whatever's
+    # given each time, same as price_per_gallon - a re-upload/edit that
+    # omits it clears it back to unset rather than silently keeping the old
+    # value around.
     #
     cur.execute(
         """
-        INSERT INTO gas_prices (place_id, price_per_gallon, updated)
-        VALUES (%s, %s, NOW())
+        INSERT INTO gas_prices (place_id, price_per_gallon, brand, updated)
+        VALUES (%s, %s, %s, NOW())
         ON CONFLICT (place_id) DO UPDATE
-        SET price_per_gallon = EXCLUDED.price_per_gallon, updated = NOW()
+        SET price_per_gallon = EXCLUDED.price_per_gallon, brand = EXCLUDED.brand, updated = NOW()
         """,
-        (place_id, price_per_gallon)
+        (place_id, price_per_gallon, brand)
     )
 
 
@@ -1944,6 +1959,15 @@ class CreateGasPriceRequest(BaseModel):
     description: str
 
     price_per_gallon: float
+
+    #
+    # Free text - the chain ("Shell", "Costco Gas") or a plain name for an
+    # unbranded station, distinct from the place's own description/address
+    # (which might just be a typed-in location, not what's actually on the
+    # sign). Optional since not every priced place has one (e.g. a
+    # bulk-uploaded citywide price dataset).
+    #
+    brand: Optional[str] = None
 
 
 
@@ -2859,7 +2883,7 @@ def divert_to_gas_station(id: int, req: DivertToGasStationRequest):
     # that GET).
     #
     cur.execute(
-        "SELECT p.id, p.description, p.lat, p.lng FROM gas_prices g JOIN places p ON p.id = g.place_id WHERE p.id = %s",
+        "SELECT p.id, p.description, p.lat, p.lng, g.brand FROM gas_prices g JOIN places p ON p.id = g.place_id WHERE p.id = %s",
         (req.gas_station_place_id,)
     )
 
@@ -2870,7 +2894,7 @@ def divert_to_gas_station(id: int, req: DivertToGasStationRequest):
         conn.close()
         raise HTTPException(status_code=404, detail="That place isn't a priced gas station")
 
-    station_place_id, station_description, station_lat, station_lng = station_row
+    station_place_id, station_description, station_lat, station_lng, station_brand = station_row
 
     resume_destination_place_id = context["resume_destination_place_id"] or context["destination_place_id"]
 
@@ -2894,6 +2918,7 @@ def divert_to_gas_station(id: int, req: DivertToGasStationRequest):
         "station": {
             "place_id": station_place_id,
             "description": station_description,
+            "brand": station_brand,
             "lat": station_lat,
             "lng": station_lng
         }
@@ -3164,7 +3189,7 @@ def upsert_gas_price(req: CreateGasPriceRequest):
 
     place_id, _, _ = find_or_create_place(cur, req.description)
 
-    upsert_gas_price_row(cur, place_id, req.price_per_gallon)
+    upsert_gas_price_row(cur, place_id, req.price_per_gallon, req.brand)
 
     cur.execute(
         f"SELECT {GAS_PRICE_COLUMNS} FROM gas_prices g JOIN places p ON p.id = g.place_id WHERE g.place_id = %s",
@@ -3264,10 +3289,11 @@ def _run_backfill_place_locations_job(job_id):
 #
 # Bulk import via a CSV or JSON file (".json" filename -> JSON, otherwise
 # CSV). Each row/object needs a description/address (a "description",
-# "address", or "location" column/key) and a price ("price_per_gallon" or
-# "price"). Reuses find_or_create_place()/upsert_gas_price_row() from the
-# single-entry endpoint above, so a re-uploaded file just refreshes
-# existing prices rather than duplicating them.
+# "address", or "location" column/key), a price ("price_per_gallon" or
+# "price"), and optionally a "brand" (or "name") column/key. Reuses
+# find_or_create_place()/upsert_gas_price_row() from the single-entry
+# endpoint above, so a re-uploaded file just refreshes existing prices
+# (and brands) rather than duplicating them.
 #
 # Each row commits independently (rather than one commit for the whole
 # batch) so a bad row's rollback can't wipe out earlier good rows already
@@ -3315,9 +3341,11 @@ def _run_gas_price_upload_job(job_id, entries):
                 if price <= 0:
                     raise ValueError("price_per_gallon must be positive")
 
+                brand = entry.get("brand") or entry.get("name")
+
                 place_id, _, _ = find_or_create_place(cur, description)
 
-                upsert_gas_price_row(cur, place_id, price)
+                upsert_gas_price_row(cur, place_id, price, brand)
 
                 conn.commit()
 

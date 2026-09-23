@@ -669,12 +669,13 @@
 
         <div class="panel-form">
             <input id="gasprice-description" list="places-list" placeholder="A description (Shell near Minneapolis) or an address">
+            <input id="gasprice-brand" placeholder="Brand or name (optional, e.g. Shell)">
             <input id="gasprice-price" type="number" min="0.01" step="0.01" placeholder="Price per gallon ($)">
             <button onclick="withSpinner(this, addGasPrice)">Add / Update Price</button>
         </div>
 
         <div class="panel-form">
-            <label for="gasprice-file-input" style="font-size:11px;color:#555;">Bulk import from CSV/JSON (columns/keys: description or address, price_per_gallon or price)</label>
+            <label for="gasprice-file-input" style="font-size:11px;color:#555;">Bulk import from CSV/JSON (columns/keys: description or address, price_per_gallon or price, brand or name)</label>
             <input id="gasprice-file-input" type="file" accept=".csv,.json,application/json,text/csv">
             <button onclick="withSpinner(this, uploadGasPrices)">Upload</button>
             <div id="gasprice-upload-result" style="font-size:11px;color:#555;"></div>
