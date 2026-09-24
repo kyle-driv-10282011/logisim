@@ -613,6 +613,10 @@ so real brand-named stations ("Kwik Trip", "Shell", ...) rarely surface.
    throttle gate (`_overpass_throttle_gate()`, 1 request/2 seconds) keeps
    this polite to the public Overpass instance independently of the
    1-request/second Nominatim throttle shared by everything else.
+   `_query_overpass()` retries a 429/502/503/504 or timeout up to 3 times
+   with backoff, since the free public instance intermittently fails that
+   way under load regardless of the query itself — without this, one
+   transient blip loses a whole city's worth of stations to a row error.
 
 Every station found gets its own place (`find_or_create_place_from_osm_station()`
 — same rounded-coordinate dedup as everywhere else, a human-readable

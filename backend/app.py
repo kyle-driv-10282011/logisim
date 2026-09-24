@@ -810,6 +810,54 @@ def _overpass_throttle_gate():
         _last_overpass_call_monotonic[0] = time.monotonic()
 
 
+#
+# The public Overpass instance is shared/free and intermittently returns a
+# 502/503/504 or just times out under load, with no relation to whether the
+# query itself was fine - retrying after a short wait usually goes through.
+# A bulk city-search upload can be hundreds of rows, so without this, one
+# transient blip costs a whole row (and, worse, is easy to mistake for a
+# real "no stations here" or a bug rather than "try again"). Uses the same
+# max_retries=3 shape as geocode_limited's own RateLimiter for consistency,
+# with the throttle gate re-armed before every attempt (including retries)
+# so a retry burst can't itself look like the kind of hammering that got
+# the 503/504 in the first place.
+#
+def _query_overpass(query):
+
+    last_error = None
+
+    for attempt in range(3):
+
+        _overpass_throttle_gate()
+
+        try:
+            response = requests.post(
+                OVERPASS_URL,
+                data={"data": query},
+                headers={"User-Agent": "logisim-vehicle-sim"},
+                timeout=30
+            )
+            response.raise_for_status()
+            return response.json()
+
+        except requests.exceptions.Timeout as e:
+            last_error = e
+
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code in (429, 502, 503, 504):
+                last_error = e
+            else:
+                raise
+
+        if attempt < 2:
+            time.sleep(2.0 * (attempt + 1))
+
+    raise HTTPException(
+        status_code=502,
+        detail=f"Overpass API unavailable after retries: {last_error}"
+    )
+
+
 def find_gas_stations_in_city(city_text):
 
     geocode_throttle_gate()
@@ -834,18 +882,11 @@ def find_gas_stations_in_city(city_text):
         "out center tags;"
     )
 
-    _overpass_throttle_gate()
-    response = requests.post(
-        OVERPASS_URL,
-        data={"data": query},
-        headers={"User-Agent": "logisim-vehicle-sim"},
-        timeout=30
-    )
-    response.raise_for_status()
+    data = _query_overpass(query)
 
     stations = []
 
-    for element in response.json().get("elements", []):
+    for element in data.get("elements", []):
 
         if "lat" in element and "lon" in element:
             station_lat, station_lng = element["lat"], element["lon"]
