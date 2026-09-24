@@ -589,6 +589,41 @@ onward from the station to that remembered destination and start a new
 trip — automatically continuing the original drive without the user
 having to re-plan it.
 
+### Search a city for gas stations
+
+The regular bulk gas-price upload (`POST /api/gas-prices/upload`) needs an
+exact address per row — it forward-geocodes whatever text you give it
+(`find_or_create_place()`), and a plain city name just resolves to that
+city's center point, with no real station, brand, or address attached to
+it. A `city` column/key is a different kind of row: instead of one exact
+place, it means "find the real gas stations in this city and add all of
+them", which needs an actual POI search rather than a geocoder.
+
+Nominatim (used everywhere else in the app) is a geocoder, not a business
+directory — a free-text query like "gas station in Rochester, MN" mostly
+only matches OSM entries whose indexed name literally contains those words,
+so real brand-named stations ("Kwik Trip", "Shell", ...) rarely surface.
+`find_gas_stations_in_city()` instead:
+
+1. Geocodes the city text via Nominatim to get its bounding box (not just a
+   center point).
+2. Queries the [Overpass API](https://overpass-api.de) — OSM's actual POI
+   query service — for every node/way tagged `amenity=fuel` inside that
+   box, tags (`brand`, `name`, `addr:*`) included. A separate, slower
+   throttle gate (`_overpass_throttle_gate()`, 1 request/2 seconds) keeps
+   this polite to the public Overpass instance independently of the
+   1-request/second Nominatim throttle shared by everything else.
+
+Every station found gets its own place (`find_or_create_place_from_osm_station()`
+— same rounded-coordinate dedup as everywhere else, a human-readable
+description built from the OSM tags when present, and a reverse geocode
+fallback otherwise for its address and continent/country/state/city) and
+its own `gas_prices` row at that CSV/JSON row's price, with its real OSM
+brand/name — an explicit `brand`/`name` column on a `city` row is ignored,
+since each station keeps its own. One `city` row can therefore create many
+gas-price rows; `created` in the upload's response counts those, not input
+rows.
+
 ### Nearby city lookup
 
 `GET /api/vehicles/{id}/city` reverse-geocodes the vehicle's current
@@ -633,7 +668,7 @@ All endpoints are on the `backend` service, default `http://localhost:5000`.
 | `GET /api/gas-prices`           | List all priced places, each with `price_per_gallon`, `brand`, and the place's `description`/`lat`/`lng` |
 | `POST /api/gas-prices`          | Set the price at a place. Body: `{description, price_per_gallon, brand?}` — resolved via `find_or_create_place()` like a vehicle/path location. Upserts: re-submitting for the same place updates its price (and brand) rather than duplicating it. 400 if `price_per_gallon` isn't positive or the location doesn't resolve |
 | `DELETE /api/gas-prices/{place_id}` | Remove a place's price. 404 if that place has none |
-| `POST /api/gas-prices/upload`   | Bulk-set prices from an uploaded CSV or JSON file (multipart `file` field; `.json` filename parses as JSON, otherwise CSV). Each row/object needs a description/address (`description`, `address`, or `location`), a price (`price_per_gallon` or `price`), and optionally a brand/name (`brand` or `name`). A CSV's header row is optional: if row 0 doesn't look like one of those column names (`parse_gas_price_csv()` in `app.py`), every row including row 0 is read positionally as `description, price_per_gallon, brand` — otherwise a whole file with no header would silently fail every row instead of importing anything. Rows commit independently, so one bad row doesn't roll back the rest — response is `{created, errors: [{row, description, error}, ...]}` |
+| `POST /api/gas-prices/upload`   | Bulk-set prices from an uploaded CSV or JSON file (multipart `file` field; `.json` filename parses as JSON, otherwise CSV). Each row/object needs either a description/address (`description`, `address`, or `location`) or a `city` (see [Search a city for gas stations](#search-a-city-for-gas-stations)), plus a price (`price_per_gallon` or `price`) and optionally a brand/name (`brand` or `name` — ignored for `city` rows). A CSV's header row is optional: if row 0 doesn't look like one of those column names (`parse_gas_price_csv()` in `app.py`), every row including row 0 is read positionally as `description, price_per_gallon, brand` — otherwise a whole file with no header would silently fail every row instead of importing anything (`city` rows always need an explicit header). Rows commit independently, so one bad row doesn't roll back the rest — response is `{created, errors: [{row, description, error}, ...]}`, where `created` counts individual gas-price rows written, not input rows (one `city` row can create many) |
 
 Every response is JSON. Any unhandled backend exception returns a generic
 `500 {"detail": "Internal server error"}` — the real traceback is only in

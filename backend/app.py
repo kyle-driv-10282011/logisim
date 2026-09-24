@@ -728,6 +728,138 @@ def find_or_create_place_by_coords(cur, lat, lng):
 
 
 #
+# The city-search-upload equivalent of find_or_create_place_by_coords() - a
+# station found via find_gas_stations_in_city() already has real coordinates
+# and OSM tags (name/brand/address), so this skips the forward-geocode step
+# too, but unlike a plain road-diversion point it builds a proper
+# human-readable description from those tags (falling back to the reverse
+# geocode's address only when OSM tagged nothing useful) instead of the
+# generic "En route near X" label.
+#
+def find_or_create_place_from_osm_station(cur, lat, lng, tags):
+
+    lat = round_coord(lat)
+    lng = round_coord(lng)
+
+    cur.execute("SELECT id FROM places WHERE lat = %s AND lng = %s", (lat, lng))
+
+    existing = cur.fetchone()
+
+    if existing is not None:
+        return existing[0]
+
+    geocode_throttle_gate()
+    location = reverse_geocode_limited((lat, lng), zoom=18, language="en")
+
+    raw_address = location.raw.get("address", {}) if location is not None else {}
+    continent, country, state, city = extract_address_components(raw_address)
+
+    name = tags.get("name") or tags.get("brand")
+    housenumber = tags.get("addr:housenumber")
+    street = tags.get("addr:street")
+    street_address = f"{housenumber} {street}".strip() if street else None
+    tag_city = tags.get("addr:city") or city
+
+    label_parts = [part for part in (name, street_address or street, tag_city) if part]
+    description = ", ".join(dict.fromkeys(label_parts)) if label_parts else (
+        location.address if location is not None else "Fuel station"
+    )
+    address = location.address if location is not None else description
+
+    cur.execute(
+        """
+        INSERT INTO places (description, address, lat, lng, continent, country, state, city)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """,
+        (description, address, lat, lng, continent, country, state, city)
+    )
+
+    return cur.fetchone()[0]
+
+
+#
+# Nominatim (geocode_full()/find_or_create_place()) is a geocoder, not a POI
+# search engine - a free-text query like "gas station in Minneapolis, MN"
+# mostly only matches OSM entries whose indexed name literally contains
+# those words, so real brand-named stations ("Kwik Trip", "Shell") rarely
+# surface. Overpass is OSM's actual POI query service: given a bounding
+# box, it returns every node/way tagged amenity=fuel inside it, tags
+# (brand/name/addr:*) included - the only way to reliably find "the gas
+# stations in this city" rather than "the one thing indexed as literally
+# matching this text". A separate, lower-traffic throttle gate (rather than
+# reusing geocode_throttle_gate()) keeps this polite to the public Overpass
+# instance without slowing down unrelated Nominatim calls that happen to
+# run in the same job.
+#
+OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+
+_overpass_throttle_lock = threading.Lock()
+_last_overpass_call_monotonic = [0.0]
+
+
+def _overpass_throttle_gate():
+
+    with _overpass_throttle_lock:
+
+        wait_seconds = 2.0 - (time.monotonic() - _last_overpass_call_monotonic[0])
+
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+
+        _last_overpass_call_monotonic[0] = time.monotonic()
+
+
+def find_gas_stations_in_city(city_text):
+
+    geocode_throttle_gate()
+    location = geocode_limited(city_text, addressdetails=True)
+
+    if location is None:
+        raise HTTPException(status_code=400, detail=f"Could not geocode city: {city_text}")
+
+    bbox = location.raw.get("boundingbox")
+
+    if not bbox:
+        raise HTTPException(status_code=400, detail=f"No bounding box available for city: {city_text}")
+
+    south, north, west, east = (float(value) for value in bbox)
+
+    query = (
+        "[out:json][timeout:25];"
+        "("
+        f'node["amenity"="fuel"]({south},{west},{north},{east});'
+        f'way["amenity"="fuel"]({south},{west},{north},{east});'
+        ");"
+        "out center tags;"
+    )
+
+    _overpass_throttle_gate()
+    response = requests.post(
+        OVERPASS_URL,
+        data={"data": query},
+        headers={"User-Agent": "logisim-vehicle-sim"},
+        timeout=30
+    )
+    response.raise_for_status()
+
+    stations = []
+
+    for element in response.json().get("elements", []):
+
+        if "lat" in element and "lon" in element:
+            station_lat, station_lng = element["lat"], element["lon"]
+        elif "center" in element:
+            station_lat, station_lng = element["center"]["lat"], element["center"]["lon"]
+        else:
+            continue
+
+        stations.append({"lat": station_lat, "lng": station_lng, "tags": element.get("tags", {})})
+
+    return stations
+
+
+#
 # Reverse-geocoding the same rounded coordinates always used to mean the
 # same real-world place, so caching by (rounded lat, rounded lng) avoids
 # re-hitting Nominatim's rate-limited endpoint on every poll of the same
@@ -3288,12 +3420,20 @@ def _run_backfill_place_locations_job(job_id):
 
 #
 # Bulk import via a CSV or JSON file (".json" filename -> JSON, otherwise
-# CSV). Each row/object needs a description/address (a "description",
-# "address", or "location" column/key), a price ("price_per_gallon" or
-# "price"), and optionally a "brand" (or "name") column/key. Reuses
-# find_or_create_place()/upsert_gas_price_row() from the single-entry
-# endpoint above, so a re-uploaded file just refreshes existing prices
-# (and brands) rather than duplicating them.
+# CSV). Each row/object needs either a description/address (a "description",
+# "address", or "location" column/key) or a "city" column/key, plus a price
+# ("price_per_gallon" or "price") and optionally a "brand" (or "name")
+# column/key. Reuses find_or_create_place()/upsert_gas_price_row() from the
+# single-entry endpoint above, so a re-uploaded file just refreshes existing
+# prices (and brands) rather than duplicating them.
+#
+# A "city" row is a different shape of input: rather than one exact place,
+# it's "find the real gas stations in this city" - find_gas_stations_in_city()
+# (Overpass, not Nominatim - see its own comment) returns every station OSM
+# knows about there, and every one of them gets a gas_prices row at that
+# row's price, so one input row can create many output rows. An explicit
+# "brand"/"name" column is ignored for city rows - each station keeps its
+# own real brand from OSM instead.
 #
 # Each row commits independently (rather than one commit for the whole
 # batch) so a bad row's rollback can't wipe out earlier good rows already
@@ -3328,10 +3468,12 @@ def _run_gas_price_upload_job(job_id, entries):
                 if not isinstance(entry, dict):
                     raise ValueError("row is not an object/record")
 
-                description = entry.get("description") or entry.get("address") or entry.get("location")
+                place_text = entry.get("description") or entry.get("address") or entry.get("location")
+                city_text = entry.get("city")
+                description = place_text or city_text
 
                 if not description:
-                    raise ValueError("missing description/address/location")
+                    raise ValueError("missing description/address/location/city")
 
                 price_raw = entry.get("price_per_gallon")
                 price_raw = price_raw if price_raw is not None else entry.get("price")
@@ -3341,15 +3483,37 @@ def _run_gas_price_upload_job(job_id, entries):
                 if price <= 0:
                     raise ValueError("price_per_gallon must be positive")
 
-                brand = entry.get("brand") or entry.get("name")
+                if place_text:
 
-                place_id, _, _ = find_or_create_place(cur, description)
+                    brand = entry.get("brand") or entry.get("name")
 
-                upsert_gas_price_row(cur, place_id, price, brand)
+                    place_id, _, _ = find_or_create_place(cur, place_text)
 
-                conn.commit()
+                    upsert_gas_price_row(cur, place_id, price, brand)
 
-                created += 1
+                    conn.commit()
+
+                    created += 1
+
+                else:
+
+                    stations = find_gas_stations_in_city(city_text)
+
+                    if not stations:
+                        raise ValueError(f"no gas stations found in {city_text}")
+
+                    for station in stations:
+
+                        station_place_id = find_or_create_place_from_osm_station(
+                            cur, station["lat"], station["lng"], station["tags"]
+                        )
+                        station_brand = station["tags"].get("brand") or station["tags"].get("name")
+
+                        upsert_gas_price_row(cur, station_place_id, price, station_brand)
+
+                    conn.commit()
+
+                    created += len(stations)
 
             except Exception as e:
 
@@ -3385,15 +3549,17 @@ def _run_gas_price_upload_job(job_id, entries):
 # (loosely - case/spacing/punctuation-insensitive, so "Price Per Gallon" or
 # "price_per_gallon" both match); if not, assume the file is headerless and
 # fall back to the common description/address, price[, brand] column order.
+# "city" rows (see find_gas_stations_in_city()) always need an explicit
+# header, since there's no sensible positional guess for them.
 #
 CSV_HEADER_ALIASES = {
     "description": "description",
     "address": "description",
     "location": "description",
+    "city": "city",
     "name": "brand",
     "brand": "brand",
     "price": "price_per_gallon",
-    "priceper gallon": "price_per_gallon",
     "pricepergallon": "price_per_gallon",
 }
 

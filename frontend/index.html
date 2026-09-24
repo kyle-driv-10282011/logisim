@@ -675,7 +675,7 @@
         </div>
 
         <div class="panel-form">
-            <label for="gasprice-file-input" style="font-size:11px;color:#555;">Bulk import from CSV/JSON (columns/keys: description or address, price_per_gallon or price, brand or name. CSV header row is optional - if omitted, columns are read in that order)</label>
+            <label for="gasprice-file-input" style="font-size:11px;color:#555;">Bulk import from CSV/JSON (columns/keys: description or address, price_per_gallon or price, brand or name. CSV header row is optional - if omitted, columns are read in that order. Or use a "city" column instead of description/address to add every real gas station found in that city at the given price - requires a header row)</label>
             <input id="gasprice-file-input" type="file" accept=".csv,.json,application/json,text/csv">
             <button onclick="withSpinner(this, uploadGasPrices)">Upload</button>
             <div id="gasprice-upload-result" style="font-size:11px;color:#555;"></div>
