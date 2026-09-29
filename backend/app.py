@@ -3440,6 +3440,18 @@ def upsert_gas_price(req: CreateGasPriceRequest):
 
     result = gas_price_dict(cur.fetchone())
 
+    #
+    # Piggybacks the place's own full row (same shape GET /api/places
+    # returns) onto this response so the frontend can patch its local
+    # placesById map directly instead of re-fetching the entire places
+    # list just to pick up one possibly-new row - at tens of thousands of
+    # saved places that full list is multiple megabytes, and re-pulling it
+    # after every single price add makes "add one gas price" cost far more
+    # than the one row it actually changed.
+    #
+    cur.execute(f"SELECT {PLACE_COLUMNS} FROM places WHERE id = %s", (place_id,))
+    result["place"] = place_dict(cur.fetchone())
+
     conn.commit()
 
     cur.close()

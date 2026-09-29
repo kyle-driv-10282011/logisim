@@ -788,6 +788,35 @@ async function loadPlaces() {
 
 
 //
+// Adds/updates one place in local state without re-fetching the full
+// places list - at tens of thousands of saved places that list is
+// multiple megabytes, and a single-row action (adding one gas price,
+// adding one vehicle) shouldn't cost re-downloading and re-parsing all of
+// it just to make sure that one row is known. Only appends a new
+// <option> when the place is genuinely new (not already in placesById),
+// so re-saving an existing place's price doesn't pile up duplicate
+// datalist entries.
+//
+function patchPlaceLocally(place) {
+
+    const isNew = !placesById.has(place.id);
+
+    placesById.set(place.id, place);
+
+    if (isNew) {
+
+        const option = document.createElement("option");
+        option.value = place.description;
+        option.textContent = place.address;
+
+        document.getElementById("places-list").appendChild(option);
+    }
+
+    renderPlaceList();
+}
+
+
+//
 // A place matches up to (but not including) levelIndex when every filter
 // level *before* it either isn't set or matches this place - i.e. "is this
 // place still a valid candidate for picking a value at levelIndex", not "does
@@ -1318,8 +1347,18 @@ async function addGasPrice() {
     brandInput.value = "";
     priceInput.value = "";
 
-    loadGasPrices();
-    loadPlaces();
+    //
+    // Patches local state from this response instead of loadGasPrices() +
+    // loadPlaces() - both of those re-fetch their *entire* multi-megabyte
+    // lists, which turned "add one price" into the same multi-second cost
+    // as a full page reload once there were tens of thousands of rows. The
+    // response already has everything one new/updated row needs.
+    //
+    patchPlaceLocally(data.place);
+    gasPricesByPlaceId.set(data.place_id, data);
+
+    renderGasPriceMarkers();
+    renderGasPriceList();
 }
 
 
@@ -1340,7 +1379,12 @@ async function removeGasPrice(placeId) {
         return;
     }
 
-    loadGasPrices();
+    // Same reasoning as addGasPrice() above - no need to re-fetch everything
+    // just to drop the one row we already know was deleted.
+    gasPricesByPlaceId.delete(placeId);
+
+    renderGasPriceMarkers();
+    renderGasPriceList();
 }
 
 
