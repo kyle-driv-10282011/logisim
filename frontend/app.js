@@ -1061,12 +1061,9 @@ async function removePlace(placeId) {
 // meaningful whether prices span cents or dollars. A single price (or all
 // equal) just renders mid-color - there's nothing to contrast it against.
 //
-function gasPriceColor(price, allPrices) {
+function gasPriceColor(price, min, max) {
 
-    const min = Math.min(...allPrices);
-    const max = Math.max(...allPrices);
-
-    if (allPrices.length <= 1 || max === min) {
+    if (min === undefined || max === undefined || max === min) {
         return "#f08c00";
     }
 
@@ -1134,13 +1131,19 @@ function gasStationLabel(brand, description) {
 function renderGasPriceMarkers() {
 
     const seen = new Set();
-    const allPrices = [...gasPricesByPlaceId.values()].map((gasPrice) => gasPrice.price_per_gallon);
+
+    let minPrice, maxPrice;
+
+    for (const gasPrice of gasPricesByPlaceId.values()) {
+        if (minPrice === undefined || gasPrice.price_per_gallon < minPrice) minPrice = gasPrice.price_per_gallon;
+        if (maxPrice === undefined || gasPrice.price_per_gallon > maxPrice) maxPrice = gasPrice.price_per_gallon;
+    }
 
     for (const gasPrice of gasPricesByPlaceId.values()) {
 
         seen.add(gasPrice.place_id);
 
-        const color = gasPriceColor(gasPrice.price_per_gallon, allPrices);
+        const color = gasPriceColor(gasPrice.price_per_gallon, minPrice, maxPrice);
         const label = `${gasStationLabel(gasPrice.brand, gasPrice.description)}: $${gasPrice.price_per_gallon.toFixed(2)}/gal`;
 
         let marker = gasPriceMarkers.get(gasPrice.place_id);
