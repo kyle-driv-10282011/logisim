@@ -189,8 +189,18 @@ let gasPricesByPlaceId = new Map(); // place_id -> gas price row (from GET /api/
 const gasPriceMarkers = new Map();  // place_id -> persistent Leaflet circleMarker (the map overlay itself)
 let gasPriceOverlayVisible = true;  // toggled by the "Show on map" checkbox in the Gas Prices tab
 
+//
+// preferCanvas: true draws vector layers (the gas price circleMarkers - one
+// per gas station, potentially thousands after a bulk/city upload) onto a
+// single shared <canvas> instead of one SVG DOM node each. SVG per-marker
+// is fine at dozens/hundreds of markers but bogs down badly at thousands -
+// both the initial render and every pan/zoom afterward, since the browser
+// has to manage that many DOM nodes. Canvas keeps tooltip/click
+// interactivity (Leaflet hit-tests canvas layers itself), it's just no
+// longer one element per marker.
+//
 // Create the map
-map = L.map("map").setView([44.977, -93.265], 6);
+map = L.map("map", { preferCanvas: true }).setView([44.977, -93.265], 6);
 
 // Add OpenStreetMap tiles
 L.tileLayer(
