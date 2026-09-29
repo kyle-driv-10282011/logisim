@@ -1100,14 +1100,78 @@ NEARBY_GAS_STATION_MILES = 10
 # current route - that's what actually determines how long each option's
 # detour takes, not how soon a station comes up along the original route.
 #
+#
+# The widest either qualifying distance goes, used to pad the bounding box
+# below - a station further than this from every candidate point can't
+# possibly qualify either way, so there's no need to even fetch it from the
+# DB or run it through the (much more expensive) per-point route scan.
+#
+GAS_STATION_CANDIDATE_PAD_MILES = max(MAX_GAS_STATION_DETOUR_MILES, NEARBY_GAS_STATION_MILES)
+
+#
+# Degrees-per-mile for latitude is constant (~69); longitude shrinks toward
+# the poles (69 * cos(latitude)), so a fixed, deliberately conservative
+# divisor (~30, valid up to roughly 64 degrees of latitude) over-pads
+# rather than under-pads at high latitudes - this box only needs to be a
+# cheap, inclusive pre-filter, not an exact one, since the real haversine
+# checks below still apply on top of it.
+#
+def _bounding_box_with_pad(points, pad_miles):
+
+    lats = [lat for lat, _ in points]
+    lngs = [lng for _, lng in points]
+
+    return (
+        min(lats) - pad_miles / 69.0, max(lats) + pad_miles / 69.0,
+        min(lngs) - pad_miles / 30.0, max(lngs) + pad_miles / 30.0
+    )
+
+
+#
+# Downsamples to an even stride rather than truncating, so a long route's
+# far end still gets some coverage instead of only ever checking its first
+# max_points miles.
+#
+def _downsample_points(points, max_points):
+
+    if len(points) <= max_points:
+        return points
+
+    step = len(points) / max_points
+
+    return [points[int(i * step)] for i in range(max_points)]
+
+
 def find_gas_station_options(cur, route, distances_miles, current_distance_miles):
+
+    current_lat, current_lng = interpolate_position_at_distance(route, distances_miles, current_distance_miles)
+
+    ahead_start_index = bisect.bisect_left(distances_miles, current_distance_miles)
+    ahead_route = route[ahead_start_index:]
+
+    #
+    # A bulk-uploaded gas_prices table can be tens of thousands of rows
+    # nationwide - fetching all of them and running every one through the
+    # per-point nearest-gap scan below (O(stations x route points)) is what
+    # actually made this endpoint slow enough to block the 3-second poll
+    # that calls it. Filtering in SQL to a bounding box around the
+    # remaining route (or just the current point, if there's no route left)
+    # cuts the candidate set down to stations that could plausibly qualify
+    # before any of that per-point work happens.
+    #
+    min_lat, max_lat, min_lng, max_lng = _bounding_box_with_pad(
+        ahead_route if ahead_route else [(current_lat, current_lng)],
+        GAS_STATION_CANDIDATE_PAD_MILES
+    )
 
     cur.execute(
         """
         SELECT p.id, p.description, p.lat, p.lng, g.price_per_gallon, g.brand
         FROM gas_prices g
         JOIN places p ON p.id = g.place_id
-        """
+        WHERE p.lat BETWEEN %s AND %s AND p.lng BETWEEN %s AND %s
+        """,
+        (min_lat, max_lat, min_lng, max_lng)
     )
 
     stations = cur.fetchall()
@@ -1115,10 +1179,15 @@ def find_gas_station_options(cur, route, distances_miles, current_distance_miles
     if not stations:
         return []
 
-    current_lat, current_lng = interpolate_position_at_distance(route, distances_miles, current_distance_miles)
-
-    ahead_start_index = bisect.bisect_left(distances_miles, current_distance_miles)
-    ahead_route = route[ahead_start_index:]
+    #
+    # Bounds the remaining worst case too - a long-haul route can still
+    # have thousands of geometry points even after the bbox filter thins
+    # the station side down, so this caps the other half of the product.
+    # 500 points is more than enough resolution for a 15-mile detour
+    # threshold; this only decides "is some station roughly on the way",
+    # not turn-by-turn navigation.
+    #
+    nearest_gap_route = _downsample_points(ahead_route, 500) if ahead_route else []
 
     options = []
 
@@ -1128,11 +1197,11 @@ def find_gas_station_options(cur, route, distances_miles, current_distance_miles
 
         ahead = False
 
-        if ahead_route:
+        if nearest_gap_route:
 
             nearest_gap_miles = min(
                 haversine_miles(lat, lng, point_lat, point_lng)
-                for point_lat, point_lng in ahead_route
+                for point_lat, point_lng in nearest_gap_route
             )
 
             ahead = nearest_gap_miles <= MAX_GAS_STATION_DETOUR_MILES

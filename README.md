@@ -557,6 +557,21 @@ continuation of the original one. The frontend lists every option (next to
 button, tagging any that only qualified via the nearby check (not ahead on
 the route) as "off-route".
 
+Naively checking every station this way is O(stations × route points) -
+each candidate's "ahead" check scans every remaining route point looking
+for its nearest gap. That's invisible at a handful of hand-entered stations
+but became the actual bottleneck once a
+[city search upload](#search-a-city-for-gas-stations) could put tens of
+thousands of rows in `gas_prices`: at that scale a single call could take
+longer than the 3-second poll interval that triggers the next one,
+backing up requests and blocking the backend meanwhile. `find_gas_station_options()`
+now filters candidates in SQL to a lat/lng bounding box around the
+remaining route first (padded by the wider of the two distance
+thresholds, so nothing that could actually qualify gets excluded), and
+caps the route side of the scan to at most 500 (evenly-strided) points -
+more than enough resolution for a 15-mile detour threshold. Together these
+cut a worst-case ~16 second call down to about 200ms at 13,000 stations.
+
 **Making the detour.** `POST /api/vehicles/{id}/divert-to-gas-station`,
 body `{gas_station_place_id}` (whichever option the user picked — trusted
 as-is once it's confirmed to be a real `gas_prices` place, not re-derived
