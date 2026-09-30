@@ -502,6 +502,21 @@ another. Because gallons are consumed by distance, not time, this is
 independent of traffic/speed and computed the same way regardless of how
 long the vehicle sits there in real time.
 
+`GET /api/vehicles`' own status column is computed two ways that have to
+agree: a cheap SQL `CASE` (has the trip's *scheduled* duration elapsed?)
+decides DRIVING-or-not up front, and only vehicles it calls DRIVING get
+their real, fuel-aware status from `fetch_live_trip_progress()`
+(`resolve_trip_progress()` again) to tell STRANDED apart from actually
+arrived. Once enough real time passes that the scheduled duration has
+"elapsed" — which a STRANDED vehicle, frozen indefinitely, always
+eventually does — the cheap `CASE` stops calling it DRIVING at all, so it
+never got a live status computed and silently fell back to `READY`: a
+real STRANDED vehicle reported as idle, with no badge and no
+roadside-refuel button ever offered for it. `fetch_live_trip_progress()`
+now runs for every vehicle regardless of what the cheap `CASE` guessed —
+it already scopes itself to each vehicle's own latest uncancelled trip, so
+this costs nothing extra for a vehicle with no active trip at all.
+
 **Roadside refuel.** `POST /api/vehicles/{id}/roadside-refuel` recovers a
 `STRANDED` vehicle in place — no gas station required, since there isn't
 one out on the open road — for a flat placeholder fee
@@ -556,6 +571,20 @@ continuation of the original one. The frontend lists every option (next to
 "Send roadside fuel" in the In Route panel) as its own "Divert to ..."
 button, tagging any that only qualified via the nearby check (not ahead on
 the route) as "off-route".
+
+Being within `MAX_GAS_STATION_DETOUR_MILES` of the road only means a
+station is close to the *route line* - a station near the far end of a
+long remaining route qualifies just as easily as one just up ahead, with
+nothing tying that to how much fuel is actually left to get there. A
+vehicle could otherwise be offered (and pick) a station beyond its own
+current range and run dry trying to reach the very station meant to rescue
+it. `find_gas_station_options()` takes an optional `max_reachable_miles`
+(the vehicle's live `fuel_gallons_remaining × mpg`, computed by
+`gas_station_ahead()`) and drops any candidate whose straight-line distance
+exceeds 80% of that - a margin because the real road distance is always
+`>=` the straight-line one used here, so this errs toward excluding a
+marginal station rather than accepting one that turns out not to be
+reachable.
 
 Naively checking every station this way is O(stations × route points) -
 each candidate's "ahead" check scans every remaining route point looking

@@ -1142,7 +1142,7 @@ def _downsample_points(points, max_points):
     return [points[int(i * step)] for i in range(max_points)]
 
 
-def find_gas_station_options(cur, route, distances_miles, current_distance_miles):
+def find_gas_station_options(cur, route, distances_miles, current_distance_miles, max_reachable_miles=None):
 
     current_lat, current_lng = interpolate_position_at_distance(route, distances_miles, current_distance_miles)
 
@@ -1194,6 +1194,21 @@ def find_gas_station_options(cur, route, distances_miles, current_distance_miles
     for place_id, description, lat, lng, price_per_gallon, brand in stations:
 
         distance_from_vehicle_miles = haversine_miles(current_lat, current_lng, lat, lng)
+
+        #
+        # A station "ahead on the remaining route" can still be arbitrarily
+        # far *along* that route - MAX_GAS_STATION_DETOUR_MILES only bounds
+        # how far it is from the road, not how many miles of driving away it
+        # is. Without this, a vehicle could be offered (and could pick) a
+        # station beyond its own current range and run dry trying to reach
+        # the very station meant to rescue it - which is exactly what
+        # happened before this check existed. distance_from_vehicle_miles is
+        # straight-line, not the real road distance (which is always >=
+        # it), so a margin here errs toward excluding a station that's only
+        # marginally reachable rather than accepting one that isn't.
+        #
+        if max_reachable_miles is not None and distance_from_vehicle_miles > max_reachable_miles * 0.8:
+            continue
 
         ahead = False
 
@@ -2661,8 +2676,20 @@ def list_vehicles(include_sold: bool = False):
     vehicle_models_by_id = fetch_vehicle_models_by_id(cur, [row[2] for row in rows])
     places_by_id = fetch_places_by_id(cur, [row[3] for row in rows])
 
+    #
+    # Every vehicle, not just the ones the naive elapsed-time CASE above
+    # flagged "DRIVING" - that check has no idea about fuel, so a vehicle
+    # that ran dry (STRANDED, frozen mid-route) but whose *scheduled* time
+    # has long since elapsed reads exactly like an old finished trip to it,
+    # and got silently skipped here, defaulting all the way down to
+    # row[8]'s "READY" below - hiding a real STRANDED vehicle (no badge, no
+    # roadside-refuel option) as if it were simply idle. fetch_live_trip_progress()
+    # already scopes itself to each vehicle's own latest uncancelled trip,
+    # so passing every vehicle id costs nothing extra for ones with no
+    # active trip at all - they just don't come back in the result.
+    #
     progress_by_vehicle = fetch_live_trip_progress(
-        cur, [row[0] for row in rows if row[8] == "DRIVING"], time_multiplier
+        cur, [row[0] for row in rows], time_multiplier
     )
 
     cur.close()
@@ -3033,7 +3060,8 @@ def fetch_active_trip_for_diversion(cur, vehicle_id, time_multiplier):
         "distances_miles": distances_miles,
         "resume_destination_place_id": resume_destination_place_id,
         "destination_place_id": destination_place_id,
-        "progress": progress
+        "progress": progress,
+        "mpg": mpg
     }
 
 
@@ -3064,8 +3092,16 @@ def gas_station_ahead(id: int):
         conn.close()
         return {"stations": []}
 
+    fuel_gallons_remaining = context["progress"]["fuel_gallons_remaining"]
+
+    max_reachable_miles = (
+        fuel_gallons_remaining * context["mpg"]
+        if fuel_gallons_remaining is not None and context["mpg"] else None
+    )
+
     stations = find_gas_station_options(
-        cur, context["route"], context["distances_miles"], context["progress"]["distance_miles"]
+        cur, context["route"], context["distances_miles"], context["progress"]["distance_miles"],
+        max_reachable_miles
     )
 
     cur.close()
