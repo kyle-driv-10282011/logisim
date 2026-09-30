@@ -2638,6 +2638,17 @@ def list_vehicles(include_sold: bool = False):
     # disambiguated below via fetch_live_trip_progress(), which is the only
     # place that actually knows about fuel.
     #
+    #
+    # The trailing boolean (from latest_trip below) is true only while the
+    # vehicle's latest uncancelled trip hasn't actually settled yet (same
+    # test settle_arrived_vehicles() uses to decide "still needs
+    # settling") - resolve_trip_progress() on an already-settled trip is a
+    # pure function of that trip's own fixed fields plus ever-increasing
+    # elapsed time, so it reads "ARRIVED" forever, not just at the moment
+    # it happened. Without this, fetch_live_trip_progress() below would
+    # permanently override a settled vehicle's real READY status with that
+    # stale ARRIVED verdict from whatever trip it last drove.
+    #
     cur.execute(
         f"""
         SELECT
@@ -2661,7 +2672,9 @@ def list_vehicles(include_sold: bool = False):
                 ) THEN 'DRIVING'
                 ELSE 'READY'
             END,
-            COALESCE(ctm.miles, 0)
+            COALESCE(ctm.miles, 0),
+            latest_trip.destination_place_id IS NOT NULL
+                AND v.place_id IS DISTINCT FROM latest_trip.destination_place_id
         FROM vehicles v
         LEFT JOIN (
             SELECT t.vehicle_id, SUM((p.distances_miles ->> -1)::double precision) AS miles
@@ -2671,6 +2684,15 @@ def list_vehicles(include_sold: bool = False):
             AND (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) >= t.realized_duration_seconds
             GROUP BY t.vehicle_id
         ) ctm ON ctm.vehicle_id = v.id
+        LEFT JOIN LATERAL (
+            SELECT p.destination_place_id
+            FROM trips t
+            JOIN paths p ON p.id = t.path_id
+            WHERE t.vehicle_id = v.id
+            AND t.cancelled_at IS NULL
+            ORDER BY t.started_at DESC
+            LIMIT 1
+        ) latest_trip ON true
         {"" if include_sold else "WHERE v.sold = FALSE"}
         ORDER BY v.id
         """,
@@ -2683,19 +2705,19 @@ def list_vehicles(include_sold: bool = False):
     places_by_id = fetch_places_by_id(cur, [row[3] for row in rows])
 
     #
-    # Every vehicle, not just the ones the naive elapsed-time CASE above
-    # flagged "DRIVING" - that check has no idea about fuel, so a vehicle
-    # that ran dry (STRANDED, frozen mid-route) but whose *scheduled* time
-    # has long since elapsed reads exactly like an old finished trip to it,
-    # and got silently skipped here, defaulting all the way down to
-    # row[9]'s "READY" below - hiding a real STRANDED vehicle (no badge, no
-    # roadside-refuel option) as if it were simply idle. fetch_live_trip_progress()
-    # already scopes itself to each vehicle's own latest uncancelled trip,
-    # so passing every vehicle id costs nothing extra for ones with no
-    # active trip at all - they just don't come back in the result.
+    # Every vehicle with an unsettled trip (row[10]), not just the ones the
+    # naive elapsed-time CASE above flagged "DRIVING" - that check has no
+    # idea about fuel, so a vehicle that ran dry (STRANDED, frozen
+    # mid-route) but whose *scheduled* time has long since elapsed reads
+    # exactly like an old finished trip to it, and got silently skipped
+    # here, defaulting all the way down to row[9]'s "READY" below - hiding
+    # a real STRANDED vehicle (no badge, no roadside-refuel option) as if
+    # it were simply idle. row[10] (not the naive CASE) is what actually
+    # decides this now - see its own comment above for why a settled
+    # vehicle has to be excluded rather than just "every vehicle".
     #
     progress_by_vehicle = fetch_live_trip_progress(
-        cur, [row[0] for row in rows], time_multiplier
+        cur, [row[0] for row in rows if row[10]], time_multiplier
     )
 
     cur.close()
