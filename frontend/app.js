@@ -302,7 +302,6 @@ function clearFocus() {
 
 function renderFocusDependentViews() {
 
-    renderInRouteList();
     renderVehicleList();
     renderPathSelectForTripVehicle();
     renderBackToVehicleHint();
@@ -473,7 +472,6 @@ const TAB_LABELS = {
     places: "Places",
     myvehicles: "My Vehicles",
     paths: "Paths",
-    inroute: "In Route",
     gasprices: "Gas Prices",
     jobs: "Background Jobs"
 };
@@ -523,7 +521,7 @@ document.getElementById("origin").addEventListener("input", () => {
 
 function showTab(tab) {
 
-    for (const name of ["vehiclemodels", "places", "myvehicles", "paths", "inroute", "gasprices", "jobs"]) {
+    for (const name of ["vehiclemodels", "places", "myvehicles", "paths", "gasprices", "jobs"]) {
 
         document.getElementById(`tab-${name}`).classList.toggle("active", name === tab);
         document.getElementById(`tab-button-${name}`).classList.toggle("active", name === tab);
@@ -638,7 +636,6 @@ async function loadVehicleModels() {
     }
 
     renderVehicleList();
-    renderInRouteList();
     renderVehicleModelList();
 }
 
@@ -1549,6 +1546,9 @@ function renderVehicleList() {
                       : `<button class="refuel-button" data-id="${vehicle.id}">Refuel</button>`) +
                   `<button class="sell-button" data-id="${vehicle.id}">Sell</button>` +
                   `</div>`
+                : "") +
+            (driving && vehicle.id === selectedVehicleId && trip
+                ? vehicleDetailHtml(vehicle, trip)
                 : "");
 
         list.appendChild(item);
@@ -1570,8 +1570,8 @@ function renderVehicleList() {
         // tracks that itself via refuelInFlightVehicleId so the "Refueling..."
         // state survives every 1s poll-driven re-render of this list
         // instead of being wiped by the very next one (see
-        // divertInFlightVehicleId in renderInRouteList() for the same fix
-        // applied to the In Route panel's own divert button).
+        // divertInFlightVehicleId above for the same fix applied to the
+        // divert button).
         //
         if (!button.disabled) {
             button.onclick = (event) => {
@@ -1579,6 +1579,40 @@ function renderVehicleList() {
                 refuelVehicle(Number(button.dataset.id));
             };
         }
+    }
+
+    const roadsideButton = document.getElementById("roadside-refuel-button");
+
+    if (roadsideButton) {
+        roadsideButton.onclick = (event) => {
+            event.stopPropagation();
+            withSpinner(roadsideButton, () => roadsideRefuel(Number(roadsideButton.dataset.id)));
+        };
+    }
+
+    //
+    // Not wrapped in withSpinner() like other buttons - divertToGasStation()
+    // already re-renders this whole list itself via divertInFlightVehicleId,
+    // so a second, independent spinner/disabled mechanism on the same
+    // (about to be replaced) buttons would just be redundant.
+    //
+    for (const button of list.querySelectorAll(".divert-gas-station-button")) {
+
+        if (!button.disabled) {
+            button.onclick = (event) => {
+                event.stopPropagation();
+                divertToGasStation(Number(button.dataset.vehicleId), Number(button.dataset.placeId));
+            };
+        }
+    }
+
+    for (const checkbox of list.querySelectorAll(".gas-station-watch-toggle")) {
+
+        checkbox.onclick = (event) => event.stopPropagation();
+
+        checkbox.onchange = () => {
+            toggleGasStationWatch(Number(checkbox.dataset.vehicleId), checkbox.checked);
+        };
     }
 }
 
@@ -1780,9 +1814,13 @@ function selectVehicle(vehicleId) {
             map.panTo(trip.position);
         }
 
-        showTab("inroute");
         fetchCurrentCity();
-        fetchGasStationAhead();
+
+        const vehicle = vehiclesById.get(vehicleId);
+
+        if (vehicle && vehicle.gas_station_watch_enabled) {
+            fetchGasStationAhead();
+        }
     }
 
     renderFocusDependentViews();
@@ -1816,7 +1854,7 @@ async function fetchCurrentCity() {
     //
     if (selectedVehicleId === vehicleId) {
         currentCity = { vehicleId, city: data.city };
-        renderInRouteList();
+        renderVehicleList();
     }
 }
 
@@ -1849,8 +1887,51 @@ async function fetchGasStationAhead() {
 
     if (selectedVehicleId === vehicleId) {
         gasStationAhead = { vehicleId, stations: data.stations };
-        renderInRouteList();
+        renderVehicleList();
     }
+}
+
+
+//
+// Persists the per-vehicle opt-in (vehicles.gas_station_watch_enabled) so
+// it survives reloads and reflects the same way for anyone else looking
+// at this instance, rather than being a purely local UI preference.
+// Turning it off drops any stale station list immediately instead of
+// leaving a now-hidden toggle's old results sitting in memory; turning it
+// on fetches right away rather than waiting up to 3s for the next poll.
+//
+async function toggleGasStationWatch(vehicleId, enabled) {
+
+    const response = await fetch(API + "/api/vehicles/" + vehicleId + "/gas-station-watch", {
+
+        method: "POST",
+
+        headers: {
+            "Content-Type": "application/json"
+        },
+
+        body: JSON.stringify({ enabled })
+
+    });
+
+    if (!response.ok) {
+        renderVehicleList();
+        return;
+    }
+
+    const vehicle = vehiclesById.get(vehicleId);
+
+    if (vehicle) {
+        vehicle.gas_station_watch_enabled = enabled;
+    }
+
+    if (enabled) {
+        fetchGasStationAhead();
+    } else if (gasStationAhead && gasStationAhead.vehicleId === vehicleId) {
+        gasStationAhead = null;
+    }
+
+    renderVehicleList();
 }
 
 
@@ -1923,65 +2004,35 @@ function fuelGaugeHtml(remainingGallons, capacityGallons) {
 }
 
 
-function renderInRouteList() {
+//
+// The expanded block shown inline on a DRIVING/STRANDED vehicle's own card
+// once it's selected - this used to be a separate "In Route" tab's detail
+// panel, keyed off the same selectedVehicleId, just rendered somewhere
+// else on the page. Skips anything the compact card above it already
+// shows (name/model, status badge, trip miles, gas used, fuel gauge) so
+// selecting a vehicle adds detail rather than repeating it.
+//
+function vehicleDetailHtml(vehicle, trip) {
 
-    const list = document.getElementById("inroute-list");
-
-    list.innerHTML = "";
-
-    for (const trip of activeTripsById.values()) {
-
-        const vehicle = vehiclesById.get(trip.vehicle_id);
-
-        const item = document.createElement("div");
-
-        item.className = "vehicle-item" + (trip.vehicle_id === selectedVehicleId ? " selected" : "");
-        item.onclick = () => selectVehicle(trip.vehicle_id);
-
-        const gallonsUsed = tripGallonsUsed(trip, vehicle);
-
-        item.innerHTML =
-            `${vehicle ? vehicle.name : trip.vehicle_name} ` +
-            `<span class="status-badge status-${trip.status}">${trip.status}</span>` +
-            (gallonsUsed !== null
-                ? ` <span class="gas-badge">&#9981; ${formatGallons(gallonsUsed)} gal</span>`
-                : "");
-
-        list.appendChild(item);
-    }
-
-    const details = document.getElementById("vehicle-details");
-    const trip = activeTripsById.get(selectedVehicleId);
-
-    if (!trip) {
-        details.textContent = "Select a vehicle to see details.";
-        return;
-    }
-
-    const vehicle = vehiclesById.get(selectedVehicleId);
-
-    const cityLine = currentCity && currentCity.vehicleId === selectedVehicleId
+    const cityLine = currentCity && currentCity.vehicleId === vehicle.id
         ? `Near: ${currentCity.city || "unknown"}<br>`
         : "Near: (looking up...)<br>";
 
-    const vehicleModel = vehicle ? vehicle.vehicle_model : null;
-
-    const gallonsUsed = tripGallonsUsed(trip, vehicle);
-    const fuelRemaining = tripFuelRemaining(trip);
-
-    const fuelLine = fuelRemaining !== null && vehicleModel
-        ? `Fuel: ${fuelGaugeHtml(fuelRemaining, vehicleModel.fuel_tank_gallons)}<br>`
-        : "";
+    const vehicleModel = vehicle.vehicle_model;
 
     let statusLine;
 
     if (trip.status === "ARRIVED") {
+
         statusLine = "Arrived";
+
     } else if (trip.status === "STRANDED") {
+
         statusLine =
             `Out of fuel - stranded ${trip.distance_miles.toFixed(1)} mi in<br>` +
             `<button id="roadside-refuel-button" data-id="${trip.vehicle_id}">` +
             `Send roadside fuel ($${ROADSIDE_ASSIST_FEE_USD})</button>`;
+
     } else {
 
         const stations = gasStationAhead && gasStationAhead.vehicleId === trip.vehicle_id
@@ -2001,47 +2052,39 @@ function renderInRouteList() {
             ? `&#9981; Refueling detour - resuming to ${trip.resume_destination} after<br>`
             : "";
 
+        //
+        // gas_station_watch_enabled (vehicles.gas_station_watch_enabled,
+        // toggled via POST /api/vehicles/{id}/gas-station-watch) gates
+        // both the divert list below and the 3s poll that fetches it
+        // (see fetchGasStationAhead()'s own interval) - watching is real
+        // per-poll backend work, so it's opt-in per vehicle rather than
+        // running for every driving vehicle whether anyone's looking or not.
+        //
+        const watchToggle =
+            `<label><input type="checkbox" class="gas-station-watch-toggle" ` +
+            `data-vehicle-id="${vehicle.id}" ${vehicle.gas_station_watch_enabled ? "checked" : ""}> ` +
+            `Show gas stations to divert to</label>`;
+
         statusLine =
             refuelingDetourLine +
             `Speed: ${Math.round(trip.speed_mph)} mph<br>` +
             `Arriving in: ${formatHMS(trip.remaining_sim_seconds)}` +
-            gasStationOptionsHtml(trip.vehicle_id, stations, diverting);
+            watchToggle +
+            (vehicle.gas_station_watch_enabled ? gasStationOptionsHtml(trip.vehicle_id, stations, diverting) : "");
     }
 
-    details.innerHTML =
-        `<b>${vehicle ? vehicle.name : trip.vehicle_name}</b><br>` +
+    return (
+        `<div class="vehicle-card-detail">` +
         (vehicleModel
-            ? `Model: ${vehicleModelLabel(vehicleModel)}<br>` +
-              `Capacity: ${vehicleModel.person_capacity} people, ${vehicleModel.cargo_capacity_cuft} cu ft cargo<br>` +
+            ? `Capacity: ${vehicleModel.person_capacity} people, ${vehicleModel.cargo_capacity_cuft} cu ft cargo<br>` +
               `Cost: $${Math.round(vehicleModel.cost).toLocaleString()} &middot; ${vehicleModel.mpg} mpg<br>`
             : "") +
-        `Status: ${trip.status}<br>` +
         cityLine +
         `Position: ${trip.position[0].toFixed(4)}, ${trip.position[1].toFixed(4)}<br>` +
         (trip.road_name ? `Road: ${trip.road_name}<br>` : "") +
-        `Distance so far: ${trip.distance_miles.toFixed(1)} mi<br>` +
-        (gallonsUsed !== null ? `Gas used: ${formatGallons(gallonsUsed)} gal<br>` : "") +
-        fuelLine +
-        statusLine;
-
-    const roadsideButton = document.getElementById("roadside-refuel-button");
-
-    if (roadsideButton) {
-        roadsideButton.onclick = () => withSpinner(roadsideButton, () => roadsideRefuel(Number(roadsideButton.dataset.id)));
-    }
-
-    //
-    // Not wrapped in withSpinner() like other buttons - divertToGasStation()
-    // already re-renders this whole panel itself via divertInFlightVehicleId,
-    // so a second, independent spinner/disabled mechanism on the same
-    // (about to be replaced) buttons would just be redundant.
-    //
-    for (const button of details.querySelectorAll(".divert-gas-station-button")) {
-
-        if (!button.disabled) {
-            button.onclick = () => divertToGasStation(Number(button.dataset.vehicleId), Number(button.dataset.placeId));
-        }
-    }
+        statusLine +
+        `</div>`
+    );
 }
 
 
@@ -2073,14 +2116,14 @@ function gasStationOptionsHtml(vehicleId, stations, diverting) {
 
 //
 // Diverting runs as a background job (a couple of seconds - a live reverse
-// geocode plus an OSRM route), but renderInRouteList() rebuilds the whole
-// details panel from scratch on every 1s active-trips poll regardless -
-// without tracking this separately, that next poll tick would just
-// overwrite withSpinner()'s disabled/spinning button with a fresh one
-// before the click had any visible effect at all, making it look like
-// nothing happened even though the job was quietly running the whole
-// time. divertInFlightVehicleId makes the in-progress state part of what
-// renderInRouteList() itself renders, so it survives every re-render
+// geocode plus an OSRM route), but renderVehicleList() rebuilds the whole
+// card from scratch on every 1s active-trips poll regardless - without
+// tracking this separately, that next poll tick would just overwrite
+// withSpinner()'s disabled/spinning button with a fresh one before the
+// click had any visible effect at all, making it look like nothing
+// happened even though the job was quietly running the whole time.
+// divertInFlightVehicleId makes the in-progress state part of what
+// renderVehicleList() itself renders, so it survives every re-render
 // instead of being clobbered by the very next one.
 //
 let divertInFlightVehicleId = null;
@@ -2088,7 +2131,7 @@ let divertInFlightVehicleId = null;
 async function divertToGasStation(vehicleId, gasStationPlaceId) {
 
     divertInFlightVehicleId = vehicleId;
-    renderInRouteList();
+    renderVehicleList();
 
     try {
 
@@ -2119,7 +2162,7 @@ async function divertToGasStation(vehicleId, gasStationPlaceId) {
         alert(e.message);
     } finally {
         divertInFlightVehicleId = null;
-        renderInRouteList();
+        renderVehicleList();
     }
 }
 
@@ -3186,8 +3229,6 @@ async function pollActiveTrips() {
         }
     }
 
-    renderInRouteList();
-
     //
     // Keeps each vehicle's displayed odometer (starting_mileage + its
     // settled total + whatever it's covered on its current trip so far)
@@ -3342,10 +3383,15 @@ setInterval(() => {
 // noticeably long to appear after selecting a vehicle or clearing a
 // previous detour. A few seconds still keeps this well clear of hammering
 // the backend with its per-station route-distance scan on every 1s poll.
+// Also gated on the selected vehicle's own gas_station_watch_enabled -
+// watching is opt-in per vehicle, so this shouldn't poll at all for one
+// nobody's toggled on.
 //
 setInterval(() => {
 
-    if (selectedVehicleIsDriving()) {
+    const vehicle = vehiclesById.get(selectedVehicleId);
+
+    if (selectedVehicleIsDriving() && vehicle && vehicle.gas_station_watch_enabled) {
         fetchGasStationAhead();
     }
 

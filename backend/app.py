@@ -1732,6 +1732,12 @@ def run_migrations():
     #
     cur.execute("ALTER TABLE gas_prices ADD COLUMN IF NOT EXISTS brand TEXT")
 
+    #
+    # Per-vehicle opt-in for gas-station-ahead polling - additive, defaults
+    # off (see the `vehicles` table comment in init.sql).
+    #
+    cur.execute("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS gas_station_watch_enabled BOOLEAN NOT NULL DEFAULT FALSE")
+
     conn.commit()
 
     cur.execute("SELECT COUNT(*) FROM places WHERE country IS NULL")
@@ -2256,6 +2262,12 @@ class DivertToGasStationRequest(BaseModel):
 
 
 
+class SetGasStationWatchRequest(BaseModel):
+
+    enabled: bool
+
+
+
 class StartTripRequest(BaseModel):
 
     vehicle_id: int
@@ -2637,6 +2649,7 @@ def list_vehicles(include_sold: bool = False):
             v.sold,
             v.sold_at,
             v.fuel_gallons,
+            v.gas_station_watch_enabled,
             CASE
                 WHEN v.sold THEN 'SOLD'
                 WHEN EXISTS (
@@ -2675,7 +2688,7 @@ def list_vehicles(include_sold: bool = False):
     # that ran dry (STRANDED, frozen mid-route) but whose *scheduled* time
     # has long since elapsed reads exactly like an old finished trip to it,
     # and got silently skipped here, defaulting all the way down to
-    # row[8]'s "READY" below - hiding a real STRANDED vehicle (no badge, no
+    # row[9]'s "READY" below - hiding a real STRANDED vehicle (no badge, no
     # roadside-refuel option) as if it were simply idle. fetch_live_trip_progress()
     # already scopes itself to each vehicle's own latest uncancelled trip,
     # so passing every vehicle id costs nothing extra for ones with no
@@ -2723,7 +2736,7 @@ def list_vehicles(include_sold: bool = False):
 
             "starting_mileage": row[4],
 
-            "total_miles_traveled": row[4] + row[9],
+            "total_miles_traveled": row[4] + row[10],
 
             "sold": row[5],
 
@@ -2738,7 +2751,9 @@ def list_vehicles(include_sold: bool = False):
             #
             "fuel_gallons": progress["fuel_gallons_remaining"] if progress else row[7],
 
-            "status": progress["status"] if progress else row[8]
+            "gas_station_watch_enabled": row[8],
+
+            "status": progress["status"] if progress else row[9]
         })
 
     return result
@@ -2794,6 +2809,31 @@ def sell_vehicle(id: int):
     conn.close()
 
     return {"id": id, "sold": True}
+
+
+
+@app.post("/api/vehicles/{id}/gas-station-watch")
+def set_gas_station_watch(id: int, req: SetGasStationWatchRequest):
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute(
+        "UPDATE vehicles SET gas_station_watch_enabled = %s WHERE id = %s RETURNING id",
+        (req.enabled, id)
+    )
+
+    updated = cur.fetchone()
+
+    conn.commit()
+
+    cur.close()
+    conn.close()
+
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Vehicle not found")
+
+    return {"id": id, "gas_station_watch_enabled": req.enabled}
 
 
 
@@ -3075,6 +3115,28 @@ def gas_station_ahead(id: int):
     cur = conn.cursor()
 
     time_multiplier, _ = get_settings(conn, cur)
+
+    #
+    # Skips the real work below entirely (settling, the trip-progress
+    # query, and find_gas_station_options()'s own bounding-box query plus
+    # per-station route scan) for a vehicle nobody's chosen to watch -
+    # gas_station_watch_enabled defaults off precisely so this per-poll
+    # cost is opt-in, not paid by every driving vehicle whether or not
+    # anyone's looking at its divert options.
+    #
+    cur.execute("SELECT gas_station_watch_enabled FROM vehicles WHERE id = %s", (id,))
+
+    watch_row = cur.fetchone()
+
+    if watch_row is None:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=404, detail="Vehicle not found")
+
+    if not watch_row[0]:
+        cur.close()
+        conn.close()
+        return {"stations": []}
 
     settle_arrived_vehicles(conn, cur, time_multiplier)
 

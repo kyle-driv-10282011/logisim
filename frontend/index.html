@@ -255,6 +255,18 @@
             gap: 6px;
         }
 
+        .vehicle-card-detail {
+            font-size: 12px;
+            color: #333;
+            padding-top: 6px;
+            border-top: 1px solid #ddd;
+        }
+
+        .vehicle-card-detail label {
+            display: block;
+            margin: 4px 0;
+        }
+
         .sell-button,
         .refuel-button,
         .remove-path-button,
@@ -494,7 +506,6 @@
             <button class="tab-button" id="tab-button-places" onclick="withSpinner(this, () => showTab('places'))">Places</button>
             <button class="tab-button active" id="tab-button-myvehicles" onclick="withSpinner(this, () => showTab('myvehicles'))">My Vehicles</button>
             <button class="tab-button" id="tab-button-paths" onclick="withSpinner(this, () => showTab('paths'))">Paths</button>
-            <button class="tab-button" id="tab-button-inroute" onclick="withSpinner(this, () => showTab('inroute'))">In Route</button>
             <button class="tab-button" id="tab-button-gasprices" onclick="withSpinner(this, () => showTab('gasprices'))">Gas Prices</button>
             <button class="tab-button" id="tab-button-jobs" onclick="withSpinner(this, () => showTab('jobs'))">Background Jobs</button>
         </div>
@@ -641,13 +652,6 @@
             </div>
 
         </div>
-
-    </div>
-
-    <div class="tab-content" id="tab-inroute">
-
-        <div id="inroute-list"></div>
-        <div id="vehicle-details">Select a vehicle to see details.</div>
 
     </div>
 

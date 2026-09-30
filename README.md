@@ -185,6 +185,7 @@ duplicates.
 | `vehicle_model_id`      | integer | FK `vehicle_models(id)` — hauling vehicle models (including type/brand/model) live on the vehicle model, not duplicated per vehicle |
 | `sold`         | boolean | default `false`. Selling a vehicle sets this rather than deleting the row, preserving history (`GET /api/vehicles?include_sold=true`) while "My Vehicles" filters to `sold = false` |
 | `sold_at`      | timestamp | nullable                      |
+| `gas_station_watch_enabled` | boolean | default `false`. Per-vehicle opt-in for `GET /api/vehicles/{id}/gas-station-ahead`'s polling — see [Divert to gas station](#divert-to-gas-station) |
 | `created`      | timestamp | default `NOW()`                |
 
 A vehicle's `status` (`READY` / `DRIVING` / `SOLD`) is computed on read
@@ -568,25 +569,36 @@ coincidence.
 proactively pull off for gas before it ever runs dry, rather than waiting
 to strand and calling roadside assistance.
 
-**Picking a station.** `GET /api/vehicles/{id}/gas-station-ahead` (polled
-by the frontend every 3 seconds for whichever vehicle is selected — a
-separate, faster timer than the [nearby city lookup](#nearby-city-lookup)'s
-7 seconds, since this involves no external rate-limited geocoding call, just
-local DB/geometry work) reports every candidate via
-`find_gas_station_options()`, not just one auto-picked choice. A station
-qualifies either of two ways: it's within `MAX_GAS_STATION_DETOUR_MILES`
-(15) of the *remaining* (not-yet-driven) portion of the route — so a
-station behind the vehicle never qualifies through this path, no
-backtracking — or it's simply within `NEARBY_GAS_STATION_MILES` (10) of the
-vehicle's current position, in any direction, since a short trip to a truly
-close station is reasonable even off-route. Results are sorted by
-straight-line distance from the vehicle's live position (not whichever
-comes up soonest along the original route), since the diversion itself is
-a fresh, direct, OSRM-routed drive from here to the station, not a
-continuation of the original one. The frontend lists every option (next to
-"Send roadside fuel" in the In Route panel) as its own "Divert to ..."
-button, tagging any that only qualified via the nearby check (not ahead on
-the route) as "off-route".
+**Watching for a station.** Finding candidates is real per-poll work
+(a bounding-box query plus a per-station route scan - see the
+efficiency note below), so it's opt-in per vehicle via
+`vehicles.gas_station_watch_enabled` (default off), toggled by a
+checkbox on a `DRIVING` vehicle's own card ("Show gas stations to
+divert to") — `POST /api/vehicles/{id}/gas-station-watch`, body
+`{enabled}`. `GET /api/vehicles/{id}/gas-station-ahead` (polled by the
+frontend every 3 seconds for whichever vehicle is selected *and*
+currently watched — a separate, faster timer than the
+[nearby city lookup](#nearby-city-lookup)'s 7 seconds, since this
+involves no external rate-limited geocoding call, just local DB/geometry
+work) checks that flag first and returns `{stations: []}` immediately
+for a vehicle nobody's watching, skipping the work below entirely.
+
+**Picking a station.** For a watched vehicle, `gas-station-ahead` reports
+every candidate via `find_gas_station_options()`, not just one auto-picked
+choice. A station qualifies either of two ways: it's within
+`MAX_GAS_STATION_DETOUR_MILES` (15) of the *remaining* (not-yet-driven)
+portion of the route — so a station behind the vehicle never qualifies
+through this path, no backtracking — or it's simply within
+`NEARBY_GAS_STATION_MILES` (10) of the vehicle's current position, in any
+direction, since a short trip to a truly close station is reasonable even
+off-route. Results are sorted by straight-line distance from the vehicle's
+live position (not whichever comes up soonest along the original route),
+since the diversion itself is a fresh, direct, OSRM-routed drive from here
+to the station, not a continuation of the original one. The frontend lists
+every option (next to "Send roadside fuel" on the vehicle's own card, under
+the watch checkbox) as its own "Divert to ..." button, tagging any that
+only qualified via the nearby check (not ahead on the route) as
+"off-route".
 
 Being within `MAX_GAS_STATION_DETOUR_MILES` of the road only means a
 station is close to the *route line* - a station near the far end of a
@@ -706,12 +718,13 @@ All endpoints are on the `backend` service, default `http://localhost:5000`.
 | `GET /api/settings`             | Current game clock: `{time_multiplier, game_time}` |
 | `PUT /api/settings`             | Change `time_multiplier`. Body: `{time_multiplier}` — re-anchors the game clock at its current value so it speeds up/slows down rather than jumping. 409 if any vehicle is currently in route |
 | `POST /api/vehicles`            | Create a vehicle. Body: `{vehicle_model_id, current_location, starting_mileage?}` — `name` is server-generated (`"<year> <brand> <model> <n>"`), not part of the request. Response includes the generated `name`, resolved `vehicle_model`, and resolved `current_lat`/`current_lng`. 400 if `current_location` doesn't resolve |
-| `GET /api/vehicles`             | List vehicles with computed `status` (`READY`/`DRIVING`/`STRANDED`/`SOLD`), each vehicle's `vehicle_model`, `fuel_gallons`, `place_id`, and `current_location`/`current_lat`/`current_lng` derived from its place (settled first — see [Vehicle location](#vehicle-location)). `place_id` lets the frontend create a path straight from a vehicle's own place (`POST /api/paths`'s `origin_place_id`) without re-geocoding it. Defaults to the current fleet (`sold = false`, "My Vehicles"); `?include_sold=true` returns full history. No frontend tab currently surfaces the latter — the frontend only ever calls this without the flag |
+| `GET /api/vehicles`             | List vehicles with computed `status` (`READY`/`DRIVING`/`STRANDED`/`SOLD`), each vehicle's `vehicle_model`, `fuel_gallons`, `place_id`, `gas_station_watch_enabled`, and `current_location`/`current_lat`/`current_lng` derived from its place (settled first — see [Vehicle location](#vehicle-location)). `place_id` lets the frontend create a path straight from a vehicle's own place (`POST /api/paths`'s `origin_place_id`) without re-geocoding it. Defaults to the current fleet (`sold = false`, "My Vehicles"); `?include_sold=true` returns full history. No frontend tab currently surfaces the latter — the frontend only ever calls this without the flag |
 | `POST /api/vehicles/{id}/sell`  | Mark a vehicle sold (soft-delete). 409 if already sold or currently on a trip |
 | `DELETE /api/vehicles/{id}`     | Permanently delete a vehicle (cascades its trips) — distinct from selling; not used by the frontend |
+| `POST /api/vehicles/{id}/gas-station-watch` | Set a vehicle's `gas_station_watch_enabled` (opt-in for `gas-station-ahead`'s polling). Body: `{enabled}` — see [Divert to gas station](#divert-to-gas-station) |
 | `POST /api/vehicles/{id}/refuel` | Top off a `READY` vehicle's tank to full if it's already at a gas station, otherwise drives it to the closest one first (202, returns a `job_id` to poll). 409 if it's currently on a trip — see [Fuel](#fuel) |
 | `POST /api/vehicles/{id}/roadside-refuel` | Recover a `STRANDED` vehicle in place, no gas station required. Response includes `cost_usd` (a flat placeholder fee, not actually charged anywhere). 409 if the vehicle isn't currently `STRANDED` — see [Fuel](#fuel) |
-| `GET /api/vehicles/{id}/gas-station-ahead` | Every gas station near the *remaining* portion of a `DRIVING` vehicle's route or just near its current position, sorted by distance: `{stations: [{place_id, description, brand, lat, lng, price_per_gallon, distance_miles, ahead}, ...]}` (`ahead: false` means it only qualified via proximity, not the route) — see [Divert to gas station](#divert-to-gas-station) |
+| `GET /api/vehicles/{id}/gas-station-ahead` | `{stations: []}` immediately if the vehicle isn't currently watched (`gas_station_watch_enabled`). Otherwise, every gas station near the *remaining* portion of a `DRIVING` vehicle's route or just near its current position, sorted by distance: `{stations: [{place_id, description, brand, lat, lng, price_per_gallon, distance_miles, ahead}, ...]}` (`ahead: false` means it only qualified via proximity, not the route) — see [Divert to gas station](#divert-to-gas-station) |
 | `POST /api/vehicles/{id}/divert-to-gas-station` | Detour a `DRIVING` vehicle to a chosen station now. Body: `{gas_station_place_id}`. Automatically resumes to its original destination once refueled there. 202, returns a `job_id` to poll (`GET /api/jobs/{id}`) — see [Divert to gas station](#divert-to-gas-station) |
 | `POST /api/vehicle-models`       | Create a hauling-vehicle-model catalog entry. Body: `{year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, image?}` |
 | `GET /api/vehicle-models`        | List all vehicle models |
@@ -770,7 +783,17 @@ side panel since they don't all fit as a row:
   location](#vehicle-location)), or sell a `READY` vehicle (soft-delete —
   it moves off this list; there's no UI for viewing sold vehicles again,
   though the data and `GET /api/vehicles?include_sold=true` still exist —
-  see [`vehicles`](#vehicles)).
+  see [`vehicles`](#vehicles)). Selecting a `DRIVING`/`STRANDED` vehicle
+  (there used to be a separate "In Route" tab for this — the two were
+  merged, since a vehicle's live detail is naturally part of its own card,
+  not a second place to go look for it) expands its card in place with
+  nearest city, position, current road, speed, time remaining, and fuel
+  level. A `STRANDED` vehicle gets a "Send roadside fuel" button; a
+  `DRIVING` one gets a "Show gas stations to divert to" checkbox
+  (`gas_station_watch_enabled` — off by default, since watching is real
+  per-poll backend work) that, once checked, adds a "Divert to gas
+  station" button for every nearby station (see [Fuel](#fuel) and [Divert
+  to gas station](#divert-to-gas-station)).
 - **Paths** — create a path from an origin/destination, preview it on the
   map, remove existing paths. Previewing a path draws the *entire* route
   color-coded by effective speed limit (red &lt;45 mph, orange 45-64,
@@ -793,12 +816,6 @@ side panel since they don't all fit as a row:
   whole displayed section (two clicks on the map, snapping to the nearest
   route vertex). Existing zones are also listed below the map, each
   clickable to select/edit and with its own delete button.
-- **In Route** — list of currently-driving vehicles; selecting one follows
-  it on the map and shows status, nearest city, position, current road,
-  speed, time remaining, and fuel level. A `STRANDED` vehicle gets a "Send
-  roadside fuel" button; a `DRIVING` one gets a "Divert to gas station"
-  button for every nearby station (see [Fuel](#fuel) and [Divert to gas
-  station](#divert-to-gas-station)).
 - **Gas Prices** — a persistent map overlay, not a selection-driven marker
   like the Places tab: every priced place gets its own always-on circle
   marker, color-graded green (cheapest currently loaded) to red (priciest)
