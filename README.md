@@ -296,9 +296,25 @@ same reasoning as `zones_snapshot` freezing a trip's zones at creation
 (see [Road zones](#road-zones)). The frontend disables the "Time x"
 control the same way (`updateTimeMultiplierControlState()` in `app.js`).
 
-An arrived trip keeps showing up in `/api/trips/active` for
-`ARRIVAL_GRACE_SECONDS` (30) real seconds afterward, so a vehicle doesn't
-just vanish from the map the instant it arrives.
+`/api/trips/active` (and `GET /api/vehicles/{id}/city`) used to decide
+"is this trip still active" with a plain elapsed-time comparison directly
+in SQL: has more (real × `time_multiplier`) time passed than
+`realized_duration_seconds`? That's indistinguishable from "arrived" for a
+trip that's actually `STRANDED` — frozen partway, real time still passing
+normally — so once enough wall-clock time went by, a STRANDED vehicle's
+trip silently stopped matching the query entirely: it vanished from the
+map, the In Route tab showed no vehicles for it, and its city lookup 404'd,
+all while `GET /api/vehicles` (which already used the real,
+`resolve_trip_progress()`-based status) still correctly called it
+STRANDED — a vehicle "on a trip" by one endpoint and definitely not by
+two others. Both endpoints now call `settle_arrived_vehicles()` first
+(closing the same gap `gas_station_ahead()`/`divert_to_gas_station()`
+already had this for) and pick each vehicle's latest uncancelled trip
+(`DISTINCT ON (t.vehicle_id) ... ORDER BY started_at DESC` for the bulk
+endpoint, `LIMIT 1` for the single-vehicle one) regardless of elapsed
+time, only excluding it once `derive_position()`'s own real progress
+says `ARRIVED` - a fallback that rarely fires in practice, since settling
+already moved it along by then.
 
 ### Position and speed
 

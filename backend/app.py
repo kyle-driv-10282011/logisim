@@ -36,13 +36,6 @@ logger = logging.getLogger("uvicorn.error")
 DEFAULT_TIME_MULTIPLIER = 60
 
 #
-# How long (in real seconds) an arrived trip keeps showing up in
-# /api/trips/active, so a vehicle doesn't just vanish from the map
-# the instant it arrives.
-#
-ARRIVAL_GRACE_SECONDS = 30
-
-#
 # The container's system clock is UTC, but rush-hour congestion needs to
 # be judged against a real local clock - otherwise "rush hour" ends up
 # keyed to whatever the UTC offset happens to be, not when commuters are
@@ -3242,6 +3235,15 @@ def vehicle_city(id: int):
 
     time_multiplier, _ = get_settings(conn, cur)
 
+    #
+    # Settles any trip that's genuinely arrived first - same as
+    # gas_station_ahead()/divert_to_gas_station() - so the ARRIVED check
+    # just below almost never actually trips in practice; it's still a
+    # trip's true fuel-aware status that decides whether it's "on a trip",
+    # not a raw elapsed-time comparison (see active_trips()'s own comment).
+    #
+    settle_arrived_vehicles(conn, cur, time_multiplier)
+
     cur.execute(
         """
         SELECT
@@ -3268,11 +3270,10 @@ def vehicle_city(id: int):
         JOIN vehicle_models vs ON vs.id = v.vehicle_model_id
         WHERE t.vehicle_id = %s
         AND t.cancelled_at IS NULL
-        AND (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) < t.realized_duration_seconds + %s * %s
         ORDER BY t.started_at DESC
         LIMIT 1
         """,
-        (id, time_multiplier, ARRIVAL_GRACE_SECONDS, time_multiplier)
+        (id,)
     )
 
     row = cur.fetchone()
@@ -3323,6 +3324,15 @@ def vehicle_city(id: int):
         float(elapsed_real_seconds),
         time_multiplier
     )
+
+    #
+    # settle_arrived_vehicles() above should already have moved a genuinely
+    # arrived trip along (new place, possibly a resume trip) before this
+    # query ran, so this is a defensive fallback for the brief window where
+    # a resume job hasn't finished yet, not the normal case.
+    #
+    if derived["status"] == "ARRIVED":
+        raise HTTPException(status_code=404, detail="Vehicle is not currently on a trip")
 
     return {"city": reverse_geocode(derived["position"])}
 
@@ -4648,9 +4658,25 @@ def active_trips():
 
     time_multiplier, _ = get_settings(conn, cur)
 
+    #
+    # Settles any trip that's genuinely arrived before this query runs -
+    # see this function's own WHERE clause comment below for why the query
+    # itself no longer tries to guess "still active" from elapsed time.
+    #
+    settle_arrived_vehicles(conn, cur, time_multiplier)
+
+    #
+    # A completed trip keeps cancelled_at NULL too (only a diversion ever
+    # sets it) - the old elapsed-time condition below wasn't just a "still
+    # active" guess, it was silently doing the real job of this query on
+    # its own: excluding a vehicle's entire trip history down to just its
+    # current one. DISTINCT ON does that job explicitly instead, so
+    # dropping the time condition (see the WHERE clause note above) doesn't
+    # flood this with every trip a vehicle has ever completed.
+    #
     cur.execute(
         """
-        SELECT
+        SELECT DISTINCT ON (t.vehicle_id)
             t.id,
             t.vehicle_id,
             v.name,
@@ -4677,9 +4703,8 @@ def active_trips():
         JOIN paths p ON p.id = t.path_id
         JOIN vehicle_models vs ON vs.id = v.vehicle_model_id
         WHERE t.cancelled_at IS NULL
-        AND (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) < t.realized_duration_seconds + %s * %s
-        """,
-        (time_multiplier, ARRIVAL_GRACE_SECONDS, time_multiplier)
+        ORDER BY t.vehicle_id, t.started_at DESC
+        """
     )
 
     rows = cur.fetchall()
@@ -4740,6 +4765,15 @@ def active_trips():
             float(elapsed_real_seconds),
             time_multiplier
         )
+
+        #
+        # settle_arrived_vehicles() above already moves a genuinely arrived
+        # trip along, so this is a defensive fallback for the brief window
+        # where that hasn't fully landed yet (e.g. its resume job is still
+        # running) - not the normal case.
+        #
+        if derived["status"] == "ARRIVED":
+            continue
 
         trips.append({
 
