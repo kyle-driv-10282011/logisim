@@ -2030,6 +2030,133 @@ function fuelGaugeHtml(remainingGallons, capacityGallons, mpg) {
 
 
 //
+// One point along a 180-degree arc gauge running from the left point
+// (fraction 0) through the top (fraction 0.5) to the right point
+// (fraction 1) - screen-space angle theta = 180 + fraction*180 degrees,
+// measured the usual SVG way (0 deg = right, 90 deg = down, since y grows
+// downward). cos/sin at theta=180 gives (-1,0) - the left point - and at
+// theta=360 gives (1,0) - the right point - with theta=270 (top) exactly
+// halfway between, which is what makes a speedometer/fuel-dial needle
+// read left-to-right through the top instead of the bottom.
+//
+function arcPoint(cx, cy, r, fraction) {
+
+    const theta = (180 + fraction * 180) * Math.PI / 180;
+
+    return [cx + r * Math.cos(theta), cy + r * Math.sin(theta)];
+}
+
+
+//
+// Shared by the speedometer and the fuel dial below - same 180-degree arc,
+// tick marks, and needle, just a different needle color/fraction/labels.
+// The needle is drawn as a plain vertical line (pointing straight up, i.e.
+// already at fraction 0.5's position) and then rotated into place with a
+// plain SVG rotate() - since rotate() turns clockwise and increasing
+// fraction also reads left-to-right (clockwise) on this arc, the needed
+// rotation is just fraction*180-90 degrees, no per-frame trig needed for
+// the moving part.
+//
+function gaugeArcSvg(fraction, { needleColor, endLabels, valueText, unitLabel }) {
+
+    const clamped = Math.max(0, Math.min(1, fraction));
+    const cx = 60, cy = 56, r = 46, needleLength = 40;
+    const angle = clamped * 180 - 90;
+
+    const [trackStartX, trackStartY] = arcPoint(cx, cy, r, 0);
+    const [trackEndX, trackEndY] = arcPoint(cx, cy, r, 1);
+
+    const ticks = [0, 0.25, 0.5, 0.75, 1].map((t) => {
+
+        const [x1, y1] = arcPoint(cx, cy, r - 8, t);
+        const [x2, y2] = arcPoint(cx, cy, r, t);
+
+        return `<line class="gauge-tick" x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" />`;
+
+    }).join("");
+
+    return (
+        `<svg class="gauge-svg" viewBox="0 0 120 74">` +
+        `<path class="gauge-track" d="M ${trackStartX.toFixed(1)} ${trackStartY.toFixed(1)} A ${r} ${r} 0 0 1 ${trackEndX.toFixed(1)} ${trackEndY.toFixed(1)}" />` +
+        ticks +
+        `<text x="${trackStartX.toFixed(1)}" y="${cy + 13}" font-size="9" fill="#777" text-anchor="middle">${endLabels[0]}</text>` +
+        `<text x="${trackEndX.toFixed(1)}" y="${cy + 13}" font-size="9" fill="#777" text-anchor="middle">${endLabels[1]}</text>` +
+        `<line class="gauge-needle" x1="${cx}" y1="${cy}" x2="${cx}" y2="${cy - needleLength}" ` +
+        `stroke="${needleColor}" transform="rotate(${angle.toFixed(1)} ${cx} ${cy})" />` +
+        `<circle cx="${cx}" cy="${cy}" r="4" fill="${needleColor}" />` +
+        `</svg>` +
+        `<div class="gauge-value">${valueText}</div>` +
+        `<div class="gauge-label">${unitLabel}</div>`
+    );
+}
+
+
+//
+// A hauling vehicle's trip speed is bounded by road speed limits, not its
+// own top speed (there's no such rating in vehicle_models) - 90 covers
+// every zone tier this app has (see README's "<45/45-64/65+" road-color
+// legend) with headroom to spare, so the needle is never pinned at max
+// during normal driving.
+//
+const SPEEDOMETER_MAX_MPH = 90;
+
+function speedometerHtml(speedMph) {
+
+    return gaugeArcSvg(speedMph / SPEEDOMETER_MAX_MPH, {
+
+        needleColor: "#343a40",
+
+        endLabels: ["0", String(SPEEDOMETER_MAX_MPH)],
+
+        valueText: `${Math.round(speedMph)}`,
+
+        unitLabel: "mph"
+    });
+}
+
+
+//
+// Same green-to-red scale as the compact card's linear fuel-gauge-bar
+// (fuelGaugeColor()) applied to the needle instead of a fill width, so a
+// low tank reads the same way in both places.
+//
+function fuelDialHtml(remainingGallons, capacityGallons) {
+
+    const fraction = capacityGallons > 0 ? remainingGallons / capacityGallons : 0;
+
+    return gaugeArcSvg(fraction, {
+
+        needleColor: fuelGaugeColor(fraction),
+
+        endLabels: ["E", "F"],
+
+        valueText: formatGallons(remainingGallons),
+
+        unitLabel: "gal"
+    });
+}
+
+
+//
+// A classic mechanical odometer's fixed digit count, not a plain number -
+// padded to 6 digits (999,999 miles of hauling is far past anything this
+// sim will ever accumulate) so it always looks like a real instrument
+// rather than growing/shrinking width as the total changes.
+//
+function odometerHtml(miles) {
+
+    const digits = String(Math.max(0, Math.round(miles))).padStart(6, "0").split("");
+
+    return (
+        `<div class="odometer" title="${Math.round(miles).toLocaleString()} total miles">` +
+        digits.map((digit) => `<span class="odometer-digit">${digit}</span>`).join("") +
+        `</div>` +
+        `<div class="gauge-label">odometer</div>`
+    );
+}
+
+
+//
 // The expanded block shown inline on a DRIVING/STRANDED vehicle's own card
 // once it's selected - this used to be a separate "In Route" tab's detail
 // panel, keyed off the same selectedVehicleId, just rendered somewhere
@@ -2092,14 +2219,32 @@ function vehicleDetailHtml(vehicle, trip) {
 
         statusLine =
             refuelingDetourLine +
-            `Speed: ${Math.round(trip.speed_mph)} mph<br>` +
             `Arriving in: ${formatHMS(trip.remaining_sim_seconds)}` +
             watchToggle +
             (vehicle.gas_station_watch_enabled ? gasStationOptionsHtml(trip.vehicle_id, stations, diverting) : "");
     }
 
+    //
+    // The instrument cluster - speedometer (frozen at 0 once STRANDED/
+    // ARRIVED, same as a real one with the engine off), fuel dial (same
+    // live trip fuel the compact card's linear bar already shows, just as
+    // a dial here), and an odometer for the vehicle's real lifetime total
+    // rather than just this trip's distance.
+    //
+    const fuelRemaining = tripFuelRemaining(trip);
+
+    const dashboard =
+        `<div class="dashboard">` +
+        `<div class="gauge">${speedometerHtml(trip.status === "DRIVING" ? trip.speed_mph : 0)}</div>` +
+        (fuelRemaining !== null && vehicleModel
+            ? `<div class="gauge">${fuelDialHtml(fuelRemaining, vehicleModel.fuel_tank_gallons)}</div>`
+            : "") +
+        `<div class="gauge">${odometerHtml(vehicle.total_miles_traveled)}</div>` +
+        `</div>`;
+
     return (
         `<div class="vehicle-card-detail">` +
+        dashboard +
         (vehicleModel
             ? `Capacity: ${vehicleModel.person_capacity} people, ${vehicleModel.cargo_capacity_cuft} cu ft cargo<br>` +
               `Cost: $${Math.round(vehicleModel.cost).toLocaleString()} &middot; ${vehicleModel.mpg} mpg<br>`
