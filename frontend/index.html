@@ -597,8 +597,10 @@
 
         <div class="panel-form">
             <input id="origin" list="places-list" placeholder="Origin" value="Minneapolis">
+            <button onclick="clearOriginInput()" title="Clear origin">&times; Clear</button>
             <button id="swap-origin-destination-button" onclick="withSpinner(this, swapOriginDestination)" title="Swap origin and destination">&#8645; Swap</button>
             <input id="destination" list="places-list" placeholder="Destination" value="Chicago">
+            <button onclick="clearDestinationInput()" title="Clear destination">&times; Clear</button>
             <button onclick="withSpinner(this, createPath)">Create Path</button>
         </div>
 

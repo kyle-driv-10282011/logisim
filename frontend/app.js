@@ -2988,6 +2988,26 @@ function previewPath(path) {
 }
 
 
+function clearOriginInput() {
+
+    document.getElementById("origin").value = "";
+
+    //
+    // Same reasoning as swapOriginDestination() below - a directly-set
+    // .value doesn't fire "input", so the listener that normally drops
+    // originPlaceId on a manual edit never runs; this has to clear it
+    // itself instead of leaving a stale place_id behind an empty box.
+    //
+    originPlaceId = null;
+}
+
+
+function clearDestinationInput() {
+
+    document.getElementById("destination").value = "";
+}
+
+
 function swapOriginDestination() {
 
     const originInput = document.getElementById("origin");
