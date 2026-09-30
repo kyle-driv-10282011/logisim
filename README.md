@@ -142,10 +142,17 @@ with a different name.
 | `continent` / `country` / `state` / `city` | text | nullable — structured breakdown of the same location, derived from Nominatim's `addressdetails` (`extract_address_components()` in `app.py`; `continent` isn't something Nominatim returns at all, so it's derived from the country code via a static lookup, `CONTINENT_BY_COUNTRY_CODE`). Powers the Places tab's filter chips. A place created before these columns existed starts out `NULL` here and gets backfilled — see below |
 | `created`     | timestamp | default `NOW()`                |
 
-Every free-text location box in the frontend (vehicle starting location,
-path origin/destination) has a `<datalist>` of these places wired to it via
-its `list` attribute, so a saved place can be picked back up by name
-without giving up the ability to type a brand-new description.
+Most free-text location boxes in the frontend (vehicle starting location,
+the Gas Prices tab's add-price box) have a `<datalist>` of these places
+wired to it via their `list` attribute, so a saved place can be picked
+back up by name without giving up the ability to type a brand-new
+description. The Paths tab's origin/destination boxes used to have this
+too, but a native `<datalist>` scales with every saved place regardless of
+which box is focused — once a
+[city search upload](#search-a-city-for-gas-stations) had added tens of
+thousands of places, the browser's own autocomplete matching against all
+of them made typing in either box noticeably laggy, so `list` was dropped
+from just those two.
 
 A place missing `continent`/`country`/`state`/`city` (any pre-existing row
 from before those columns existed) is backfilled by re-reverse-geocoding its
