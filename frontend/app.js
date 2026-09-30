@@ -1521,6 +1521,21 @@ function renderVehicleList() {
             ? fuelGaugeHtml(fuelRemaining, vehicle.vehicle_model.fuel_tank_gallons, vehicle.vehicle_model.mpg)
             : "";
 
+        //
+        // trip.remaining_miles (derive_position() in app.py) - how much
+        // route is left regardless of status: still closing while
+        // DRIVING, frozen wherever the tank ran dry if STRANDED (useful
+        // context for how close it was), 0 once ARRIVED. Shown right next
+        // to the fuel gauge's own "mi to empty" so the two ranges are easy
+        // to compare at a glance.
+        //
+        const milesToDestination = trip && typeof trip.remaining_miles === "number"
+            ? Math.round(trip.remaining_miles)
+            : null;
+        const milesToDestinationBadge = milesToDestination !== null
+            ? `<span class="miles-badge" title="Remaining route distance">${milesToDestination.toLocaleString()} mi to destination</span>`
+            : "";
+
         item.innerHTML =
             `<div class="vehicle-card-top">` +
             (imageUrl ? `<img class="list-item-thumb" src="${imageUrl}">` : "") +
@@ -1536,6 +1551,7 @@ function renderVehicleList() {
                 ? `<div class="vehicle-card-meta">` +
                   (trip ? `<span class="miles-badge">${Math.round(trip.distance_miles).toLocaleString()} mi</span>` : "") +
                   (gallonsUsed !== null ? `<span class="gas-badge">&#9981; ${formatGallons(gallonsUsed)} gal</span>` : "") +
+                  milesToDestinationBadge +
                   fuelGauge +
                   `</div>`
                 : "") +

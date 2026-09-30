@@ -1524,7 +1524,18 @@ def derive_position(
 
         "distance_miles": progress["distance_miles"],
 
-        "fuel_gallons_remaining": progress["fuel_gallons_remaining"]
+        "fuel_gallons_remaining": progress["fuel_gallons_remaining"],
+
+        #
+        # distances_miles[-1] is the path's total length (cumulative miles
+        # at its last point - see the `paths` table comment), fixed
+        # regardless of status; subtracting how far progress["distance_miles"]
+        # says the trip has actually gotten gives "how much road is left",
+        # whether that's still closing (DRIVING), frozen wherever the tank
+        # ran dry (STRANDED - useful context for how close it was), or 0
+        # (ARRIVED).
+        #
+        "remaining_miles": max(0.0, distances_miles[-1] - progress["distance_miles"])
     }
 
 
