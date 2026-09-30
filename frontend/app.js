@@ -1518,7 +1518,7 @@ function renderVehicleList() {
         //
         const fuelRemaining = trip ? tripFuelRemaining(trip) : vehicle.fuel_gallons;
         const fuelGauge = fuelRemaining !== null && vehicle.vehicle_model
-            ? fuelGaugeHtml(fuelRemaining, vehicle.vehicle_model.fuel_tank_gallons)
+            ? fuelGaugeHtml(fuelRemaining, vehicle.vehicle_model.fuel_tank_gallons, vehicle.vehicle_model.mpg)
             : "";
 
         item.innerHTML =
@@ -1991,14 +1991,23 @@ function fuelGaugeColor(fraction) {
 }
 
 
-function fuelGaugeHtml(remainingGallons, capacityGallons) {
+function fuelGaugeHtml(remainingGallons, capacityGallons, mpg) {
 
     const fraction = capacityGallons > 0 ? Math.max(0, Math.min(1, remainingGallons / capacityGallons)) : 0;
 
+    //
+    // A straight gallons × mpg estimate - the same math resolve_trip_progress()
+    // uses on the backend for a driving vehicle's own dry-distance, just
+    // run here for display rather than pulled from the API, so it updates
+    // instantly as the gauge itself does rather than lagging a poll cycle.
+    //
+    const milesToEmpty = mpg ? Math.round(remainingGallons * mpg) : null;
+    const milesToEmptyText = milesToEmpty !== null ? ` &middot; ${milesToEmpty.toLocaleString()} mi to empty` : "";
+
     return (
-        `<span class="fuel-gauge" title="${formatGallons(remainingGallons)} / ${capacityGallons} gal">` +
+        `<span class="fuel-gauge" title="${formatGallons(remainingGallons)} / ${capacityGallons} gal${milesToEmpty !== null ? ` (${milesToEmpty.toLocaleString()} mi to empty)` : ""}">` +
         `<span class="fuel-gauge-bar"><span class="fuel-gauge-fill" style="width:${(fraction * 100).toFixed(0)}%;background:${fuelGaugeColor(fraction)}"></span></span>` +
-        `<span class="fuel-gauge-label">${formatGallons(remainingGallons)}/${capacityGallons} gal</span>` +
+        `<span class="fuel-gauge-label">${formatGallons(remainingGallons)}/${capacityGallons} gal${milesToEmptyText}</span>` +
         `</span>`
     );
 }
