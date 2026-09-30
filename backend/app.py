@@ -2705,19 +2705,19 @@ def list_vehicles(include_sold: bool = False):
     places_by_id = fetch_places_by_id(cur, [row[3] for row in rows])
 
     #
-    # Every vehicle with an unsettled trip (row[10]), not just the ones the
+    # Every vehicle with an unsettled trip (row[11]), not just the ones the
     # naive elapsed-time CASE above flagged "DRIVING" - that check has no
     # idea about fuel, so a vehicle that ran dry (STRANDED, frozen
     # mid-route) but whose *scheduled* time has long since elapsed reads
     # exactly like an old finished trip to it, and got silently skipped
     # here, defaulting all the way down to row[9]'s "READY" below - hiding
     # a real STRANDED vehicle (no badge, no roadside-refuel option) as if
-    # it were simply idle. row[10] (not the naive CASE) is what actually
+    # it were simply idle. row[11] (not the naive CASE) is what actually
     # decides this now - see its own comment above for why a settled
     # vehicle has to be excluded rather than just "every vehicle".
     #
     progress_by_vehicle = fetch_live_trip_progress(
-        cur, [row[0] for row in rows if row[10]], time_multiplier
+        cur, [row[0] for row in rows if row[11]], time_multiplier
     )
 
     cur.close()
