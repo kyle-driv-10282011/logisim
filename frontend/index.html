@@ -40,6 +40,28 @@
             line-height: 1.4;
         }
 
+        #gasprice-overlay-toggle {
+            position: absolute;
+            top: 78px;
+            right: 10px;
+            z-index: 1000;
+            width: 34px;
+            height: 34px;
+            border-radius: 50%;
+            background: white;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.35);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        #gasprice-overlay-toggle.active {
+            background: #2a8f2a;
+        }
+
         #time-multiplier-control {
             display: flex;
             align-items: center;
@@ -571,6 +593,7 @@
             <button id="time-multiplier-set-button" onclick="withSpinner(this, setTimeMultiplier)">Set</button>
         </div>
     </div>
+    <div id="gasprice-overlay-toggle" class="active" onclick="toggleGasPriceOverlay()" title="Toggle gas stations on map">&#9981;</div>
 </div>
 
 <div id="vehicle-panel">
@@ -739,8 +762,7 @@
     <div class="tab-content" id="tab-gasprices">
 
         <div id="gasprice-legend">
-            <label><input type="checkbox" id="gasprice-toggle" checked onchange="toggleGasPriceOverlay()"> Show on map</label>
-            <br>Price:
+            Price:
             <span class="legend-swatch" style="background:#2f9e44"></span>cheapest
             <span class="legend-swatch" style="background:#f08c00"></span>mid
             <span class="legend-swatch" style="background:#e03131"></span>priciest

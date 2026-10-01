@@ -187,7 +187,7 @@ let placeMarker = null;            // dot marking a clicked place's location
 
 let gasPricesByPlaceId = new Map(); // place_id -> gas price row (from GET /api/gas-prices)
 const gasPriceMarkers = new Map();  // place_id -> persistent Leaflet circleMarker (the map overlay itself)
-let gasPriceOverlayVisible = true;  // toggled by the "Show on map" checkbox in the Gas Prices tab
+let gasPriceOverlayVisible = true;  // toggled by the gas pump icon floating over the map
 
 //
 // preferCanvas: true draws vector layers (the gas price circleMarkers - one
@@ -1221,7 +1221,9 @@ function renderGasPriceMarkers() {
 
 function toggleGasPriceOverlay() {
 
-    gasPriceOverlayVisible = document.getElementById("gasprice-toggle").checked;
+    gasPriceOverlayVisible = !gasPriceOverlayVisible;
+
+    document.getElementById("gasprice-overlay-toggle").classList.toggle("active", gasPriceOverlayVisible);
 
     for (const marker of gasPriceMarkers.values()) {
 
