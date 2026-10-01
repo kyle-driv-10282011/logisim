@@ -2157,6 +2157,28 @@ function odometerHtml(miles) {
 
 
 //
+// A real trip odometer resets per trip and shows one decimal place
+// (tenths of a mile) rather than the main odometer's whole-mile total -
+// padStart still works character-for-character with the "." included, so
+// "42.7" becomes "0042.7" the same way "42" becomes "000042" above.
+//
+function tripometerHtml(miles) {
+
+    const text = Math.max(0, miles).toFixed(1).padStart(6, "0");
+
+    return (
+        `<div class="odometer" title="${miles.toFixed(1)} mi this trip">` +
+        text.split("").map((char) => char === "."
+            ? `<span class="odometer-digit odometer-dot">.</span>`
+            : `<span class="odometer-digit">${char}</span>`
+        ).join("") +
+        `</div>` +
+        `<div class="gauge-label">trip</div>`
+    );
+}
+
+
+//
 // The expanded block shown inline on a DRIVING/STRANDED vehicle's own card
 // once it's selected - this used to be a separate "In Route" tab's detail
 // panel, keyed off the same selectedVehicleId, just rendered somewhere
@@ -2240,6 +2262,7 @@ function vehicleDetailHtml(vehicle, trip) {
             ? `<div class="gauge">${fuelDialHtml(fuelRemaining, vehicleModel.fuel_tank_gallons)}</div>`
             : "") +
         `<div class="gauge">${odometerHtml(vehicle.total_miles_traveled)}</div>` +
+        `<div class="gauge">${tripometerHtml(trip.distance_miles)}</div>` +
         `</div>`;
 
     return (
