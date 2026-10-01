@@ -1478,10 +1478,10 @@ function renderVehicleList() {
         const item = document.createElement("div");
 
         //
-        // Trip-scoped, not the vehicle's lifetime odometer - these badges
-        // mirror the In Route tab's own per-trip miles/gallons, so they
-        // only render at all while this vehicle actually has an active
-        // trip (activeTripsById), and show nothing otherwise.
+        // Trip-scoped, not the vehicle's lifetime odometer - gas used only
+        // renders at all while this vehicle actually has an active trip
+        // (activeTripsById); the distance-driven equivalent now lives in
+        // the expanded card's tripometer instead of a badge here.
         //
         const trip = activeTripsById.get(vehicle.id);
         const gallonsUsed = trip ? tripGallonsUsed(trip, vehicle) : null;
@@ -1551,7 +1551,6 @@ function renderVehicleList() {
             `</div>` +
             (trip || fuelGauge
                 ? `<div class="vehicle-card-meta">` +
-                  (trip ? `<span class="miles-badge">${Math.round(trip.distance_miles).toLocaleString()} mi</span>` : "") +
                   (gallonsUsed !== null ? `<span class="gas-badge">&#9981; ${formatGallons(gallonsUsed)} gal</span>` : "") +
                   milesToDestinationBadge +
                   fuelGauge +
@@ -1609,28 +1608,19 @@ function renderVehicleList() {
     }
 
     //
-    // Not wrapped in withSpinner() like other buttons - divertToGasStation()
+    // Not wrapped in withSpinner() like other buttons - divertToNearestGasStation()
     // already re-renders this whole list itself via divertInFlightVehicleId,
     // so a second, independent spinner/disabled mechanism on the same
-    // (about to be replaced) buttons would just be redundant.
+    // (about to be replaced) button would just be redundant.
     //
-    for (const button of list.querySelectorAll(".divert-gas-station-button")) {
+    for (const button of list.querySelectorAll(".divert-nearest-button")) {
 
         if (!button.disabled) {
             button.onclick = (event) => {
                 event.stopPropagation();
-                divertToGasStation(Number(button.dataset.vehicleId), Number(button.dataset.placeId));
+                divertToNearestGasStation(Number(button.dataset.vehicleId));
             };
         }
-    }
-
-    for (const checkbox of list.querySelectorAll(".gas-station-watch-toggle")) {
-
-        checkbox.onclick = (event) => event.stopPropagation();
-
-        checkbox.onchange = () => {
-            toggleGasStationWatch(Number(checkbox.dataset.vehicleId), checkbox.checked);
-        };
     }
 }
 
@@ -1815,7 +1805,6 @@ function selectVehicle(vehicleId) {
     clearFocus();
 
     currentCity = null;
-    gasStationAhead = null;
 
     if (!alreadySelected) {
 
@@ -1833,12 +1822,6 @@ function selectVehicle(vehicleId) {
         }
 
         fetchCurrentCity();
-
-        const vehicle = vehiclesById.get(vehicleId);
-
-        if (vehicle && vehicle.gas_station_watch_enabled) {
-            fetchGasStationAhead();
-        }
     }
 
     renderFocusDependentViews();
@@ -1878,78 +1861,45 @@ async function fetchCurrentCity() {
 
 
 //
-// Same idea (and cadence) as fetchCurrentCity() above - only checked for
-// the one selected vehicle, on its own slow timer, since it involves real
-// geometry work server-side (find_gas_station_options()) rather than
-// something cheap enough for the 1s active-trips poll. A list, not a
-// single auto-picked station, so the user can choose between whichever
-// ones are near the remaining route or just near the vehicle right now.
+// Looks up the nearest qualifying station on demand (GET .../gas-station-ahead
+// already sorts its candidates by distance - see find_gas_station_options()
+// in app.py) and diverts straight to it, rather than polling continuously
+// and showing a pick-one list - a single button replaces what used to be
+// a per-vehicle "watch" toggle plus a list of "Divert to ..." options.
+// Sets divertInFlightVehicleId itself before that first lookup (not just
+// inside divertToGasStation() below) so the button shows "Diverting..."
+// for the whole operation, not just the part after a station is found.
 //
-let gasStationAhead = null; // { vehicleId, stations }
+async function divertToNearestGasStation(vehicleId) {
 
-async function fetchGasStationAhead() {
-
-    const vehicleId = selectedVehicleId;
-
-    if (vehicleId === null) {
-        return;
-    }
-
-    const response = await fetch(API + "/api/vehicles/" + vehicleId + "/gas-station-ahead");
-
-    if (!response.ok) {
-        return;
-    }
-
-    const data = await response.json();
-
-    if (selectedVehicleId === vehicleId) {
-        gasStationAhead = { vehicleId, stations: data.stations };
-        renderVehicleList();
-    }
-}
-
-
-//
-// Persists the per-vehicle opt-in (vehicles.gas_station_watch_enabled) so
-// it survives reloads and reflects the same way for anyone else looking
-// at this instance, rather than being a purely local UI preference.
-// Turning it off drops any stale station list immediately instead of
-// leaving a now-hidden toggle's old results sitting in memory; turning it
-// on fetches right away rather than waiting up to 3s for the next poll.
-//
-async function toggleGasStationWatch(vehicleId, enabled) {
-
-    const response = await fetch(API + "/api/vehicles/" + vehicleId + "/gas-station-watch", {
-
-        method: "POST",
-
-        headers: {
-            "Content-Type": "application/json"
-        },
-
-        body: JSON.stringify({ enabled })
-
-    });
-
-    if (!response.ok) {
-        renderVehicleList();
-        return;
-    }
-
-    const vehicle = vehiclesById.get(vehicleId);
-
-    if (vehicle) {
-        vehicle.gas_station_watch_enabled = enabled;
-    }
-
-    if (enabled) {
-        fetchGasStationAhead();
-    } else if (gasStationAhead && gasStationAhead.vehicleId === vehicleId) {
-        gasStationAhead = null;
-    }
-
+    divertInFlightVehicleId = vehicleId;
     renderVehicleList();
+
+    try {
+
+        const response = await fetch(API + "/api/vehicles/" + vehicleId + "/gas-station-ahead");
+
+        if (!response.ok) {
+            alert("Could not look up nearby gas stations");
+            return;
+        }
+
+        const data = await response.json();
+
+        if (!data.stations.length) {
+            alert("No reachable gas station found nearby");
+            return;
+        }
+
+        await divertToGasStation(vehicleId, data.stations[0].place_id);
+
+    } finally {
+
+        if (divertInFlightVehicleId === vehicleId) {
+            divertInFlightVehicleId = null;
+            renderVehicleList();
+        }
+    }
 }
 
 
@@ -2211,10 +2161,6 @@ function vehicleDetailHtml(vehicle, trip) {
 
     } else {
 
-        const stations = gasStationAhead && gasStationAhead.vehicleId === trip.vehicle_id
-            ? gasStationAhead.stations
-            : null;
-
         const diverting = divertInFlightVehicleId === trip.vehicle_id;
 
         //
@@ -2228,24 +2174,15 @@ function vehicleDetailHtml(vehicle, trip) {
             ? `&#9981; Refueling detour - resuming to ${trip.resume_destination} after<br>`
             : "";
 
-        //
-        // gas_station_watch_enabled (vehicles.gas_station_watch_enabled,
-        // toggled via POST /api/vehicles/{id}/gas-station-watch) gates
-        // both the divert list below and the 3s poll that fetches it
-        // (see fetchGasStationAhead()'s own interval) - watching is real
-        // per-poll backend work, so it's opt-in per vehicle rather than
-        // running for every driving vehicle whether anyone's looking or not.
-        //
-        const watchToggle =
-            `<label><input type="checkbox" class="gas-station-watch-toggle" ` +
-            `data-vehicle-id="${vehicle.id}" ${vehicle.gas_station_watch_enabled ? "checked" : ""}> ` +
-            `Show gas stations to divert to</label>`;
+        const divertButton =
+            `<button class="divert-nearest-button" data-vehicle-id="${vehicle.id}" ${diverting ? "disabled" : ""}>` +
+            (diverting ? "Diverting..." : "Divert to nearest gas station") +
+            `</button>`;
 
         statusLine =
             refuelingDetourLine +
-            `Arriving in: ${formatHMS(trip.remaining_sim_seconds)}` +
-            watchToggle +
-            (vehicle.gas_station_watch_enabled ? gasStationOptionsHtml(trip.vehicle_id, stations, diverting) : "");
+            `Arriving in: ${formatHMS(trip.remaining_sim_seconds)}<br>` +
+            divertButton;
     }
 
     //
@@ -2282,31 +2219,6 @@ function vehicleDetailHtml(vehicle, trip) {
     );
 }
 
-
-//
-// Builds the "Divert to gas station" option list (or its single disabled
-// "Diverting..." placeholder while one's in flight) for the DRIVING status
-// line above - stations is find_gas_station_options()'s full list, not
-// just one auto-picked choice, so the user can pick between several: some
-// near the remaining route, some just near the vehicle right now (see
-// MAX_GAS_STATION_DETOUR_MILES/NEARBY_GAS_STATION_MILES in app.py).
-//
-function gasStationOptionsHtml(vehicleId, stations, diverting) {
-
-    if (diverting) {
-        return `<br><button class="divert-gas-station-button" disabled>Diverting...</button>`;
-    }
-
-    if (!stations || stations.length === 0) {
-        return "";
-    }
-
-    return stations.map((station) =>
-        `<br><button class="divert-gas-station-button" data-vehicle-id="${vehicleId}" data-place-id="${station.place_id}">` +
-        `Divert to ${gasStationLabel(station.brand, station.description)} ($${station.price_per_gallon.toFixed(2)}/gal, ` +
-        `${station.distance_miles} mi${station.ahead ? "" : ", off-route"})</button>`
-    ).join("");
-}
 
 
 //
@@ -3590,24 +3502,3 @@ setInterval(() => {
 
 }, 7000);
 
-//
-// Unlike fetchCurrentCity() above, this has no external rate-limited
-// geocoding call behind it (find_gas_station_ahead() is pure DB/geometry
-// work) - the 7s cadence they used to share was only ever needed for the
-// city lookup's sake, and made the "Divert to gas station" button take
-// noticeably long to appear after selecting a vehicle or clearing a
-// previous detour. A few seconds still keeps this well clear of hammering
-// the backend with its per-station route-distance scan on every 1s poll.
-// Also gated on the selected vehicle's own gas_station_watch_enabled -
-// watching is opt-in per vehicle, so this shouldn't poll at all for one
-// nobody's toggled on.
-//
-setInterval(() => {
-
-    const vehicle = vehiclesById.get(selectedVehicleId);
-
-    if (selectedVehicleIsDriving() && vehicle && vehicle.gas_station_watch_enabled) {
-        fetchGasStationAhead();
-    }
-
-}, 3000);

@@ -1744,10 +1744,12 @@ def run_migrations():
     cur.execute("ALTER TABLE gas_prices ADD COLUMN IF NOT EXISTS brand TEXT")
 
     #
-    # Per-vehicle opt-in for gas-station-ahead polling - additive, defaults
-    # off (see the `vehicles` table comment in init.sql).
+    # The per-vehicle opt-in toggle for gas-station-ahead polling didn't
+    # last - replaced by a single "divert to nearest" button that looks up
+    # a station on demand instead of continuously polling for one, so
+    # there's no "watching" state left to opt in or out of.
     #
-    cur.execute("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS gas_station_watch_enabled BOOLEAN NOT NULL DEFAULT FALSE")
+    cur.execute("ALTER TABLE vehicles DROP COLUMN IF EXISTS gas_station_watch_enabled")
 
     conn.commit()
 
@@ -2273,12 +2275,6 @@ class DivertToGasStationRequest(BaseModel):
 
 
 
-class SetGasStationWatchRequest(BaseModel):
-
-    enabled: bool
-
-
-
 class StartTripRequest(BaseModel):
 
     vehicle_id: int
@@ -2671,7 +2667,6 @@ def list_vehicles(include_sold: bool = False):
             v.sold,
             v.sold_at,
             v.fuel_gallons,
-            v.gas_station_watch_enabled,
             CASE
                 WHEN v.sold THEN 'SOLD'
                 WHEN EXISTS (
@@ -2716,19 +2711,19 @@ def list_vehicles(include_sold: bool = False):
     places_by_id = fetch_places_by_id(cur, [row[3] for row in rows])
 
     #
-    # Every vehicle with an unsettled trip (row[11]), not just the ones the
+    # Every vehicle with an unsettled trip (row[10]), not just the ones the
     # naive elapsed-time CASE above flagged "DRIVING" - that check has no
     # idea about fuel, so a vehicle that ran dry (STRANDED, frozen
     # mid-route) but whose *scheduled* time has long since elapsed reads
     # exactly like an old finished trip to it, and got silently skipped
-    # here, defaulting all the way down to row[9]'s "READY" below - hiding
+    # here, defaulting all the way down to row[8]'s "READY" below - hiding
     # a real STRANDED vehicle (no badge, no roadside-refuel option) as if
-    # it were simply idle. row[11] (not the naive CASE) is what actually
+    # it were simply idle. row[10] (not the naive CASE) is what actually
     # decides this now - see its own comment above for why a settled
     # vehicle has to be excluded rather than just "every vehicle".
     #
     progress_by_vehicle = fetch_live_trip_progress(
-        cur, [row[0] for row in rows if row[11]], time_multiplier
+        cur, [row[0] for row in rows if row[10]], time_multiplier
     )
 
     cur.close()
@@ -2769,7 +2764,7 @@ def list_vehicles(include_sold: bool = False):
 
             "starting_mileage": row[4],
 
-            "total_miles_traveled": row[4] + row[10],
+            "total_miles_traveled": row[4] + row[9],
 
             "sold": row[5],
 
@@ -2784,9 +2779,7 @@ def list_vehicles(include_sold: bool = False):
             #
             "fuel_gallons": progress["fuel_gallons_remaining"] if progress else row[7],
 
-            "gas_station_watch_enabled": row[8],
-
-            "status": progress["status"] if progress else row[9]
+            "status": progress["status"] if progress else row[8]
         })
 
     return result
@@ -2842,31 +2835,6 @@ def sell_vehicle(id: int):
     conn.close()
 
     return {"id": id, "sold": True}
-
-
-
-@app.post("/api/vehicles/{id}/gas-station-watch")
-def set_gas_station_watch(id: int, req: SetGasStationWatchRequest):
-
-    conn = db()
-    cur = conn.cursor()
-
-    cur.execute(
-        "UPDATE vehicles SET gas_station_watch_enabled = %s WHERE id = %s RETURNING id",
-        (req.enabled, id)
-    )
-
-    updated = cur.fetchone()
-
-    conn.commit()
-
-    cur.close()
-    conn.close()
-
-    if updated is None:
-        raise HTTPException(status_code=404, detail="Vehicle not found")
-
-    return {"id": id, "gas_station_watch_enabled": req.enabled}
 
 
 
@@ -3132,14 +3100,15 @@ def fetch_active_trip_for_diversion(cur, vehicle_id, time_multiplier):
 
 
 #
-# Polled by the frontend for whichever vehicle is currently selected in the
-# In Route tab (same cadence as its city lookup - see GET
-# /api/vehicles/{id}/city) to decide whether to show a "Divert to gas
-# station" option at all, and what to offer. {"stations": []} (not a 404)
-# whenever there's nothing to offer - not driving, or nothing within
-# MAX_GAS_STATION_DETOUR_MILES of the remaining route or
-# NEARBY_GAS_STATION_MILES of the vehicle's current position - since that's
-# a perfectly normal thing for this to report, not an error.
+# Called on demand - once, when "Divert to nearest gas station" is
+# clicked - rather than polled, so there's no need to gate this behind a
+# per-vehicle opt-in the way a continuously-polled version once was.
+# Returns every qualifying candidate sorted by distance (not just one
+# auto-picked choice) so the caller can take the nearest; {"stations": []}
+# (not a 404) whenever there's nothing to offer - not driving, or nothing
+# within MAX_GAS_STATION_DETOUR_MILES of the remaining route or
+# NEARBY_GAS_STATION_MILES of the vehicle's current position - since
+# that's a perfectly normal thing for this to report, not an error.
 #
 @app.get("/api/vehicles/{id}/gas-station-ahead")
 def gas_station_ahead(id: int):
@@ -3148,28 +3117,6 @@ def gas_station_ahead(id: int):
     cur = conn.cursor()
 
     time_multiplier, _ = get_settings(conn, cur)
-
-    #
-    # Skips the real work below entirely (settling, the trip-progress
-    # query, and find_gas_station_options()'s own bounding-box query plus
-    # per-station route scan) for a vehicle nobody's chosen to watch -
-    # gas_station_watch_enabled defaults off precisely so this per-poll
-    # cost is opt-in, not paid by every driving vehicle whether or not
-    # anyone's looking at its divert options.
-    #
-    cur.execute("SELECT gas_station_watch_enabled FROM vehicles WHERE id = %s", (id,))
-
-    watch_row = cur.fetchone()
-
-    if watch_row is None:
-        cur.close()
-        conn.close()
-        raise HTTPException(status_code=404, detail="Vehicle not found")
-
-    if not watch_row[0]:
-        cur.close()
-        conn.close()
-        return {"stations": []}
 
     settle_arrived_vehicles(conn, cur, time_multiplier)
 

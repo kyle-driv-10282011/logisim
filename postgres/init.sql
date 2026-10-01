@@ -165,14 +165,6 @@ CREATE TABLE vehicles (
     sold BOOLEAN NOT NULL DEFAULT FALSE,
     sold_at TIMESTAMP,
 
-    -- Whether GET /api/vehicles/{id}/gas-station-ahead bothers looking for
-    -- divert candidates for this vehicle at all, toggled per-vehicle from
-    -- the merged My Vehicles/In Route card (see README's "Divert to gas
-    -- station"). Defaults off: most trips don't need it, and watching is
-    -- real per-poll work (a bounding-box query plus a per-station route
-    -- scan) that's wasted for a vehicle nobody's chosen to watch.
-    gas_station_watch_enabled BOOLEAN NOT NULL DEFAULT FALSE,
-
     created TIMESTAMP DEFAULT NOW()
 );
 
