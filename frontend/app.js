@@ -2200,7 +2200,16 @@ function vehicleDetailHtml(vehicle, trip) {
         (fuelRemaining !== null && vehicleModel
             ? `<div class="gauge">${fuelDialHtml(fuelRemaining, vehicleModel.fuel_tank_gallons)}</div>`
             : "") +
-        `<div class="gauge">${odometerHtml(vehicle.total_miles_traveled)}</div>` +
+        //
+        // vehicle.total_miles_traveled (GET /api/vehicles) only counts
+        // trips that have actually settled - a trip in progress is
+        // deliberately excluded there (see its own comment in
+        // list_vehicles()) so its distance isn't double-counted once it
+        // arrives. trip.distance_miles (GET /api/trips/active) is that
+        // missing piece - adding it in is what makes this tick up live
+        // while driving instead of jumping only once the trip ends.
+        //
+        `<div class="gauge">${odometerHtml(vehicle.total_miles_traveled + trip.distance_miles)}</div>` +
         `<div class="gauge">${tripometerHtml(trip.distance_miles)}</div>` +
         `</div>`;
 
