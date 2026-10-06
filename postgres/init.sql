@@ -21,6 +21,12 @@ CREATE TABLE settings (
 
     anchor_game_time TIMESTAMP NOT NULL,
 
+    -- Opt-in auto-refuel perk. An integer level rather than a boolean so it
+    -- can grow into an upgradeable level later - 0 = off, 1 = divert to the
+    -- nearest reachable gas station when low and unable to finish the trip.
+    -- See AUTO_REFUEL_* and maybe_auto_divert_to_gas_station() in app.py.
+    auto_refuel_level INTEGER NOT NULL DEFAULT 0,
+
     CONSTRAINT settings_single_row CHECK (id = 1)
 );
 
@@ -318,5 +324,11 @@ CREATE TABLE trips (
     -- cancellation time (see divert_to_gas_station()) instead of being
     -- double-counted through the normal completed-trip-miles summing, since
     -- a cancelled trip never satisfies that logic's own arrival condition.
-    cancelled_at TIMESTAMP
+    cancelled_at TIMESTAMP,
+
+    -- Set the moment auto-refuel decides to divert this trip to a gas
+    -- station (maybe_auto_divert_to_gas_station() in app.py) - a claim, so
+    -- concurrent polls can't each start their own divert. Cleared again if
+    -- that divert job fails, so it can retry.
+    auto_divert_claimed_at TIMESTAMP
 );

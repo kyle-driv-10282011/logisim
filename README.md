@@ -95,6 +95,7 @@ Replaces the old hardcoded `TIME_COMPRESSION` constant — see
 | `time_multiplier`  | double precision | how fast game time runs relative to real time |
 | `anchor_real_utc`  | timestamp | a real UTC moment                |
 | `anchor_game_time` | timestamp | the game time at that moment; re-anchored on every multiplier change |
+| `auto_refuel_level` | integer, default `0` | opt-in auto-refuel perk; `0` = off, `1` = on — see [Auto-refuel](#auto-refuel) |
 
 Seeded lazily by the backend on first use (`get_settings()` in
 `app.py`), not by `init.sql` — the anchor has to be comparable to
@@ -260,6 +261,7 @@ user-specified simulated time).
 | `resume_destination_place_id` | integer FK `places(id)`, nullable | set when this trip is a detour to a gas station — the place the vehicle was actually trying to reach before the detour, so arriving at the station automatically starts a new trip onward to here — see [Divert to gas station](#divert-to-gas-station) |
 | `auto_refuel`            | boolean, default `false` | whether arriving at this trip's destination tops the tank back up to full — set explicitly by a diversion or a drive-to-refuel, never inferred from the destination happening to have a `gas_prices` entry — see [Fuel](#fuel) |
 | `cancelled_at`           | timestamp, nullable | set when a trip is abandoned mid-route for a diversion instead of ever arriving — excluded from every "is this vehicle currently on a trip" check, the same way an arrived trip is — see [Divert to gas station](#divert-to-gas-station) |
+| `auto_divert_claimed_at` | timestamp, nullable | set when auto-refuel decides to divert this trip, so concurrent polls can't each start their own divert; cleared if that divert job fails — see [Auto-refuel](#auto-refuel) |
 
 A vehicle can only have one trip active at a time (enforced at the
 application level in `POST /api/trips`, not a DB constraint) — a cancelled
@@ -655,6 +657,40 @@ onward from the station to that remembered destination and start a new
 trip — automatically continuing the original drive without the user
 having to re-plan it.
 
+### Auto-refuel
+
+An opt-in perk, off by default — toggled by the "Auto-refuel" checkbox
+under the game clock, stored as `settings.auto_refuel_level`. It's an
+integer level rather than a boolean so it can become an upgradeable level
+later without a schema change; today `0` is off and `1`
+(`AUTO_REFUEL_LEVEL_BASIC`) is the only "on" level. Unlike the time
+multiplier, it can be changed while vehicles are in route.
+
+At level 1, a DRIVING vehicle diverts itself to a gas station once **both**:
+
+- its tank is at or under `AUTO_REFUEL_FUEL_FRACTION` (25%) of full, and
+- what's left in the tank can't cover the rest of the trip.
+
+The check runs inside `settle_arrived_vehicles()` — the same per-poll pass
+that already computes every trip's live fuel level — so there's no extra
+background ticker. When it fires, `maybe_auto_divert_to_gas_station()` runs
+the same station search as the manual button (`find_gas_station_options()`,
+limited to what's reachable on the fuel left), picks the nearest, and runs
+the same `_divert_to_gas_station()` job — so the detour refuels on arrival
+and resumes to the original destination exactly like a manual
+[divert](#divert-to-gas-station) does. If no station is in range yet, it
+just tries again on the next poll as the vehicle keeps moving.
+
+Trips already headed to a gas station (`auto_refuel = true`) are skipped.
+The trip is claimed (`trips.auto_divert_claimed_at`) with a conditional
+`UPDATE` before the job is submitted, so concurrent polls can't double-divert;
+`_run_auto_divert_job()` clears the claim if the divert fails, so a
+transient OSRM/Nominatim error doesn't permanently disable it for that trip.
+
+Because the check is poll-driven, it only fires while something is polling
+the backend (i.e. the frontend is open). A vehicle that crosses the
+threshold and runs dry with nobody watching ends up STRANDED as usual.
+
 ### Search a city for gas stations
 
 The regular bulk gas-price upload (`POST /api/gas-prices/upload`) needs an
@@ -709,8 +745,8 @@ All endpoints are on the `backend` service, default `http://localhost:5000`.
 
 | Method & path                  | Description |
 |---------------------------------|-------------|
-| `GET /api/settings`             | Current game clock: `{time_multiplier, game_time}` |
-| `PUT /api/settings`             | Change `time_multiplier`. Body: `{time_multiplier}` — re-anchors the game clock at its current value so it speeds up/slows down rather than jumping. 409 if any vehicle is currently in route |
+| `GET /api/settings`             | Current game clock and perks: `{time_multiplier, game_time, auto_refuel_level, auto_refuel_max_level}` |
+| `PUT /api/settings`             | Change `time_multiplier` and/or `auto_refuel_level`. Body: `{time_multiplier?, auto_refuel_level?}` — a multiplier change re-anchors the game clock at its current value so it speeds up/slows down rather than jumping, and is rejected (409) if any vehicle is currently in route; `auto_refuel_level` (0 to `auto_refuel_max_level`) can be changed any time |
 | `POST /api/vehicles`            | Create a vehicle. Body: `{vehicle_model_id, current_location, starting_mileage?}` — `name` is server-generated (`"<year> <brand> <model> <n>"`), not part of the request. Response includes the generated `name`, resolved `vehicle_model`, and resolved `current_lat`/`current_lng`. 400 if `current_location` doesn't resolve |
 | `GET /api/vehicles`             | List vehicles with computed `status` (`READY`/`DRIVING`/`STRANDED`/`SOLD`), each vehicle's `vehicle_model`, `fuel_gallons`, `place_id`, and `current_location`/`current_lat`/`current_lng` derived from its place (settled first — see [Vehicle location](#vehicle-location)). `place_id` lets the frontend create a path straight from a vehicle's own place (`POST /api/paths`'s `origin_place_id`) without re-geocoding it. Defaults to the current fleet (`sold = false`, "My Vehicles"); `?include_sold=true` returns full history. No frontend tab currently surfaces the latter — the frontend only ever calls this without the flag |
 | `POST /api/vehicles/{id}/sell`  | Mark a vehicle sold (soft-delete). 409 if already sold or currently on a trip |

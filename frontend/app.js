@@ -66,7 +66,54 @@ async function loadSettings() {
         input.value = settings.time_multiplier;
     }
 
+    updateAutoRefuelToggle(settings.auto_refuel_level);
+
     updateSimClock();
+}
+
+
+//
+// Auto-refuel is stored as a level (settings.auto_refuel_level, 0 = off)
+// so it can become an upgradeable perk later - for now the UI only exposes
+// it as an on/off checkbox, where "on" means level 1.
+//
+function updateAutoRefuelToggle(level) {
+
+    document.getElementById("auto-refuel-toggle").checked = level > 0;
+}
+
+
+async function setAutoRefuel(checkbox) {
+
+    checkbox.disabled = true;
+
+    try {
+
+        const response = await fetch(API + "/api/settings", {
+
+            method: "PUT",
+
+            headers: {
+                "Content-Type": "application/json"
+            },
+
+            body: JSON.stringify({ auto_refuel_level: checkbox.checked ? 1 : 0 })
+
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            alert(data.detail || "Could not update auto-refuel");
+            checkbox.checked = !checkbox.checked;
+            return;
+        }
+
+        updateAutoRefuelToggle(data.auto_refuel_level);
+
+    } finally {
+        checkbox.disabled = false;
+    }
 }
 
 

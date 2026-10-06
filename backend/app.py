@@ -106,6 +106,27 @@ JITTER_RANGE = 0.08
 #
 ROADSIDE_ASSIST_FEE_USD = 75.0
 
+#
+# Auto-refuel is an opt-in perk, not default behavior - settings.auto_refuel_level
+# is an integer (not a boolean) so it can grow into an upgradeable level later
+# without another schema change. Today only two levels exist:
+#
+#   0 - off: a vehicle runs dry (STRANDED) unless the user diverts it manually
+#   1 - on: once a DRIVING vehicle's tank drops to AUTO_REFUEL_FUEL_FRACTION
+#       and it can't finish the trip on what's left, it diverts itself to the
+#       nearest reachable gas station (the same divert the "Divert to gas
+#       station" button does) and resumes to its destination afterward
+#
+# Future levels slot in here (e.g. a higher threshold, picking the cheapest
+# station instead of the nearest, planning stops at trip start) - see
+# maybe_auto_divert_to_gas_station().
+#
+AUTO_REFUEL_LEVEL_OFF = 0
+AUTO_REFUEL_LEVEL_BASIC = 1
+AUTO_REFUEL_MAX_LEVEL = AUTO_REFUEL_LEVEL_BASIC
+
+AUTO_REFUEL_FUEL_FRACTION = 0.25
+
 
 def road_tier(free_flow_mph):
 
@@ -181,6 +202,19 @@ def get_settings(conn, cur):
     return multiplier, game_time
 
 
+#
+# Kept separate from get_settings() rather than widening its return tuple -
+# that's called from a dozen places that only care about the clock.
+#
+def get_auto_refuel_level(conn, cur):
+
+    ensure_settings_row(conn, cur)
+
+    cur.execute("SELECT auto_refuel_level FROM settings WHERE id = 1")
+
+    return cur.fetchone()[0]
+
+
 def settle_arrived_vehicles(conn, cur, time_multiplier):
 
     #
@@ -209,7 +243,8 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
             v.id, t.id, p.destination_place_id, t.resume_destination_place_id, t.auto_refuel,
             p.distances_miles, t.realized_seconds, t.realized_duration_seconds,
             t.starting_fuel_gallons, t.roadside_refuel_count, t.paused_seconds,
-            vm.mpg, vm.fuel_tank_gallons, EXTRACT(EPOCH FROM (NOW() - t.started_at))
+            vm.mpg, vm.fuel_tank_gallons, EXTRACT(EPOCH FROM (NOW() - t.started_at)),
+            t.auto_divert_claimed_at
         FROM vehicles v
         JOIN trips t ON t.id = (
             SELECT t2.id FROM trips t2
@@ -240,12 +275,15 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
     #
     pending_resumes = []
     refueling_vehicle_ids = []
+    auto_divert_candidates = []
+
+    auto_refuel_level = get_auto_refuel_level(conn, cur)
 
     for (
         vehicle_id, trip_id, destination_place_id, resume_destination_place_id, auto_refuel,
         distances_miles, realized_seconds, realized_duration_seconds,
         starting_fuel_gallons, roadside_refuel_count, paused_seconds,
-        mpg, fuel_tank_gallons, elapsed_real_seconds
+        mpg, fuel_tank_gallons, elapsed_real_seconds, auto_divert_claimed_at
     ) in rows:
 
         progress = resolve_trip_progress(
@@ -253,6 +291,22 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
             mpg, fuel_tank_gallons, starting_fuel_gallons, roadside_refuel_count, paused_seconds,
             float(elapsed_real_seconds), time_multiplier
         )
+
+        #
+        # Every caller of this function is already a poll of some kind, so
+        # this is also where a DRIVING vehicle gets checked for auto-refuel -
+        # progress here is the same live fuel level the UI is showing. A trip
+        # that's itself headed to a gas station (auto_refuel) is already
+        # refueling, and one that's been claimed is already being diverted.
+        #
+        if (
+            progress["status"] == "DRIVING"
+            and auto_refuel_level >= AUTO_REFUEL_LEVEL_BASIC
+            and not auto_refuel
+            and auto_divert_claimed_at is None
+            and needs_auto_refuel(progress, distances_miles, mpg, fuel_tank_gallons)
+        ):
+            auto_divert_candidates.append((vehicle_id, trip_id, progress))
 
         if progress["status"] != "ARRIVED":
             continue
@@ -294,6 +348,96 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
 
         job_id = create_job("resume_trip_after_refuel")
         job_executor.submit(_run_resume_trip_job, job_id, vehicle_id, gas_station_place_id, resume_destination_place_id, False)
+
+    for vehicle_id, trip_id, progress in auto_divert_candidates:
+        maybe_auto_divert_to_gas_station(conn, cur, vehicle_id, trip_id, progress)
+
+
+#
+# Level 1 auto-refuel trigger: low (at or under AUTO_REFUEL_FUEL_FRACTION of
+# a full tank) AND not enough left to finish the trip. Both, not either - a
+# vehicle that's low but a mile from its destination shouldn't detour, and
+# one with a long way to go but a mostly-full tank should keep driving and
+# refuel later, closer to where it'd actually need to.
+#
+def needs_auto_refuel(progress, distances_miles, mpg, fuel_tank_gallons):
+
+    fuel_gallons_remaining = progress["fuel_gallons_remaining"]
+
+    if fuel_gallons_remaining is None or not mpg or not fuel_tank_gallons:
+        return False
+
+    if fuel_gallons_remaining > fuel_tank_gallons * AUTO_REFUEL_FUEL_FRACTION:
+        return False
+
+    remaining_miles = distances_miles[-1] - progress["distance_miles"]
+
+    return fuel_gallons_remaining * mpg < remaining_miles
+
+
+#
+# The automatic version of POST /api/vehicles/{id}/divert-to-gas-station -
+# same station search (find_gas_station_options(), nearest first, limited to
+# what's reachable on the fuel left) and the same _divert_to_gas_station()
+# job, so an auto-refuel detour behaves exactly like a manual one: refuels
+# on arrival and resumes to wherever the vehicle was headed.
+#
+# No station in range just means "try again next poll" - the vehicle keeps
+# moving and a station further along the route may come into range. Once one
+# is found, the trip is claimed (auto_divert_claimed_at) with a conditional
+# UPDATE before the job is submitted, so concurrent polls - every endpoint
+# calls settle_arrived_vehicles() - can't each kick off their own divert.
+#
+def maybe_auto_divert_to_gas_station(conn, cur, vehicle_id, trip_id, progress):
+
+    cur.execute(
+        """
+        SELECT p.route, p.distances_miles, p.destination_place_id, t.resume_destination_place_id, vm.mpg
+        FROM trips t
+        JOIN paths p ON p.id = t.path_id
+        JOIN vehicles v ON v.id = t.vehicle_id
+        JOIN vehicle_models vm ON vm.id = v.vehicle_model_id
+        WHERE t.id = %s
+        """,
+        (trip_id,)
+    )
+
+    route, distances_miles, destination_place_id, resume_destination_place_id, mpg = cur.fetchone()
+
+    fuel_gallons_remaining = progress["fuel_gallons_remaining"]
+
+    stations = find_gas_station_options(
+        cur, route, distances_miles, progress["distance_miles"], fuel_gallons_remaining * mpg
+    )
+
+    if not stations:
+        return
+
+    cur.execute(
+        """
+        UPDATE trips SET auto_divert_claimed_at = NOW()
+        WHERE id = %s AND auto_divert_claimed_at IS NULL AND cancelled_at IS NULL
+        RETURNING id
+        """,
+        (trip_id,)
+    )
+
+    claimed = cur.fetchone() is not None
+
+    conn.commit()
+
+    if not claimed:
+        return
+
+    lat, lng = interpolate_position_at_distance(route, distances_miles, progress["distance_miles"])
+
+    job_id = create_job("auto_divert_to_gas_station")
+
+    job_executor.submit(
+        _run_auto_divert_job, job_id, vehicle_id, trip_id, lat, lng,
+        progress["distance_miles"], fuel_gallons_remaining,
+        stations[0]["place_id"], resume_destination_place_id or destination_place_id
+    )
 
 
 def is_rush_hour(effective_dt):
@@ -1751,6 +1895,14 @@ def run_migrations():
     #
     cur.execute("ALTER TABLE vehicles DROP COLUMN IF EXISTS gas_station_watch_enabled")
 
+    #
+    # Auto-refuel support - additive, safe against both a pre-existing DB and
+    # a fresh one (where init.sql already created them). See
+    # maybe_auto_divert_to_gas_station().
+    #
+    cur.execute("ALTER TABLE settings ADD COLUMN IF NOT EXISTS auto_refuel_level INTEGER NOT NULL DEFAULT 0")
+    cur.execute("ALTER TABLE trips ADD COLUMN IF NOT EXISTS auto_divert_claimed_at TIMESTAMP")
+
     conn.commit()
 
     cur.execute("SELECT COUNT(*) FROM places WHERE country IS NULL")
@@ -2146,7 +2298,13 @@ class CreateVehicleRequest(BaseModel):
 
 class UpdateSettingsRequest(BaseModel):
 
-    time_multiplier: float
+    #
+    # Both optional so either can be changed on its own - only
+    # time_multiplier is locked while vehicles are in route (see
+    # update_settings()); auto_refuel_level can be flipped any time.
+    #
+    time_multiplier: Optional[float] = None
+    auto_refuel_level: Optional[int] = None
 
 
 
@@ -2291,11 +2449,15 @@ class StartTripRequest(BaseModel):
 
 
 
-def settings_dict(time_multiplier, game_time):
+def settings_dict(time_multiplier, game_time, auto_refuel_level):
 
     return {
 
         "time_multiplier": time_multiplier,
+
+        "auto_refuel_level": auto_refuel_level,
+
+        "auto_refuel_max_level": AUTO_REFUEL_MAX_LEVEL,
 
         #
         # Naive local wall-clock value (no tzinfo, no UTC offset) - the
@@ -2315,22 +2477,44 @@ def read_settings():
     cur = conn.cursor()
 
     time_multiplier, game_time = get_settings(conn, cur)
+    auto_refuel_level = get_auto_refuel_level(conn, cur)
 
     cur.close()
     conn.close()
 
-    return settings_dict(time_multiplier, game_time)
+    return settings_dict(time_multiplier, game_time, auto_refuel_level)
 
 
 
 @app.put("/api/settings")
 def update_settings(req: UpdateSettingsRequest):
 
-    if req.time_multiplier <= 0:
+    if req.time_multiplier is not None and req.time_multiplier <= 0:
         raise HTTPException(status_code=400, detail="time_multiplier must be positive")
+
+    if req.auto_refuel_level is not None and not (0 <= req.auto_refuel_level <= AUTO_REFUEL_MAX_LEVEL):
+        raise HTTPException(
+            status_code=400,
+            detail=f"auto_refuel_level must be between 0 and {AUTO_REFUEL_MAX_LEVEL}"
+        )
 
     conn = db()
     cur = conn.cursor()
+
+    if req.auto_refuel_level is not None:
+        ensure_settings_row(conn, cur)
+        cur.execute("UPDATE settings SET auto_refuel_level = %s WHERE id = 1", (req.auto_refuel_level,))
+        conn.commit()
+
+    if req.time_multiplier is None:
+
+        time_multiplier, game_time = get_settings(conn, cur)
+        auto_refuel_level = get_auto_refuel_level(conn, cur)
+
+        cur.close()
+        conn.close()
+
+        return settings_dict(time_multiplier, game_time, auto_refuel_level)
 
     #
     # Re-anchor at the game time the OLD multiplier had reached, right
@@ -2376,10 +2560,12 @@ def update_settings(req: UpdateSettingsRequest):
 
     conn.commit()
 
+    auto_refuel_level = get_auto_refuel_level(conn, cur)
+
     cur.close()
     conn.close()
 
-    return settings_dict(req.time_multiplier, game_time)
+    return settings_dict(req.time_multiplier, game_time, auto_refuel_level)
 
 
 
@@ -4161,6 +4347,41 @@ def _run_divert_job(
             gas_station_place_id, resume_destination_place_id
         )
     except Exception as e:
+        update_job(job_id, status="error", error=getattr(e, "detail", str(e)))
+        return
+
+    update_job(job_id, status="done", result=result)
+
+
+#
+# Same as _run_divert_job(), except a failure (e.g. OSRM/Nominatim briefly
+# unreachable) releases the trip's auto-divert claim instead of leaving it
+# set - otherwise one transient error would stop auto-refuel from ever
+# retrying for the rest of this trip, and the vehicle would just run dry.
+#
+def _run_auto_divert_job(
+    job_id, vehicle_id, current_trip_id, lat, lng,
+    partial_miles_driven, current_fuel_gallons,
+    gas_station_place_id, resume_destination_place_id
+):
+
+    update_job(job_id, status="running")
+
+    try:
+        result = _divert_to_gas_station(
+            vehicle_id, current_trip_id, lat, lng,
+            partial_miles_driven, current_fuel_gallons,
+            gas_station_place_id, resume_destination_place_id
+        )
+    except Exception as e:
+
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("UPDATE trips SET auto_divert_claimed_at = NULL WHERE id = %s", (current_trip_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+
         update_job(job_id, status="error", error=getattr(e, "detail", str(e)))
         return
 
