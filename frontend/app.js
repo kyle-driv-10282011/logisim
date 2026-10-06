@@ -2056,7 +2056,7 @@ function arcPoint(cx, cy, r, fraction) {
 // rotation is just fraction*180-90 degrees, no per-frame trig needed for
 // the moving part.
 //
-function gaugeArcSvg(fraction, { needleColor, endLabels, valueText, unitLabel }) {
+function gaugeArcSvg(fraction, { needleColor, endLabels, valueText, unitLabel, redZone = null }) {
 
     const clamped = Math.max(0, Math.min(1, fraction));
     const cx = 60, cy = 56, r = 46, needleLength = 40;
@@ -2065,24 +2065,46 @@ function gaugeArcSvg(fraction, { needleColor, endLabels, valueText, unitLabel })
     const [trackStartX, trackStartY] = arcPoint(cx, cy, r, 0);
     const [trackEndX, trackEndY] = arcPoint(cx, cy, r, 1);
 
-    const ticks = [0, 0.25, 0.5, 0.75, 1].map((t) => {
+    //
+    // Major ticks at quarters, minor ticks at eighths between them - the
+    // finer graduation is most of what makes the dial read as a real
+    // instrument rather than a progress meter.
+    //
+    const ticks = [0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1].map((t, index) => {
 
-        const [x1, y1] = arcPoint(cx, cy, r - 8, t);
+        const major = index % 2 === 0;
+        const [x1, y1] = arcPoint(cx, cy, r - (major ? 9 : 5), t);
         const [x2, y2] = arcPoint(cx, cy, r, t);
 
-        return `<line class="gauge-tick" x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" />`;
+        return `<line class="gauge-tick${major ? "" : " gauge-tick-minor"}" x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" />`;
 
     }).join("");
+
+    //
+    // An optional red band along the arc (e.g. the bottom of the fuel
+    // dial), drawn over the track the same way a printed dial face marks
+    // its warning range.
+    //
+    let redZoneArc = "";
+
+    if (redZone) {
+
+        const [zoneStartX, zoneStartY] = arcPoint(cx, cy, r, redZone[0]);
+        const [zoneEndX, zoneEndY] = arcPoint(cx, cy, r, redZone[1]);
+
+        redZoneArc = `<path class="gauge-red-zone" d="M ${zoneStartX.toFixed(1)} ${zoneStartY.toFixed(1)} A ${r} ${r} 0 0 1 ${zoneEndX.toFixed(1)} ${zoneEndY.toFixed(1)}" />`;
+    }
 
     return (
         `<svg class="gauge-svg" viewBox="0 0 120 74">` +
         `<path class="gauge-track" d="M ${trackStartX.toFixed(1)} ${trackStartY.toFixed(1)} A ${r} ${r} 0 0 1 ${trackEndX.toFixed(1)} ${trackEndY.toFixed(1)}" />` +
+        redZoneArc +
         ticks +
-        `<text x="${trackStartX.toFixed(1)}" y="${cy + 13}" font-size="9" fill="#777" text-anchor="middle">${endLabels[0]}</text>` +
-        `<text x="${trackEndX.toFixed(1)}" y="${cy + 13}" font-size="9" fill="#777" text-anchor="middle">${endLabels[1]}</text>` +
+        `<text class="gauge-end-label" x="${trackStartX.toFixed(1)}" y="${cy + 13}" font-size="9" text-anchor="middle">${endLabels[0]}</text>` +
+        `<text class="gauge-end-label" x="${trackEndX.toFixed(1)}" y="${cy + 13}" font-size="9" text-anchor="middle">${endLabels[1]}</text>` +
         `<line class="gauge-needle" x1="${cx}" y1="${cy}" x2="${cx}" y2="${cy - needleLength}" ` +
         `stroke="${needleColor}" transform="rotate(${angle.toFixed(1)} ${cx} ${cy})" />` +
-        `<circle cx="${cx}" cy="${cy}" r="4" fill="${needleColor}" />` +
+        `<circle class="gauge-hub" cx="${cx}" cy="${cy}" r="5" />` +
         `</svg>` +
         `<div class="gauge-value">${valueText}</div>` +
         `<div class="gauge-label">${unitLabel}</div>`
@@ -2103,7 +2125,7 @@ function speedometerHtml(speedMph) {
 
     return gaugeArcSvg(speedMph / SPEEDOMETER_MAX_MPH, {
 
-        needleColor: "#343a40",
+        needleColor: "#ff5a1f",
 
         endLabels: ["0", String(SPEEDOMETER_MAX_MPH)],
 
@@ -2131,7 +2153,9 @@ function fuelDialHtml(remainingGallons, capacityGallons) {
 
         valueText: formatGallons(remainingGallons),
 
-        unitLabel: "gal"
+        unitLabel: "gal",
+
+        redZone: [0, 0.125]
     });
 }
 
