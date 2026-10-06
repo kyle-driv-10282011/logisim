@@ -2281,7 +2281,12 @@ function vehicleDetailHtml(vehicle, trip) {
         // while driving instead of jumping only once the trip ends.
         //
         `<div class="gauge">${odometerHtml(vehicle.total_miles_traveled + trip.distance_miles)}</div>` +
-        `<div class="gauge">${tripometerHtml(trip.distance_miles)}</div>` +
+        //
+        // trip_meter_miles, not distance_miles - it keeps counting across
+        // every leg of a gas-station detour (see active_trips() in app.py)
+        // instead of resetting to 0 at the station.
+        //
+        `<div class="gauge">${tripometerHtml(trip.trip_meter_miles ?? trip.distance_miles)}</div>` +
         `</div>`;
 
     return (

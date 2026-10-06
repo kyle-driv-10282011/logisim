@@ -330,5 +330,12 @@ CREATE TABLE trips (
     -- station (maybe_auto_divert_to_gas_station() in app.py) - a claim, so
     -- concurrent polls can't each start their own divert. Cleared again if
     -- that divert job fails, so it can retry.
-    auto_divert_claimed_at TIMESTAMP
+    auto_divert_claimed_at TIMESTAMP,
+
+    -- Miles already driven on this same journey before this leg started -
+    -- non-zero for both legs of a gas-station detour (the drive to the
+    -- station and the resume afterward), so the dashboard trip meter keeps
+    -- counting through the stop instead of resetting each leg. See
+    -- start_diversion_trip() in app.py.
+    trip_meter_offset_miles DOUBLE PRECISION NOT NULL DEFAULT 0
 );

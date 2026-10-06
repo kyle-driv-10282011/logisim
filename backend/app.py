@@ -244,7 +244,7 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
             p.distances_miles, t.realized_seconds, t.realized_duration_seconds,
             t.starting_fuel_gallons, t.roadside_refuel_count, t.paused_seconds,
             vm.mpg, vm.fuel_tank_gallons, EXTRACT(EPOCH FROM (NOW() - t.started_at)),
-            t.auto_divert_claimed_at
+            t.auto_divert_claimed_at, t.trip_meter_offset_miles
         FROM vehicles v
         JOIN trips t ON t.id = (
             SELECT t2.id FROM trips t2
@@ -283,7 +283,7 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
         vehicle_id, trip_id, destination_place_id, resume_destination_place_id, auto_refuel,
         distances_miles, realized_seconds, realized_duration_seconds,
         starting_fuel_gallons, roadside_refuel_count, paused_seconds,
-        mpg, fuel_tank_gallons, elapsed_real_seconds, auto_divert_claimed_at
+        mpg, fuel_tank_gallons, elapsed_real_seconds, auto_divert_claimed_at, trip_meter_offset_miles
     ) in rows:
 
         progress = resolve_trip_progress(
@@ -322,7 +322,14 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
             refueling_vehicle_ids.append(vehicle_id)
 
         if resume_destination_place_id is not None:
-            pending_resumes.append((vehicle_id, destination_place_id, resume_destination_place_id))
+            #
+            # The resumed leg's trip meter picks up where this detour's
+            # ended - everything before the detour plus the detour itself.
+            #
+            pending_resumes.append((
+                vehicle_id, destination_place_id, resume_destination_place_id,
+                trip_meter_offset_miles + distances_miles[-1]
+            ))
 
     #
     # An auto_refuel arrival gets topped back up to full separately, right
@@ -344,10 +351,13 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
 
     conn.commit()
 
-    for vehicle_id, gas_station_place_id, resume_destination_place_id in pending_resumes:
+    for vehicle_id, gas_station_place_id, resume_destination_place_id, trip_meter_offset_miles in pending_resumes:
 
         job_id = create_job("resume_trip_after_refuel")
-        job_executor.submit(_run_resume_trip_job, job_id, vehicle_id, gas_station_place_id, resume_destination_place_id, False)
+        job_executor.submit(
+            _run_resume_trip_job, job_id, vehicle_id, gas_station_place_id, resume_destination_place_id, False,
+            trip_meter_offset_miles
+        )
 
     for vehicle_id, trip_id, progress in auto_divert_candidates:
         maybe_auto_divert_to_gas_station(conn, cur, vehicle_id, trip_id, progress)
@@ -1902,6 +1912,12 @@ def run_migrations():
     #
     cur.execute("ALTER TABLE settings ADD COLUMN IF NOT EXISTS auto_refuel_level INTEGER NOT NULL DEFAULT 0")
     cur.execute("ALTER TABLE trips ADD COLUMN IF NOT EXISTS auto_divert_claimed_at TIMESTAMP")
+
+    #
+    # Trip meter continuity across gas-station detours - see
+    # start_diversion_trip().
+    #
+    cur.execute("ALTER TABLE trips ADD COLUMN IF NOT EXISTS trip_meter_offset_miles DOUBLE PRECISION NOT NULL DEFAULT 0")
 
     conn.commit()
 
@@ -4249,9 +4265,16 @@ def start_diversion_trip(
     conn, cur, vehicle_id,
     origin_place_id, origin_lat, origin_lng,
     destination_place_id, destination_lat, destination_lng,
-    starting_fuel_gallons, resume_destination_place_id, auto_refuel
+    starting_fuel_gallons, resume_destination_place_id, auto_refuel, trip_meter_offset_miles=0.0
 ):
 
+    #
+    # trip_meter_offset_miles is how far the vehicle had already driven on
+    # this same journey before this leg started - non-zero for both legs of
+    # a gas-station detour, so the dashboard's trip meter (offset + this
+    # leg's own distance_miles, see active_trips()) keeps running through
+    # the stop the way a real one would, instead of resetting to 0 each leg.
+    #
     path_id, route, distances_miles, max_speeds_mph = find_or_create_path_between_places(
         cur, origin_place_id, origin_lat, origin_lng, destination_place_id, destination_lat, destination_lng
     )
@@ -4265,11 +4288,11 @@ def start_diversion_trip(
     cur.execute(
         """
         INSERT INTO trips
-        (vehicle_id, path_id, traffic_base_datetime, traffic_bias, zones_snapshot, starting_fuel_gallons, resume_destination_place_id, auto_refuel)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        (vehicle_id, path_id, traffic_base_datetime, traffic_bias, zones_snapshot, starting_fuel_gallons, resume_destination_place_id, auto_refuel, trip_meter_offset_miles)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
-        (vehicle_id, path_id, game_time, 1.0, json.dumps(zones), starting_fuel_gallons, resume_destination_place_id, auto_refuel)
+        (vehicle_id, path_id, game_time, 1.0, json.dumps(zones), starting_fuel_gallons, resume_destination_place_id, auto_refuel, trip_meter_offset_miles)
     )
 
     trip_id = cur.fetchone()[0]
@@ -4305,7 +4328,12 @@ def _divert_to_gas_station(
 
     try:
 
-        cur.execute("UPDATE trips SET cancelled_at = NOW() WHERE id = %s", (current_trip_id,))
+        cur.execute(
+            "UPDATE trips SET cancelled_at = NOW() WHERE id = %s RETURNING trip_meter_offset_miles",
+            (current_trip_id,)
+        )
+
+        trip_meter_offset_miles = cur.fetchone()[0] + partial_miles_driven
 
         cur.execute(
             "UPDATE vehicles SET starting_mileage = starting_mileage + %s, fuel_gallons = %s WHERE id = %s",
@@ -4320,7 +4348,7 @@ def _divert_to_gas_station(
             conn, cur, vehicle_id,
             origin_place_id, lat, lng,
             gas_station_place_id, station["lat"], station["lng"],
-            current_fuel_gallons, resume_destination_place_id, True
+            current_fuel_gallons, resume_destination_place_id, True, trip_meter_offset_miles
         )
 
         conn.commit()
@@ -4400,7 +4428,7 @@ def _run_auto_divert_job(
 # station, to drive it to the closest one and simply park there
 # (auto_refuel=True - see settle_arrived_vehicles()).
 #
-def _resume_trip_after_refuel(vehicle_id, origin_place_id, destination_place_id, auto_refuel):
+def _resume_trip_after_refuel(vehicle_id, origin_place_id, destination_place_id, auto_refuel, trip_meter_offset_miles=0.0):
 
     conn = db()
     cur = conn.cursor()
@@ -4418,7 +4446,7 @@ def _resume_trip_after_refuel(vehicle_id, origin_place_id, destination_place_id,
             conn, cur, vehicle_id,
             origin_place_id, origin["lat"], origin["lng"],
             destination_place_id, destination["lat"], destination["lng"],
-            fuel_gallons, None, auto_refuel
+            fuel_gallons, None, auto_refuel, trip_meter_offset_miles
         )
 
         conn.commit()
@@ -4430,12 +4458,12 @@ def _resume_trip_after_refuel(vehicle_id, origin_place_id, destination_place_id,
         conn.close()
 
 
-def _run_resume_trip_job(job_id, vehicle_id, origin_place_id, destination_place_id, auto_refuel):
+def _run_resume_trip_job(job_id, vehicle_id, origin_place_id, destination_place_id, auto_refuel, trip_meter_offset_miles=0.0):
 
     update_job(job_id, status="running")
 
     try:
-        result = _resume_trip_after_refuel(vehicle_id, origin_place_id, destination_place_id, auto_refuel)
+        result = _resume_trip_after_refuel(vehicle_id, origin_place_id, destination_place_id, auto_refuel, trip_meter_offset_miles)
     except Exception as e:
         update_job(job_id, status="error", error=getattr(e, "detail", str(e)))
         return
@@ -4960,6 +4988,7 @@ def active_trips():
             t.roadside_refuel_count,
             t.paused_seconds,
             t.resume_destination_place_id,
+            t.trip_meter_offset_miles,
             EXTRACT(EPOCH FROM (NOW() - t.started_at))
         FROM trips t
         JOIN vehicles v ON v.id = t.vehicle_id
@@ -4977,7 +5006,7 @@ def active_trips():
     # station leg ever has a resume_destination_place_id at all, so this is
     # usually empty.
     #
-    resume_places_by_id = fetch_places_by_id(cur, [row[-2] for row in rows if row[-2] is not None])
+    resume_places_by_id = fetch_places_by_id(cur, [row[-3] for row in rows if row[-3] is not None])
 
     cur.close()
     conn.close()
@@ -5005,6 +5034,7 @@ def active_trips():
         roadside_refuel_count,
         paused_seconds,
         resume_destination_place_id,
+        trip_meter_offset_miles,
         elapsed_real_seconds
     ) in rows:
 
@@ -5062,7 +5092,16 @@ def active_trips():
                 if resume_destination_place_id is not None else None
             ),
 
-            **derived
+            **derived,
+
+            #
+            # The dashboard trip meter - this leg's distance plus every
+            # earlier leg of the same journey (see start_diversion_trip()),
+            # so it keeps counting through a gas-station detour. Plain
+            # distance_miles stays per-leg since fuel/stranding math and the
+            # odometer depend on that.
+            #
+            "trip_meter_miles": trip_meter_offset_miles + derived["distance_miles"]
         })
 
     return {"trips": trips}
