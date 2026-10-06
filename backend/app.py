@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
@@ -21,6 +22,7 @@ import random
 import re
 import threading
 import time
+import uuid
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -126,6 +128,27 @@ AUTO_REFUEL_LEVEL_BASIC = 1
 AUTO_REFUEL_MAX_LEVEL = AUTO_REFUEL_LEVEL_BASIC
 
 AUTO_REFUEL_FUEL_FRACTION = 0.25
+
+#
+# The "last chance" half of the level 1 trigger (see needs_auto_refuel()):
+# don't refuel at a station with this much of the tank or more still left -
+# that's never the last chance (and it's what keeps a vehicle that just
+# refueled from immediately diverting back to the same station).
+#
+AUTO_REFUEL_LAST_CHANCE_MAX_FRACTION = 0.75
+
+#
+# How far past the vehicle a station has to be to still count as "coming
+# up" for the last-chance check - a station closer than this is about to be
+# passed (or already effectively is by the time a divert job runs), so if
+# it's the only one in range, now is the moment to take it. Scaled up with
+# the time multiplier (AUTO_REFUEL_LOOKAHEAD_REAL_SECONDS of driving at
+# AUTO_REFUEL_LOOKAHEAD_ASSUMED_MPH) so a fast game clock can't carry a
+# vehicle clean past its last station between two polls.
+#
+AUTO_REFUEL_MIN_LOOKAHEAD_MILES = 5.0
+AUTO_REFUEL_LOOKAHEAD_REAL_SECONDS = 3.0
+AUTO_REFUEL_LOOKAHEAD_ASSUMED_MPH = 70.0
 
 
 def road_tier(free_flow_mph):
@@ -244,7 +267,7 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
             p.distances_miles, t.realized_seconds, t.realized_duration_seconds,
             t.starting_fuel_gallons, t.roadside_refuel_count, t.paused_seconds,
             vm.mpg, vm.fuel_tank_gallons, EXTRACT(EPOCH FROM (NOW() - t.started_at)),
-            t.auto_divert_claimed_at, t.trip_meter_offset_miles
+            t.auto_divert_claimed_at, t.trip_meter_offset_miles, t.path_id
         FROM vehicles v
         JOIN trips t ON t.id = (
             SELECT t2.id FROM trips t2
@@ -283,7 +306,7 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
         vehicle_id, trip_id, destination_place_id, resume_destination_place_id, auto_refuel,
         distances_miles, realized_seconds, realized_duration_seconds,
         starting_fuel_gallons, roadside_refuel_count, paused_seconds,
-        mpg, fuel_tank_gallons, elapsed_real_seconds, auto_divert_claimed_at, trip_meter_offset_miles
+        mpg, fuel_tank_gallons, elapsed_real_seconds, auto_divert_claimed_at, trip_meter_offset_miles, path_id
     ) in rows:
 
         progress = resolve_trip_progress(
@@ -304,7 +327,9 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
             and auto_refuel_level >= AUTO_REFUEL_LEVEL_BASIC
             and not auto_refuel
             and auto_divert_claimed_at is None
-            and needs_auto_refuel(progress, distances_miles, mpg, fuel_tank_gallons)
+            and needs_auto_refuel(
+                cur, path_id, progress, distances_miles, mpg, fuel_tank_gallons, time_multiplier
+            )
         ):
             auto_divert_candidates.append((vehicle_id, trip_id, progress))
 
@@ -364,25 +389,143 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
 
 
 #
-# Level 1 auto-refuel trigger: low (at or under AUTO_REFUEL_FUEL_FRACTION of
-# a full tank) AND not enough left to finish the trip. Both, not either - a
-# vehicle that's low but a mile from its destination shouldn't detour, and
-# one with a long way to go but a mostly-full tank should keep driving and
-# refuel later, closer to where it'd actually need to.
+# Level 1 auto-refuel trigger. Never fires if what's in the tank already
+# covers the rest of the trip. Otherwise it fires on either:
 #
-def needs_auto_refuel(progress, distances_miles, mpg, fuel_tank_gallons):
+#   - low: at or under AUTO_REFUEL_FUEL_FRACTION of a full tank, or
+#   - last chance: no other station along the route between just ahead of
+#     the vehicle and the edge of its current range - i.e. it's about to
+#     pass the last station it could reach before running dry.
+#
+# "Low" alone used to be the whole trigger, which strands a vehicle
+# whenever the last station before a long empty stretch comes up while the
+# tank is still above the low mark: by the time it's low, every station in
+# range is already behind it (e.g. I-40 west of El Reno, OK, where the
+# station data has nothing for ~200 miles).
+#
+def needs_auto_refuel(cur, path_id, progress, distances_miles, mpg, fuel_tank_gallons, time_multiplier):
 
     fuel_gallons_remaining = progress["fuel_gallons_remaining"]
 
     if fuel_gallons_remaining is None or not mpg or not fuel_tank_gallons:
         return False
 
-    if fuel_gallons_remaining > fuel_tank_gallons * AUTO_REFUEL_FUEL_FRACTION:
+    current_miles = progress["distance_miles"]
+    range_miles = fuel_gallons_remaining * mpg
+
+    if range_miles >= distances_miles[-1] - current_miles:
         return False
 
-    remaining_miles = distances_miles[-1] - progress["distance_miles"]
+    if fuel_gallons_remaining <= fuel_tank_gallons * AUTO_REFUEL_FUEL_FRACTION:
+        return True
 
-    return fuel_gallons_remaining * mpg < remaining_miles
+    if fuel_gallons_remaining >= fuel_tank_gallons * AUTO_REFUEL_LAST_CHANCE_MAX_FRACTION:
+        return False
+
+    lookahead_miles = max(
+        AUTO_REFUEL_MIN_LOOKAHEAD_MILES,
+        AUTO_REFUEL_LOOKAHEAD_ASSUMED_MPH * time_multiplier * AUTO_REFUEL_LOOKAHEAD_REAL_SECONDS / 3600
+    )
+
+    #
+    # Same 0.8 safety margin find_gas_station_options() applies to
+    # reachability - a station it would refuse to offer can't count as
+    # "still coming up" here either.
+    #
+    station_miles = stations_along_path_miles(cur, path_id, distances_miles)
+
+    next_index = bisect.bisect_right(station_miles, current_miles + lookahead_miles)
+
+    return not (next_index < len(station_miles) and station_miles[next_index] <= current_miles + range_miles * 0.8)
+
+
+#
+# Sorted miles-along-the-route of every gas station within
+# MAX_GAS_STATION_DETOUR_MILES of a path, for needs_auto_refuel()'s
+# last-chance check. A path's geometry never changes, so this is computed
+# once per path and reused on every poll, until the station set itself
+# changes (keyed on the gas station cache version - see
+# get_cached_gas_stations()). Only the route geometry is fetched, and only
+# on a miss, since it's the one large column involved.
+#
+# The route is sampled at roughly one point per mile and bucketed into a
+# coarse lat/lng grid, so each station is only compared against route
+# points in its own and neighboring cells instead of the whole route - a
+# cross-country path is ~15k points against tens of thousands of stations.
+# A 0.5-degree cell is at least 15 miles wide below ~64 degrees latitude
+# (the same assumption _bounding_box_with_pad() makes), so the 3x3
+# neighborhood always covers the full detour radius.
+#
+_STATION_GRID_DEGREES = 0.5
+_STATIONS_ALONG_PATH_CACHE_MAX = 200
+
+_stations_along_path_lock = threading.Lock()
+_stations_along_path_cache = {}
+
+
+def stations_along_path_miles(cur, path_id, distances_miles):
+
+    with _gas_station_cache_lock:
+        version = _gas_station_cache_version[0]
+
+    cache_key = (path_id, version)
+
+    with _stations_along_path_lock:
+        cached = _stations_along_path_cache.get(cache_key)
+
+    if cached is not None:
+        return cached
+
+    cur.execute("SELECT route FROM paths WHERE id = %s", (path_id,))
+    route = cur.fetchone()[0]
+
+    grid = {}
+    last_sampled_miles = None
+
+    for index, (lat, lng) in enumerate(route):
+
+        is_last = index == len(route) - 1
+
+        if last_sampled_miles is not None and distances_miles[index] - last_sampled_miles < 1.0 and not is_last:
+            continue
+
+        last_sampled_miles = distances_miles[index]
+
+        cell = (math.floor(lat / _STATION_GRID_DEGREES), math.floor(lng / _STATION_GRID_DEGREES))
+        grid.setdefault(cell, []).append((lat, lng, distances_miles[index]))
+
+    station_miles = []
+
+    for station in get_cached_gas_stations(cur):
+
+        cell_lat = math.floor(station["lat"] / _STATION_GRID_DEGREES)
+        cell_lng = math.floor(station["lng"] / _STATION_GRID_DEGREES)
+
+        best_gap = None
+        best_miles = None
+
+        for d_lat in (-1, 0, 1):
+            for d_lng in (-1, 0, 1):
+                for lat, lng, miles in grid.get((cell_lat + d_lat, cell_lng + d_lng), ()):
+
+                    gap = haversine_miles(station["lat"], station["lng"], lat, lng)
+
+                    if best_gap is None or gap < best_gap:
+                        best_gap, best_miles = gap, miles
+
+        if best_gap is not None and best_gap <= MAX_GAS_STATION_DETOUR_MILES:
+            station_miles.append(best_miles)
+
+    station_miles.sort()
+
+    with _stations_along_path_lock:
+
+        if len(_stations_along_path_cache) >= _STATIONS_ALONG_PATH_CACHE_MAX:
+            _stations_along_path_cache.clear()
+
+        _stations_along_path_cache[cache_key] = station_miles
+
+    return station_miles
 
 
 #
@@ -422,6 +565,14 @@ def maybe_auto_divert_to_gas_station(conn, cur, vehicle_id, trip_id, progress):
 
     if not stations:
         return
+
+    #
+    # Prefer a station on the way over one behind the vehicle - both
+    # qualify in find_gas_station_options() (it serves the manual list
+    # too), but backtracking is only worth it when nothing ahead is in
+    # range. Stable sort, so each group stays nearest-first.
+    #
+    stations = sorted(stations, key=lambda station: not station["ahead"])
 
     cur.execute(
         """
@@ -1311,17 +1462,17 @@ def find_gas_station_options(cur, route, distances_miles, current_distance_miles
         GAS_STATION_CANDIDATE_PAD_MILES
     )
 
-    cur.execute(
-        """
-        SELECT p.id, p.description, p.lat, p.lng, g.price_per_gallon, g.brand
-        FROM gas_prices g
-        JOIN places p ON p.id = g.place_id
-        WHERE p.lat BETWEEN %s AND %s AND p.lng BETWEEN %s AND %s
-        """,
-        (min_lat, max_lat, min_lng, max_lng)
-    )
-
-    stations = cur.fetchall()
+    #
+    # Filtered against the in-memory station cache (get_cached_gas_stations())
+    # rather than a per-call SQL query - this runs on every poll for a low
+    # vehicle once auto-refuel is on, and the bbox check is a cheap linear
+    # pass compared to a DB round-trip each time.
+    #
+    stations = [
+        (row["place_id"], row["description"], row["lat"], row["lng"], row["price_per_gallon"], row["brand"])
+        for row in get_cached_gas_stations(cur)
+        if min_lat <= row["lat"] <= max_lat and min_lng <= row["lng"] <= max_lng
+    ]
 
     if not stations:
         return []
@@ -1406,15 +1557,10 @@ def find_gas_station_options(cur, route, distances_miles, current_distance_miles
 #
 def find_closest_gas_station(cur, lat, lng):
 
-    cur.execute(
-        """
-        SELECT p.id, p.description, p.lat, p.lng, g.price_per_gallon, g.brand
-        FROM gas_prices g
-        JOIN places p ON p.id = g.place_id
-        """
-    )
-
-    stations = cur.fetchall()
+    stations = [
+        (row["place_id"], row["description"], row["lat"], row["lng"], row["price_per_gallon"], row["brand"])
+        for row in get_cached_gas_stations(cur)
+    ]
 
     best = None
     best_distance_miles = None
@@ -2244,6 +2390,84 @@ def gas_price_dict(row):
 
 
 GAS_PRICE_COLUMNS = "g.place_id, g.price_per_gallon, g.updated, p.description, p.lat, p.lng, g.brand"
+
+
+#
+# In-memory cache of every priced gas station (gas_prices joined to its
+# place), shared by GET /api/gas-prices, find_gas_station_options() and
+# find_closest_gas_station(). The station set only changes when a price is
+# added/updated/deleted or a place is deleted, but it's read far more often
+# than that - find_gas_station_options() runs on every poll for each low
+# vehicle once auto-refuel is on, and a page load pulls the whole list -
+# so re-querying it each time was pure repeated work.
+#
+# Invalidation is explicit: every write path calls
+# invalidate_gas_station_cache() *after* its commit, which bumps
+# _gas_station_cache_version. A load records the version it started under
+# and is only stored if nothing invalidated it mid-load, so a read racing a
+# write can never cache the pre-write rows under the post-write version.
+# This is a single uvicorn process (see backend/Dockerfile), so in-process
+# state is shared by every request and job_executor thread. If it ever runs
+# multiple workers, each keeps its own cache and only sees its own
+# invalidations - GAS_STATION_CACHE_TTL_SECONDS bounds how stale another
+# worker's (or a manual psql edit's) change can look.
+#
+GAS_STATION_CACHE_TTL_SECONDS = 300
+
+_gas_station_cache_lock = threading.Lock()
+_gas_station_cache_version = [0]
+_gas_station_cache = {"version": None, "loaded_monotonic": 0.0, "rows": None}
+
+#
+# Part of every ETag so a backend restart (version counter back to 0) can't
+# match an ETag a browser cached from the previous process.
+#
+_gas_station_cache_instance = uuid.uuid4().hex[:8]
+
+
+def invalidate_gas_station_cache():
+
+    with _gas_station_cache_lock:
+        _gas_station_cache_version[0] += 1
+
+
+def gas_station_cache_etag():
+
+    with _gas_station_cache_lock:
+        return f'"gas-{_gas_station_cache_instance}-{_gas_station_cache_version[0]}"'
+
+
+#
+# Returns gas_price_dict()-shaped rows, newest update first (the order GET
+# /api/gas-prices has always returned). Callers must treat them as
+# read-only - they're shared with every other caller until invalidated.
+#
+def get_cached_gas_stations(cur):
+
+    with _gas_station_cache_lock:
+
+        version = _gas_station_cache_version[0]
+
+        fresh = (
+            _gas_station_cache["version"] == version
+            and time.monotonic() - _gas_station_cache["loaded_monotonic"] < GAS_STATION_CACHE_TTL_SECONDS
+        )
+
+        if fresh:
+            return _gas_station_cache["rows"]
+
+    cur.execute(
+        f"SELECT {GAS_PRICE_COLUMNS} FROM gas_prices g JOIN places p ON p.id = g.place_id ORDER BY g.updated DESC"
+    )
+
+    rows = [gas_price_dict(row) for row in cur.fetchall()]
+
+    with _gas_station_cache_lock:
+
+        if _gas_station_cache_version[0] == version:
+            _gas_station_cache.update(version=version, loaded_monotonic=time.monotonic(), rows=rows)
+
+    return rows
 
 
 def upsert_gas_price_row(cur, place_id, price_per_gallon, brand=None):
@@ -3666,6 +3890,12 @@ def delete_place(id: int):
 
         conn.commit()
 
+        #
+        # gas_prices.place_id is ON DELETE CASCADE, so this may have
+        # removed a station too.
+        #
+        invalidate_gas_station_cache()
+
     except psycopg2.errors.ForeignKeyViolation:
 
         conn.rollback()
@@ -3693,21 +3923,30 @@ def delete_place(id: int):
 # price changes there.
 #
 @app.get("/api/gas-prices")
-def list_gas_prices():
+def list_gas_prices(request: Request):
+
+    #
+    # ETag + "no-cache" (revalidate every time, never serve blind) lets the
+    # browser keep the full list in its own HTTP cache across page loads -
+    # an unchanged list costs a 304 with no body and no DB query at all,
+    # instead of re-sending every station. The ETag is read before the rows
+    # so a write landing in between can only make it look older than the
+    # body (forcing a harmless re-download next time), never newer.
+    #
+    etag = gas_station_cache_etag()
+
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "no-cache"})
 
     conn = db()
     cur = conn.cursor()
 
-    cur.execute(
-        f"SELECT {GAS_PRICE_COLUMNS} FROM gas_prices g JOIN places p ON p.id = g.place_id ORDER BY g.updated DESC"
-    )
-
-    rows = cur.fetchall()
+    rows = get_cached_gas_stations(cur)
 
     cur.close()
     conn.close()
 
-    return [gas_price_dict(row) for row in rows]
+    return JSONResponse(content=jsonable_encoder(rows), headers={"ETag": etag, "Cache-Control": "no-cache"})
 
 
 @app.post("/api/gas-prices")
@@ -3744,6 +3983,8 @@ def upsert_gas_price(req: CreateGasPriceRequest):
 
     conn.commit()
 
+    invalidate_gas_station_cache()
+
     cur.close()
     conn.close()
 
@@ -3761,6 +4002,8 @@ def delete_gas_price(place_id: int):
     deleted = cur.fetchone()
 
     conn.commit()
+
+    invalidate_gas_station_cache()
 
     cur.close()
     conn.close()
@@ -3905,6 +4148,8 @@ def _run_gas_price_upload_job(job_id, entries):
 
                     conn.commit()
 
+                    invalidate_gas_station_cache()
+
                     created += 1
 
                 else:
@@ -3924,6 +4169,8 @@ def _run_gas_price_upload_job(job_id, entries):
                         upsert_gas_price_row(cur, station_place_id, price, station_brand)
 
                     conn.commit()
+
+                    invalidate_gas_station_cache()
 
                     created += len(stations)
 

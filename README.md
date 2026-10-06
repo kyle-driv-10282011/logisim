@@ -183,6 +183,20 @@ duplicates.
 | `brand`             | text, nullable | chain ("Shell", "Costco Gas") or plain name for an unbranded station, distinct from the place's own description/address; shown ahead of the description wherever a station is listed (map tooltip, price list, divert options) |
 | `updated`           | timestamp | default `NOW()`, refreshed on every upsert |
 
+**Caching.** The backend keeps every priced station (`gas_prices` joined to
+its place) in an in-memory cache (`get_cached_gas_stations()` in `app.py`)
+shared by `GET /api/gas-prices`, the divert/auto-refuel station search
+(`find_gas_station_options()`) and the drive-to-refuel lookup
+(`find_closest_gas_station()`), so those stop re-querying the table on
+every call/poll. Every write path — adding/updating a price, a bulk upload
+row, deleting a price, deleting a place (which cascades) — calls
+`invalidate_gas_station_cache()` after committing. A 5-minute TTL
+(`GAS_STATION_CACHE_TTL_SECONDS`) is the backstop for anything that changes
+the table outside the API (e.g. manual `psql` edits). `GET /api/gas-prices`
+also sends an `ETag` with `Cache-Control: no-cache`, so the browser keeps
+the list in its HTTP cache and an unchanged list comes back as an empty
+`304` on page reload.
+
 ### `vehicles`
 
 | Column         | Type    | Notes                          |
@@ -667,10 +681,26 @@ later without a schema change; today `0` is off and `1`
 (`AUTO_REFUEL_LEVEL_BASIC`) is the only "on" level. Unlike the time
 multiplier, it can be changed while vehicles are in route.
 
-At level 1, a DRIVING vehicle diverts itself to a gas station once **both**:
+At level 1, a DRIVING vehicle that can't finish its trip on the fuel it
+has diverts itself to a gas station when either:
 
-- its tank is at or under `AUTO_REFUEL_FUEL_FRACTION` (25%) of full, and
-- what's left in the tank can't cover the rest of the trip.
+- **low** — its tank is at or under `AUTO_REFUEL_FUEL_FRACTION` (25%) of
+  full, or
+- **last chance** — it's under `AUTO_REFUEL_LAST_CHANCE_MAX_FRACTION` (75%)
+  and there's no other station along the route between just ahead of it
+  (`AUTO_REFUEL_MIN_LOOKAHEAD_MILES`, scaled up with the time multiplier)
+  and the edge of its range (with the same 0.8 margin the station search
+  uses). This is what refuels before a long empty stretch: "low" alone
+  stranded a vehicle west of El Reno, OK, where the station data has
+  nothing near I-40 for ~200 miles, because by the time it was low every
+  reachable station was already behind it.
+
+The last-chance check needs to know where stations sit along the route.
+`stations_along_path_miles()` works that out once per path (stations
+within `MAX_GAS_STATION_DETOUR_MILES` of the route, matched using a coarse
+lat/lng grid) and caches the sorted mileages until the station set changes,
+so each poll only does a binary search. When it diverts, it prefers a
+station ahead of the vehicle over one behind it.
 
 The check runs inside `settle_arrived_vehicles()` — the same per-poll pass
 that already computes every trip's live fuel level — so there's no extra
