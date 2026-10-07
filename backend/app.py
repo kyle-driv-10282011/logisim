@@ -150,6 +150,24 @@ AUTO_REFUEL_MIN_LOOKAHEAD_MILES = 5.0
 AUTO_REFUEL_LOOKAHEAD_REAL_SECONDS = 3.0
 AUTO_REFUEL_LOOKAHEAD_ASSUMED_MPH = 70.0
 
+#
+# find_gas_station_options() only knows straight-line distance, and the
+# real road there can be nearly twice that (a 10-mile hop that's 19 miles
+# by road stranded a vehicle 1.3 miles short). An auto-divert routes up to
+# this many of the nearest candidates and takes the first whose actual road
+# distance fits the fuel left - each one is an OSRM call, hence the cap.
+#
+AUTO_DIVERT_MAX_ROUTED_CANDIDATES = 3
+
+#
+# How often the backend settles trips on its own (_settle_ticker()), in
+# real seconds. Settling - arrivals, and the auto-refuel check - used to
+# happen only when a request came in, so a backgrounded browser tab
+# (Chrome throttles its timers to once a minute) let a vehicle drive an
+# hour of game time at 60x between checks, straight past its refuel point.
+#
+SETTLE_TICK_SECONDS = 1.0
+
 
 def road_tier(free_flow_mph):
 
@@ -338,10 +356,28 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
 
         fuel_gallons_remaining = progress["fuel_gallons_remaining"]
 
+        #
+        # Conditional on the vehicle not already being there, so when two
+        # settles race (the background ticker and a request poll - see
+        # _settle_ticker()), only the one whose UPDATE actually lands goes
+        # on to refuel and queue the resume leg. The loser blocks on the
+        # row lock, re-checks the WHERE after the winner commits, and
+        # matches nothing.
+        #
         cur.execute(
-            "UPDATE vehicles SET place_id = %s, fuel_gallons = %s WHERE id = %s",
-            (destination_place_id, fuel_gallons_remaining if fuel_gallons_remaining is not None else 0.0, vehicle_id)
+            """
+            UPDATE vehicles SET place_id = %s, fuel_gallons = %s
+            WHERE id = %s AND place_id IS DISTINCT FROM %s
+            RETURNING id
+            """,
+            (
+                destination_place_id, fuel_gallons_remaining if fuel_gallons_remaining is not None else 0.0,
+                vehicle_id, destination_place_id
+            )
         )
+
+        if cur.fetchone() is None:
+            continue
 
         if auto_refuel:
             refueling_vehicle_ids.append(vehicle_id)
@@ -597,7 +633,9 @@ def maybe_auto_divert_to_gas_station(conn, cur, vehicle_id, trip_id, progress):
     job_executor.submit(
         _run_auto_divert_job, job_id, vehicle_id, trip_id, lat, lng,
         progress["distance_miles"], fuel_gallons_remaining,
-        stations[0]["place_id"], resume_destination_place_id or destination_place_id
+        [station["place_id"] for station in stations[:AUTO_DIVERT_MAX_ROUTED_CANDIDATES]],
+        resume_destination_place_id or destination_place_id,
+        fuel_gallons_remaining * mpg
     )
 
 
@@ -2103,6 +2141,42 @@ def run_migrations():
 JOB_EXECUTOR_MAX_WORKERS = 4
 
 job_executor = ThreadPoolExecutor(max_workers=JOB_EXECUTOR_MAX_WORKERS)
+
+
+#
+# Settles trips every SETTLE_TICK_SECONDS whether or not anyone's polling,
+# so arrivals and the auto-refuel check keep pace with the game clock even
+# with the UI closed or throttled in a background tab. Request handlers
+# still settle too (they need an up-to-date view before answering); the
+# claim on auto_divert_claimed_at and the conditional arrival UPDATE in
+# settle_arrived_vehicles() make the overlap harmless.
+#
+def _settle_ticker():
+
+    while True:
+
+        time.sleep(SETTLE_TICK_SECONDS)
+
+        try:
+
+            conn = db()
+
+            try:
+                cur = conn.cursor()
+                time_multiplier, _ = get_settings(conn, cur)
+                settle_arrived_vehicles(conn, cur, time_multiplier)
+                cur.close()
+            finally:
+                conn.close()
+
+        except Exception:
+            logger.exception("Background settle failed")
+
+
+@app.on_event("startup")
+def start_settle_ticker():
+
+    threading.Thread(target=_settle_ticker, name="settle-ticker", daemon=True).start()
 
 
 def create_job(job_type, total=0):
@@ -4564,10 +4638,17 @@ def start_diversion_trip(
 # start_diversion_trip()) are why this only ever runs inside job_executor
 # (see _run_divert_job() below), not inline in the request that triggers it.
 #
+#
+# gas_station_place_ids is tried in order. With max_road_miles set (an
+# auto-divert), each candidate is actually routed and the first whose road
+# distance fits is taken; if none does, the shortest by road is the best
+# remaining bet. Without it (a manual divert - the user picked one), the
+# first is simply used.
+#
 def _divert_to_gas_station(
     vehicle_id, current_trip_id, lat, lng,
     partial_miles_driven, current_fuel_gallons,
-    gas_station_place_id, resume_destination_place_id
+    gas_station_place_ids, resume_destination_place_id, max_road_miles=None
 ):
 
     conn = db()
@@ -4589,7 +4670,33 @@ def _divert_to_gas_station(
 
         origin_place_id = find_or_create_place_by_coords(cur, lat, lng)
 
-        station = fetch_places_by_id(cur, [gas_station_place_id])[gas_station_place_id]
+        stations_by_id = fetch_places_by_id(cur, gas_station_place_ids)
+
+        gas_station_place_id = gas_station_place_ids[0]
+
+        if max_road_miles is not None:
+
+            shortest = None
+
+            for candidate_id in gas_station_place_ids:
+
+                candidate = stations_by_id[candidate_id]
+
+                _, _, candidate_distances_miles, _ = find_or_create_path_between_places(
+                    cur, origin_place_id, lat, lng, candidate_id, candidate["lat"], candidate["lng"]
+                )
+
+                road_miles = candidate_distances_miles[-1]
+
+                if shortest is None or road_miles < shortest[0]:
+                    shortest = (road_miles, candidate_id)
+
+                if road_miles <= max_road_miles:
+                    break
+
+            gas_station_place_id = candidate_id if road_miles <= max_road_miles else shortest[1]
+
+        station = stations_by_id[gas_station_place_id]
 
         trip_id = start_diversion_trip(
             conn, cur, vehicle_id,
@@ -4619,7 +4726,7 @@ def _run_divert_job(
         result = _divert_to_gas_station(
             vehicle_id, current_trip_id, lat, lng,
             partial_miles_driven, current_fuel_gallons,
-            gas_station_place_id, resume_destination_place_id
+            [gas_station_place_id], resume_destination_place_id
         )
     except Exception as e:
         update_job(job_id, status="error", error=getattr(e, "detail", str(e)))
@@ -4637,7 +4744,7 @@ def _run_divert_job(
 def _run_auto_divert_job(
     job_id, vehicle_id, current_trip_id, lat, lng,
     partial_miles_driven, current_fuel_gallons,
-    gas_station_place_id, resume_destination_place_id
+    gas_station_place_ids, resume_destination_place_id, max_road_miles
 ):
 
     update_job(job_id, status="running")
@@ -4646,7 +4753,7 @@ def _run_auto_divert_job(
         result = _divert_to_gas_station(
             vehicle_id, current_trip_id, lat, lng,
             partial_miles_driven, current_fuel_gallons,
-            gas_station_place_id, resume_destination_place_id
+            gas_station_place_ids, resume_destination_place_id, max_road_miles
         )
     except Exception as e:
 

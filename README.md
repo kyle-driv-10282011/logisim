@@ -702,15 +702,35 @@ lat/lng grid) and caches the sorted mileages until the station set changes,
 so each poll only does a binary search. When it diverts, it prefers a
 station ahead of the vehicle over one behind it.
 
-The check runs inside `settle_arrived_vehicles()` — the same per-poll pass
-that already computes every trip's live fuel level — so there's no extra
-background ticker. When it fires, `maybe_auto_divert_to_gas_station()` runs
-the same station search as the manual button (`find_gas_station_options()`,
-limited to what's reachable on the fuel left), picks the nearest, and runs
-the same `_divert_to_gas_station()` job — so the detour refuels on arrival
-and resumes to the original destination exactly like a manual
+The check runs inside `settle_arrived_vehicles()`, the pass that already
+computes every trip's live fuel level. A background thread
+(`_settle_ticker()`) runs that pass every `SETTLE_TICK_SECONDS` (1s), and
+requests still run it too. Without the ticker it only ran when the browser
+polled, and Chrome throttles a background tab's timers to once a minute.
+At 60x that's an hour of driving between checks, so a vehicle could pass
+its refuel point and divert too late to make it.
+
+When it fires, `maybe_auto_divert_to_gas_station()` runs the same station
+search as the manual button (`find_gas_station_options()`, limited to
+what's reachable on the fuel left). That search only measures
+straight-line distance, so the job routes up to
+`AUTO_DIVERT_MAX_ROUTED_CANDIDATES` (3) of the nearest stations and takes
+the first whose road distance fits the remaining range. If none fits, it
+takes the shortest by road. It then runs the same
+`_divert_to_gas_station()` job, so the detour refuels on arrival and
+resumes to the original destination exactly like a manual
 [divert](#divert-to-gas-station) does. If no station is in range yet, it
-just tries again on the next poll as the vehicle keeps moving.
+tries again on the next pass as the vehicle keeps moving.
+
+Arrivals are settled with a conditional `UPDATE`, so when the ticker and a
+request settle at the same moment only one of them refuels the vehicle and
+queues the resume leg.
+
+Auto-refuel can't help where the station data has no stations. The data
+covers the US only, with nothing in Canada, so a Lower 48 to Alaska route
+crosses a gap of roughly 2,100 miles. That's far beyond any vehicle's
+range, so the vehicle fills up at the last US station and runs dry
+somewhere in British Columbia.
 
 Trips already headed to a gas station (`auto_refuel = true`) are skipped.
 The trip is claimed (`trips.auto_divert_claimed_at`) with a conditional
