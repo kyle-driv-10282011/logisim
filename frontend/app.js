@@ -234,7 +234,7 @@ let placeMarker = null;            // dot marking a clicked place's location
 
 let gasPricesByPlaceId = new Map(); // place_id -> gas price row (from GET /api/gas-prices)
 const gasPriceMarkers = new Map();  // place_id -> persistent Leaflet circleMarker (the map overlay itself)
-let gasPriceOverlayVisible = true;  // toggled by the gas pump icon floating over the map
+let gasPriceOverlayVisible = false; // toggled by the gas pump icon floating over the map - off by default, tens of thousands of markers is slow
 
 //
 // preferCanvas: true draws vector layers (the gas price circleMarkers - one
@@ -1213,6 +1213,16 @@ function gasStationLabel(brand, description) {
 
 function renderGasPriceMarkers() {
 
+    //
+    // Markers are only built while the overlay is showing - creating one
+    // per station (tens of thousands after a bulk import) is what made page
+    // load slow. toggleGasPriceOverlay() calls back in here when it's
+    // turned on, and the diff below picks up whatever changed meanwhile.
+    //
+    if (!gasPriceOverlayVisible) {
+        return;
+    }
+
     const seen = new Set();
 
     let minPrice, maxPrice;
@@ -1272,13 +1282,13 @@ function toggleGasPriceOverlay() {
 
     document.getElementById("gasprice-overlay-toggle").classList.toggle("active", gasPriceOverlayVisible);
 
-    for (const marker of gasPriceMarkers.values()) {
+    if (gasPriceOverlayVisible) {
+        renderGasPriceMarkers();
+        return;
+    }
 
-        if (gasPriceOverlayVisible) {
-            marker.addTo(map);
-        } else {
-            map.removeLayer(marker);
-        }
+    for (const marker of gasPriceMarkers.values()) {
+        map.removeLayer(marker);
     }
 }
 
@@ -3542,10 +3552,21 @@ function updateSimClock() {
 }
 
 
-loadVehicleModels().then(loadVehicles);
+//
+// The gas price list is several MB once bulk-imported, so it waits for the
+// vehicle list rather than competing with it for bandwidth and parse time.
+// A failed first load replaces the vehicle list's loading placeholder
+// (see index.html) with an error instead of leaving it spinning.
+//
+loadVehicleModels()
+    .then(loadVehicles)
+    .catch(() => {
+        document.getElementById("vehicle-list").innerHTML =
+            '<div class="list-loading-error">Could not load vehicles - refresh to try again.</div>';
+    })
+    .finally(loadGasPrices);
 loadPaths();
 loadPlaces();
-loadGasPrices();
 loadJobs();
 
 loadSettings();

@@ -657,7 +657,7 @@
             Auto-refuel
         </label>
     </div>
-    <div id="gasprice-overlay-toggle" class="active" onclick="toggleGasPriceOverlay()" title="Toggle gas stations on map">&#9981;</div>
+    <div id="gasprice-overlay-toggle" onclick="toggleGasPriceOverlay()" title="Toggle gas stations on map">&#9981;</div>
 </div>
 
 <div id="vehicle-panel">
@@ -745,7 +745,7 @@
             <button onclick="withSpinner(this, addVehicle)">Add Vehicle</button>
         </div>
 
-        <div id="vehicle-list"></div>
+        <div id="vehicle-list"><div class="list-loading">Loading vehicles...</div></div>
 
         <div class="panel-form">
             <select id="path-select" onchange="updateStartTripVisibility()">

@@ -896,11 +896,12 @@ side panel since they don't all fit as a row:
   route vertex). Existing zones are also listed below the map, each
   clickable to select/edit and with its own delete button.
 - **Gas Prices** — a persistent map overlay, not a selection-driven marker
-  like the Places tab: every priced place gets its own always-on circle
-  marker, color-graded green (cheapest currently loaded) to red (priciest)
+  like the Places tab: every priced place gets its own circle marker,
+  color-graded green (cheapest currently loaded) to red (priciest)
   relative to each other rather than a fixed dollar scale
-  (`gasPriceColor()` in `app.js`), with a "Show on map" checkbox to hide
-  the whole layer. Add or update one place's price by description/address
+  (`gasPriceColor()` in `app.js`). The layer is off by default and toggled
+  by the gas pump icon floating over the map; markers are only built while
+  it's on, since tens of thousands of them slowed page load badly. Add or update one place's price by description/address
   (reusing the same place resolution as a vehicle/path location), or bulk
   import a CSV/JSON file of `description`/`price_per_gallon` rows — a
   re-uploaded file just refreshes existing prices since they're keyed by

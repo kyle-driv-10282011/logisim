@@ -92,3 +92,32 @@ button.spinning::after {
 @keyframes button-spin {
     to { transform: rotate(360deg); }
 }
+
+/*
+ * Placeholder shown in a list until its first fetch lands - the list's own
+ * render replaces it. Same ring as button.spinning, just standalone.
+ */
+.list-loading {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 4px;
+    color: #555;
+    font-size: 12px;
+}
+
+.list-loading::before {
+    content: "";
+    width: 14px;
+    height: 14px;
+    border: 2px solid currentColor;
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: button-spin 0.6s linear infinite;
+}
+
+.list-loading-error {
+    padding: 12px 4px;
+    color: #b00020;
+    font-size: 12px;
+}
