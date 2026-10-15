@@ -1,4 +1,14 @@
-version: "3.9"
+#
+# Reached only through the Edge stack (~/Code/Edge): its Traefik serves
+# https://logisim.kjfries.com and forwards to the frontend's nginx over
+# "edge-logisim", a network shared with Traefik alone. nginx serves the page
+# and passes /api/ on to the backend, and refuses any request without
+# Traefik's PROXY_SECRET. Nothing here publishes a port.
+#
+# Start Edge first (it creates edge-logisim), then:
+#   PROXY_SECRET in .env next to this file (= LOGISIM_PROXY_SECRET in Edge's)
+#   docker compose up -d --build
+#
 
 services:
 
@@ -16,9 +26,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
 
-    ports:
-      - "5432:5432"
-
+    # No published port: use `docker compose exec postgres psql -U simulator -d vehicle_sim`.
     networks:
       - simulator-net
 
@@ -51,8 +59,7 @@ services:
     depends_on:
       - postgres
 
-    ports:
-      - "5000:5000"
+    # No published port: the frontend's nginx reaches it as backend:5000.
 
     volumes:
       - ./backend:/app
@@ -68,14 +75,16 @@ services:
     container_name: vehicle-frontend
     restart: unless-stopped
 
+    environment:
+      # Proof a request came through Edge (frontend/nginx.conf.template).
+      PROXY_SECRET: ${PROXY_SECRET:?set PROXY_SECRET in .env (the same as LOGISIM_PROXY_SECRET in the Edge stack's .env)}
+
     depends_on:
       - backend
 
-    ports:
-      - "8700:80"
-
     networks:
-      - simulator-net
+      - simulator-net # backend
+      - edge-logisim
 
 
 volumes:
@@ -87,3 +96,7 @@ networks:
 
   simulator-net:
     driver: bridge
+
+  # Shared with Edge's Traefik only (Edge creates it): start Edge first.
+  edge-logisim:
+    external: true

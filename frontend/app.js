@@ -1,8 +1,8 @@
 //
-// Same host the page was loaded from (works whether that's localhost, a
-// hostname, or an IP) - just a different port for the backend container.
+// Same origin as the page: nginx (frontend/nginx.conf.template) passes
+// /api/ on to the backend container, which publishes no port of its own.
 //
-const API = `http://${window.location.hostname}:5000`;
+const API = "";
 
 //
 // Mirrors the backend's own tier classification (app.py) so the path

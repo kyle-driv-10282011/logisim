@@ -1,3 +1,5 @@
 backend/__pycache__/
 gas_scripts/*.csv
 gas_scripts/*.json
+# PROXY_SECRET lives here.
+.env

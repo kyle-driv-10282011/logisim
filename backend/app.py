@@ -1,5 +1,4 @@
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
@@ -1911,14 +1910,8 @@ app = FastAPI()
 
 
 #
-# Without this, an unhandled exception propagates all the way out to
-# Starlette's ServerErrorMiddleware, which sits outside CORSMiddleware in the
-# stack, so the 500 response never gets CORS headers and the browser reports
-# it as a CORS failure instead of showing the real error. Registering this as
-# an app.exception_handler(Exception) doesn't work either - Starlette
-# special-cases handlers for the bare Exception class into that same outer
-# ServerErrorMiddleware. A plain middleware placed inside CORSMiddleware is
-# the only way to have the 500 response actually pick up CORS headers.
+# Every unhandled exception becomes a generic JSON 500 - the real traceback
+# goes only to the container logs, never to the browser.
 #
 @app.middleware("http")
 async def catch_unhandled_exceptions(request: Request, call_next):
@@ -1937,17 +1930,9 @@ async def catch_unhandled_exceptions(request: Request, call_next):
 
 
 #
-# Allow the frontend to call this API from any host (not just localhost) -
-# there's no auth/cookies here, so a wildcard origin is fine. Note
-# allow_credentials must be False for "*" to be a legal CORS response.
+# No CORS: the page and the API share one origin (nginx passes /api/ on to
+# this container), so other websites a browser visits can't read the API.
 #
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 def db():

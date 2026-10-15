@@ -9,11 +9,17 @@ ETA product.
 
 ## Stack
 
-| Service    | What it is                              | Port |
-|------------|------------------------------------------|------|
-| `frontend` | Static HTML/JS map UI, served by nginx   | 8700 |
-| `backend`  | FastAPI app                              | 5000 |
-| `postgres` | PostgreSQL 16                            | 5432 |
+| Service    | What it is                                                  | Reached by |
+|------------|--------------------------------------------------------------|------------|
+| `frontend` | nginx: the static HTML/JS map UI, and `/api/` passed on to the backend | Edge's Traefik only (`edge-logisim` network) |
+| `backend`  | FastAPI app                                                  | the frontend's nginx (`backend:5000`) |
+| `postgres` | PostgreSQL 16                                                | the backend |
+
+No service publishes a port. HTTPS is handled by the machine-wide Edge
+stack (`~/Code/Edge`): its Traefik holds the certificate, serves
+`https://logisim.kjfries.com`, and forwards to the frontend's nginx, adding
+a secret header (`X-Edge-Proof`). nginx refuses any request without it, so
+LogiSim can only be loaded through Edge.
 
 All three run via Docker Compose. The frontend is plain JavaScript
 (Leaflet for the map, no build step) and calls the backend directly from
@@ -21,13 +27,25 @@ the browser.
 
 ## Running it
 
+Start the Edge stack first (it creates the `edge-logisim` network and
+fetches the certificate). Put LogiSim's proxy secret in a `.env` next to
+`docker-compose.yml` — the same value as `LOGISIM_PROXY_SECRET` in Edge's
+`.env` (generate one with `openssl rand -hex 32`):
+
+```text
+PROXY_SECRET=...
+```
+
+Then:
+
 ```bash
 docker compose up -d --build
 ```
 
-Then open `http://localhost:8700`. The backend API is directly reachable
-at `http://localhost:5000` (CORS is wide open — see
-[Security notes](#security-notes)).
+and open `https://logisim.kjfries.com` (the hostname must resolve to this
+server). The API is at `https://logisim.kjfries.com/api/...`, same origin
+as the page. A 403 "only available through its HTTPS address" means the
+secret here doesn't match Edge's.
 
 ### Outbound network access
 
@@ -792,7 +810,8 @@ Nominatim's public instance enforces that limit itself.
 
 ## API reference
 
-All endpoints are on the `backend` service, default `http://localhost:5000`.
+All endpoints are on the `backend` service, reached through nginx at
+`https://logisim.kjfries.com/api/...` (the backend publishes no port).
 
 | Method & path                  | Description |
 |---------------------------------|-------------|
@@ -829,9 +848,8 @@ All endpoints are on the `backend` service, default `http://localhost:5000`.
 
 Every response is JSON. Any unhandled backend exception returns a generic
 `500 {"detail": "Internal server error"}` — the real traceback is only in
-the container logs (`docker compose logs backend`), by design (see the
-comment on `catch_unhandled_exceptions` in `app.py` for why this can't be
-a normal FastAPI exception handler and still carry CORS headers).
+the container logs (`docker compose logs backend`), by design (see
+`catch_unhandled_exceptions` in `app.py`).
 
 ## Frontend
 
@@ -937,11 +955,15 @@ hitting that class of issue.
 
 This is a local demo/simulation tool, not a production service:
 
-- CORS allows any origin (`allow_origins=["*"]`) — acceptable because
-  there's no auth or cookies anywhere in the app.
+- It's served only over HTTPS, through the Edge reverse proxy: no service
+  publishes a port, and nginx refuses requests without Edge's secret.
+- No CORS: the page and API share one origin, so other websites a browser
+  visits can't read the API.
 - Postgres credentials are hardcoded in `docker-compose.yml` and `app.py`
-  (`simulator` / `simulator_password`).
-- There's no authentication on any endpoint.
+  (`simulator` / `simulator_password`); Postgres is only reachable by the
+  backend.
+- There's no authentication on any endpoint: anyone who can reach
+  `logisim.kjfries.com` can use it.
 
 None of this should be carried into anything beyond local use.
 
