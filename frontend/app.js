@@ -3265,12 +3265,20 @@ async function createPath() {
         return;
     }
 
+    //
+    // The job result is already the same shape as a GET /api/paths entry,
+    // so it goes straight into pathsById rather than re-downloading every
+    // path's full route geometry via loadPaths() just to pick up one new
+    // row. Set before previewPath(), whose renderPathList() reads it.
+    //
+    pathsById.set(path.id, path);
+    renderPathSelectForTripVehicle();
+
     previewPath(path);
 
     pathCreatedFromVehicleId = originVehicleId;
     renderBackToVehicleHint();
 
-    await loadPaths();
     loadPlaces();
 
     document.getElementById("path-select").value = path.id;

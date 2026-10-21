@@ -993,6 +993,29 @@ def geocode_full(place):
 #
 def find_or_create_place(cur, description):
 
+    #
+    # A description (or Nominatim address) that's already been saved needs
+    # no fresh geocode at all - checked first, before geocode_full(), since
+    # each Nominatim call costs at least a second behind
+    # geocode_throttle_gate() and the dedup-by-coordinates check below can
+    # only run after paying that cost.
+    #
+    cur.execute(
+        """
+        SELECT id, lat, lng FROM places
+        WHERE LOWER(TRIM(description)) = LOWER(TRIM(%s))
+        OR LOWER(TRIM(address)) = LOWER(TRIM(%s))
+        ORDER BY id
+        LIMIT 1
+        """,
+        (description, description)
+    )
+
+    saved = cur.fetchone()
+
+    if saved is not None:
+        return saved[0], saved[1], saved[2]
+
     lat, lng, address, raw_address = geocode_full(description)
 
     lat = round_coord(lat)
@@ -1236,13 +1259,23 @@ def find_gas_stations_in_city(city_text):
 
 
 #
-# Reverse-geocoding the same rounded coordinates always used to mean the
-# same real-world place, so caching by (rounded lat, rounded lng) avoids
+# Reverse-geocoding nearby coordinates at city zoom always means the
+# same city, so caching by (coarsely rounded lat, lng) avoids
 # re-hitting Nominatim's rate-limited endpoint on every poll of the same
 # driving vehicle's live position (vehicle_city() below is the only
 # remaining caller - a settled vehicle/path's location comes from its
 # saved place row instead, see find_or_create_place()).
 #
+#
+# Keyed far coarser than ROUND_DECIMALS (~1km instead of ~1m) - a driving
+# vehicle's position is new on every 7s poll, so a ~1m key almost never
+# hit and every poll cost a Nominatim call through the same
+# geocode_throttle_gate() a create_path job's forward geocodes wait on.
+# reverse_geocode() only asks for a city (zoom=10), which a ~1km cell
+# can't meaningfully change.
+#
+REVERSE_GEOCODE_CACHE_DECIMALS = 2
+
 _reverse_geocode_cache = {}
 
 
@@ -1878,7 +1911,10 @@ def derive_position(
 
 def reverse_geocode(position):
 
-    cache_key = (round_coord(position[0]), round_coord(position[1]))
+    cache_key = (
+        round(position[0], REVERSE_GEOCODE_CACHE_DECIMALS),
+        round(position[1], REVERSE_GEOCODE_CACHE_DECIMALS)
+    )
 
     if cache_key in _reverse_geocode_cache:
         return _reverse_geocode_cache[cache_key]
@@ -4471,19 +4507,26 @@ def _build_path_result(origin, destination, origin_place_id=None):
 
         path_id = cur.fetchone()[0]
 
+        #
+        # The saved places' own descriptions, not the raw typed text - same
+        # labels list_paths() returns, so the frontend can drop this result
+        # straight into its path list instead of re-fetching every path.
+        #
+        places_by_id = fetch_places_by_id(cur, [origin_place_id, destination_place_id])
+
         conn.commit()
 
         return {
 
             "id": path_id,
 
-            "origin": origin,
+            "origin": places_by_id[origin_place_id]["description"],
 
             "origin_lat": origin_lat,
 
             "origin_lng": origin_lng,
 
-            "destination": destination,
+            "destination": places_by_id[destination_place_id]["description"],
 
             "destination_lat": destination_lat,
 
