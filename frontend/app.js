@@ -2177,20 +2177,25 @@ loadSettings();
 // can throw (private mode, blocked site data), in which case they just
 // fall back to the defaults below.
 //
+//
+// Saved by key, not slider position, so adding a stop in the middle (like
+// "1 mile" was) doesn't silently shift what a browser had saved.
+//
 const REFRESH_OPTIONS = [
-    { label: "Never", refreshOn: "never" },
-    { label: "On Fuel Refill", refreshOn: "refill" },
-    { label: "10 miles", refreshOn: "miles", everyMiles: 10 },
-    { label: "50 miles", refreshOn: "miles", everyMiles: 50 },
-    { label: "100 Miles", refreshOn: "miles", everyMiles: 100 },
-    { label: "1000 Miles", refreshOn: "miles", everyMiles: 1000 },
-    { label: "On arrival", refreshOn: "arrival" }
+    { key: "never", label: "Never", refreshOn: "never" },
+    { key: "refill", label: "On Fuel Refill", refreshOn: "refill" },
+    { key: "miles-1", label: "1 mile", refreshOn: "miles", everyMiles: 1 },
+    { key: "miles-10", label: "10 miles", refreshOn: "miles", everyMiles: 10 },
+    { key: "miles-50", label: "50 miles", refreshOn: "miles", everyMiles: 50 },
+    { key: "miles-100", label: "100 Miles", refreshOn: "miles", everyMiles: 100 },
+    { key: "miles-1000", label: "1000 Miles", refreshOn: "miles", everyMiles: 1000 },
+    { key: "arrival", label: "On arrival", refreshOn: "arrival" }
 ];
 
-const DEFAULT_REFRESH_INDEX = 2;
+const DEFAULT_REFRESH_INDEX = REFRESH_OPTIONS.findIndex((option) => option.key === "miles-10");
 
 const LIVE_UPDATES_STORAGE_KEY = "liveUpdatesEnabled";
-const REFRESH_INDEX_STORAGE_KEY = "refreshIntervalIndex";
+const REFRESH_OPTION_STORAGE_KEY = "refreshOption";
 
 //
 // Rechecked after a refresh that failed outright (backend down, network
@@ -2212,9 +2217,10 @@ try {
 
     liveUpdatesEnabled = localStorage.getItem(LIVE_UPDATES_STORAGE_KEY) !== "false";
 
-    const storedIndex = Number(localStorage.getItem(REFRESH_INDEX_STORAGE_KEY));
+    const storedKey = localStorage.getItem(REFRESH_OPTION_STORAGE_KEY);
+    const storedIndex = REFRESH_OPTIONS.findIndex((option) => option.key === storedKey);
 
-    if (localStorage.getItem(REFRESH_INDEX_STORAGE_KEY) !== null && REFRESH_OPTIONS[storedIndex]) {
+    if (storedIndex !== -1) {
         refreshIndex = storedIndex;
     }
 
@@ -2333,7 +2339,7 @@ function setRefreshInterval(index) {
 
     refreshIndex = Number(index);
 
-    saveSetting(REFRESH_INDEX_STORAGE_KEY, refreshIndex);
+    saveSetting(REFRESH_OPTION_STORAGE_KEY, REFRESH_OPTIONS[refreshIndex].key);
 
     renderRefreshIntervalControl();
     renderLiveUpdatesToggle();
