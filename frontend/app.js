@@ -3579,9 +3579,72 @@ loadJobs();
 
 loadSettings();
 
-setInterval(pollActiveTrips, 1000);
+//
+// Live updates (the map badge next to the gas station toggle) gate every
+// timer below that polls the backend - turning them off stops all that
+// background traffic, e.g. to keep Nominatim's shared rate limit free
+// for a create_path job. updateSimClock() isn't gated: it only
+// extrapolates locally from the last loadSettings() anchor, no request.
+// Remembered per browser; storage can throw (private mode, blocked site
+// data), in which case it just defaults back to on.
+//
+const LIVE_UPDATES_STORAGE_KEY = "liveUpdatesEnabled";
 
-setInterval(loadJobs, 2000);
+let liveUpdatesEnabled = true;
+
+try {
+    liveUpdatesEnabled = localStorage.getItem(LIVE_UPDATES_STORAGE_KEY) !== "false";
+} catch (e) {
+    // fall back to on
+}
+
+function renderLiveUpdatesToggle() {
+
+    const toggle = document.getElementById("live-updates-toggle");
+
+    toggle.classList.toggle("active", liveUpdatesEnabled);
+    toggle.title = liveUpdatesEnabled
+        ? "Live updates on - click to pause"
+        : "Live updates paused - click to resume";
+}
+
+function toggleLiveUpdates() {
+
+    liveUpdatesEnabled = !liveUpdatesEnabled;
+
+    try {
+        localStorage.setItem(LIVE_UPDATES_STORAGE_KEY, String(liveUpdatesEnabled));
+    } catch (e) {
+        // not persisted, still applies for this page load
+    }
+
+    renderLiveUpdatesToggle();
+
+    //
+    // Catch up right away on resume instead of waiting out each timer's
+    // next tick - vehicles may have moved a long way while paused.
+    //
+    if (liveUpdatesEnabled) {
+        pollActiveTrips();
+        loadJobs();
+        loadSettings();
+    }
+}
+
+function whileLive(fn) {
+
+    return () => {
+        if (liveUpdatesEnabled) {
+            fn();
+        }
+    };
+}
+
+renderLiveUpdatesToggle();
+
+setInterval(whileLive(pollActiveTrips), 1000);
+
+setInterval(whileLive(loadJobs), 2000);
 
 setInterval(updateSimClock, 1000);
 
@@ -3591,7 +3654,7 @@ setInterval(updateSimClock, 1000);
 // another browser/tab - the 1s updateSimClock() tick above just
 // extrapolates smoothly between these refreshes.
 //
-setInterval(loadSettings, 5000);
+setInterval(whileLive(loadSettings), 5000);
 
 //
 // Gated on the selected vehicle actually still being in activeTripsById,
@@ -3610,7 +3673,7 @@ function selectedVehicleIsDriving() {
 
 setInterval(() => {
 
-    if (selectedVehicleIsDriving()) {
+    if (liveUpdatesEnabled && selectedVehicleIsDriving()) {
         fetchCurrentCity();
     }
 

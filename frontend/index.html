@@ -40,7 +40,8 @@
             line-height: 1.4;
         }
 
-        #gasprice-overlay-toggle {
+        #gasprice-overlay-toggle,
+        #live-updates-toggle {
             position: absolute;
             top: 100px;
             right: 10px;
@@ -58,7 +59,17 @@
             user-select: none;
         }
 
-        #gasprice-overlay-toggle.active {
+        /*
+         * Sits just left of the gas station toggle, same badge shape -
+         * green while live updates are polling, like the gas toggle's
+         * own active state.
+         */
+        #live-updates-toggle {
+            right: 52px;
+        }
+
+        #gasprice-overlay-toggle.active,
+        #live-updates-toggle.active {
             background: #2a8f2a;
         }
 
@@ -657,6 +668,7 @@
             Auto-refuel
         </label>
     </div>
+    <div id="live-updates-toggle" class="active" onclick="toggleLiveUpdates()" title="Live updates on - click to pause">&#128225;</div>
     <div id="gasprice-overlay-toggle" onclick="toggleGasPriceOverlay()" title="Toggle gas stations on map">&#9981;</div>
 </div>
 
