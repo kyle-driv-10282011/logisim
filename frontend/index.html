@@ -650,12 +650,6 @@
         </div>
     </div>
 
-    <!--
-        Shared by every free-text location box (vehicle starting location,
-        a selected vehicle's drive destination) - suggests previously-saved places without
-        forcing a dropdown, so typing a brand-new description still works.
-    -->
-    <datalist id="places-list"></datalist>
 
     <div class="tab-content" id="tab-vehiclemodels">
 
@@ -700,7 +694,7 @@
 
         <div class="panel-form">
             <select id="vehicle-model-select"></select>
-            <input id="vehicle-location" list="places-list" placeholder="A description (Target near Minneapolis) or an address" value="Minneapolis">
+            <input id="vehicle-location" placeholder="A description (Target near Minneapolis) or an address" value="Minneapolis">
             <input id="vehicle-starting-mileage" type="number" min="0" step="1" placeholder="Starting mileage" value="0">
             <button onclick="withSpinner(this, addVehicle)">Add Vehicle</button>
         </div>
@@ -709,7 +703,7 @@
 
         <div class="panel-form" id="drive-form" style="display:none">
             <label for="drive-destination" id="drive-form-label"></label>
-            <input id="drive-destination" list="places-list" placeholder="Destination - a description (Target near Chicago) or an address"
+            <input id="drive-destination" autocomplete="off" placeholder="Destination - a description (Target near Chicago) or an address"
                 onkeydown="if (event.key === 'Enter') document.getElementById('drive-button').click()">
             <button id="drive-button" onclick="withSpinner(this, driveToDestination)">Drive</button>
         </div>
@@ -732,7 +726,7 @@
         <div id="gasprice-list" style="display:none"></div>
 
         <div class="panel-form">
-            <input id="gasprice-description" list="places-list" placeholder="A description (Shell near Minneapolis) or an address">
+            <input id="gasprice-description" placeholder="A description (Shell near Minneapolis) or an address">
             <input id="gasprice-brand" placeholder="Brand or name (optional, e.g. Shell)">
             <input id="gasprice-price" type="number" min="0.01" step="0.01" placeholder="Price per gallon ($)">
             <button onclick="withSpinner(this, addGasPrice)">Add / Update Price</button>

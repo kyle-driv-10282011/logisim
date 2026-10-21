@@ -172,7 +172,6 @@ async function setTimeMultiplier() {
 const tripLayers = new Map();      // vehicle_id -> { marker, routeLine }
 let vehicleModelsById = new Map();         // vehicle_model_id -> vehicle model (from GET /api/vehicle-models)
 let vehiclesById = new Map();      // vehicle_id -> vehicle - current fleet, not sold (from GET /api/vehicles)
-let placesById = new Map();        // place_id -> place (from GET /api/places)
 let activeTripsById = new Map();   // vehicle_id -> trip (from the last poll)
 let activeVehicleIds = new Set();  // vehicle ids seen on the last poll
 let selectedVehicleId = null;      // vehicle id followed in the In Route tab
@@ -655,53 +654,6 @@ async function removeVehicleModel(vehicleModelId) {
 }
 
 
-async function loadPlaces() {
-
-    const response = await fetch(API + "/api/places");
-    const places = await response.json();
-
-    placesById = new Map(places.map((place) => [place.id, place]));
-
-    //
-    // A plain <datalist>, not a <select> - every free-text location box
-    // (vehicle starting location, drive destination) keeps accepting
-    // a brand-new description, this just suggests ones already saved.
-    //
-    const datalist = document.getElementById("places-list");
-
-    datalist.innerHTML = places
-        .map((place) => `<option value="${place.description}">${place.address}</option>`)
-        .join("");
-}
-
-
-//
-// Adds/updates one place in local state without re-fetching the full
-// places list - at tens of thousands of saved places that list is
-// multiple megabytes, and a single-row action (adding one gas price,
-// adding one vehicle) shouldn't cost re-downloading and re-parsing all of
-// it just to make sure that one row is known. Only appends a new
-// <option> when the place is genuinely new (not already in placesById),
-// so re-saving an existing place's price doesn't pile up duplicate
-// datalist entries.
-//
-function patchPlaceLocally(place) {
-
-    const isNew = !placesById.has(place.id);
-
-    placesById.set(place.id, place);
-
-    if (isNew) {
-
-        const option = document.createElement("option");
-        option.value = place.description;
-        option.textContent = place.address;
-
-        document.getElementById("places-list").appendChild(option);
-    }
-}
-
-
 //
 // Interpolates green (cheapest currently loaded) -> orange (mid) -> red
 // (priciest) rather than a fixed dollar scale, so the color spread stays
@@ -968,13 +920,12 @@ async function addGasPrice() {
     priceInput.value = "";
 
     //
-    // Patches local state from this response instead of loadGasPrices() +
-    // loadPlaces() - both of those re-fetch their *entire* multi-megabyte
-    // lists, which turned "add one price" into the same multi-second cost
-    // as a full page reload once there were tens of thousands of rows. The
-    // response already has everything one new/updated row needs.
+    // Patches local state from this response instead of loadGasPrices() -
+    // that re-fetches the *entire* multi-megabyte list, which turned "add
+    // one price" into the same multi-second cost as a full page reload
+    // once there were tens of thousands of rows. The response already has
+    // everything one new/updated row needs.
     //
-    patchPlaceLocally(data.place);
     gasPricesByPlaceId.set(data.place_id, data);
 
     renderGasPriceMarkers();
@@ -1061,7 +1012,6 @@ async function uploadGasPrices() {
     fileInput.value = "";
 
     loadGasPrices();
-    loadPlaces();
 }
 
 
@@ -1407,7 +1357,6 @@ async function driveToDestination() {
 
     await refreshLiveData();
     await loadVehicles();
-    loadPlaces();
 
     //
     // Keep following the same vehicle, now as a driving one (its live
@@ -2010,7 +1959,6 @@ async function addVehicle() {
     }
 
     loadVehicles();
-    loadPlaces();
 }
 
 
@@ -2210,7 +2158,6 @@ loadVehicleModels()
             '<div class="list-loading-error">Could not load vehicles - refresh to try again.</div>';
     })
     .finally(loadGasPrices);
-loadPlaces();
 loadJobs();
 
 loadSettings();
