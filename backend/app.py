@@ -418,11 +418,24 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
     #
     forget_unused_paths(cur, arrived_path_ids)
 
+    #
+    # Each resume job's row goes in this same commit as the arrival. A
+    # separate commit right after left a gap where the vehicle read as
+    # parked at the gas station with no trip and no pending job - and a
+    # concurrent GET /api/trips/active is likely to land in exactly that
+    # gap, since its own settle blocks on this one's row lock until this
+    # commits. It then told the frontend nothing was coming
+    # (next_refresh_seconds), so the resumed leg never showed up and the
+    # vehicle looked READY while actually driving.
+    #
+    resume_job_ids = [create_job("resume_trip_after_refuel", cur=cur) for _ in pending_resumes]
+
     conn.commit()
 
-    for vehicle_id, gas_station_place_id, resume_destination_place_id, trip_meter_offset_miles in pending_resumes:
+    for job_id, (vehicle_id, gas_station_place_id, resume_destination_place_id, trip_meter_offset_miles) in zip(
+        resume_job_ids, pending_resumes
+    ):
 
-        job_id = create_job("resume_trip_after_refuel")
         job_executor.submit(
             _run_resume_trip_job, job_id, vehicle_id, gas_station_place_id, resume_destination_place_id, False,
             trip_meter_offset_miles
@@ -2257,7 +2270,22 @@ def start_settle_ticker():
     threading.Thread(target=_settle_ticker, name="settle-ticker", daemon=True).start()
 
 
-def create_job(job_type, total=0):
+#
+# With cur, the job row is inserted on the caller's own transaction instead
+# of committed on its own - so it becomes visible in the very same commit as
+# whatever made it necessary (see settle_arrived_vehicles()). The caller
+# commits, then submits to job_executor.
+#
+def create_job(job_type, total=0, cur=None):
+
+    if cur is not None:
+
+        cur.execute(
+            "INSERT INTO jobs (job_type, progress_total) VALUES (%s, %s) RETURNING id",
+            (job_type, total)
+        )
+
+        return cur.fetchone()[0]
 
     conn = db()
     cur = conn.cursor()

@@ -1349,7 +1349,16 @@ async function driveToDestination() {
     try {
         await pollJob(submitted.job_id);
     } catch (e) {
+
         alert(e.message);
+
+        //
+        // A refused drive (e.g. "Vehicle already on a trip") usually means
+        // this page's view of the vehicle is out of date - re-fetch so the
+        // card shows what it's really doing instead of inviting a retry.
+        //
+        await refreshLiveData();
+        await loadVehicles();
         return;
     }
 
