@@ -178,19 +178,9 @@ let activeVehicleIds = new Set();  // vehicle ids seen on the last poll
 let selectedVehicleId = null;      // vehicle id followed in the In Route tab
 let selectedTripVehicleId = null;  // vehicle id chosen (in the Vehicles tab) to start a trip
 let selectedVehicleModelId = null;         // vehicle model id highlighted in the Vehicle Models tab (purely visual, no map focus)
-let selectedPlaceId = null;        // place id focused in the Places tab
 
 
-//
-// Places tab's continent/country/state/city filter (see renderPlaceFilterChips()
-// below) - null at a level means "no filter chosen there yet". Persists across
-// re-renders (a poll tick, adding/removing a place) so the chosen chips don't
-// reset out from under the user; only cleared by clicking an active chip again.
-//
-const PLACE_FILTER_LEVELS = ["continent", "country", "state", "city"];
-let placesFilter = { continent: null, country: null, state: null, city: null };
 let restingVehicleMarker = null;   // dot marking a clicked non-driving vehicle's resting location
-let placeMarker = null;            // dot marking a clicked place's location
 
 let gasPricesByPlaceId = new Map(); // place_id -> gas price row (from GET /api/gas-prices)
 const gasPriceMarkers = new Map();  // place_id -> persistent Leaflet circleMarker (the map overlay itself)
@@ -252,57 +242,18 @@ function clearRestingVehicleMarker() {
 
 
 //
-// Same idea as showRestingVehicleMarker(), a different color so a place pin
-// doesn't get mistaken for a vehicle sitting there.
-//
-function showPlaceMarker(place) {
-
-    clearPlaceMarker();
-
-    placeMarker = L.circleMarker([place.lat, place.lng], {
-
-        radius: 8,
-        color: "#f08c00",
-        weight: 2,
-        fillColor: "#f08c00",
-        fillOpacity: 1
-
-    }).addTo(map);
-
-    placeMarker.bindTooltip(place.description, { direction: "top", offset: [0, -10] });
-}
-
-
-function clearPlaceMarker() {
-
-    if (placeMarker) {
-        map.removeLayer(placeMarker);
-        placeMarker = null;
-    }
-}
-
-
-//
-// Vehicles (In Route follow), vehicles (trip-start pick), paths (zone
-// editor preview), and places all compete for the same map focus -
-// clicking any one of them should drop whatever the others had selected,
-// rather than leaving e.g. a followed driving vehicle still yanking the
-// view back every poll tick while a place is being looked at. Every click
-// entry point below calls this first, then applies its own selection on
-// top. Re-renders the place list too, since unlike the others its
-// "selected" highlight has no other trigger to refresh it when cleared
-// from here.
+// A followed driving vehicle and a vehicle picked to drive compete for the
+// same map focus (and the same narrowed vehicle list) - selecting either
+// should drop the other, rather than leaving e.g. a followed driving
+// vehicle still yanking the view back on every refresh. Every click entry
+// point below calls this first, then applies its own selection on top.
 //
 function clearFocus() {
 
     selectedVehicleId = null;
     selectedTripVehicleId = null;
-    selectedPlaceId = null;
 
     clearRestingVehicleMarker();
-    clearPlaceMarker();
-
-    renderPlaceList();
 }
 
 
@@ -474,7 +425,6 @@ function formatHMS(totalSeconds) {
 //
 const TAB_LABELS = {
     vehiclemodels: "Vehicle Models",
-    places: "Places",
     myvehicles: "My Vehicles",
     paths: "Paths",
     gasprices: "Gas Prices",
@@ -513,7 +463,7 @@ document.addEventListener("click", (event) => {
 
 function showTab(tab) {
 
-    for (const name of ["vehiclemodels", "places", "myvehicles", "gasprices", "jobs", "config"]) {
+    for (const name of ["vehiclemodels", "myvehicles", "gasprices", "jobs", "config"]) {
 
         document.getElementById(`tab-${name}`).classList.toggle("active", name === tab);
         document.getElementById(`tab-button-${name}`).classList.toggle("active", name === tab);
@@ -625,8 +575,7 @@ function renderVehicleModelList() {
 
 //
 // Clicking a vehicle model just highlights it (click again to clear) - purely
-// a visual focus like the Places tab's own selection, not tied to the map
-// (a vehicle model has no location).
+// a visual focus, not tied to the map (a vehicle model has no location).
 //
 function selectVehicleModel(vehicleModelId) {
 
@@ -715,7 +664,7 @@ async function loadPlaces() {
 
     //
     // A plain <datalist>, not a <select> - every free-text location box
-    // (vehicle starting location, path origin/destination) keeps accepting
+    // (vehicle starting location, drive destination) keeps accepting
     // a brand-new description, this just suggests ones already saved.
     //
     const datalist = document.getElementById("places-list");
@@ -723,8 +672,6 @@ async function loadPlaces() {
     datalist.innerHTML = places
         .map((place) => `<option value="${place.description}">${place.address}</option>`)
         .join("");
-
-    renderPlaceList();
 }
 
 
@@ -752,286 +699,6 @@ function patchPlaceLocally(place) {
 
         document.getElementById("places-list").appendChild(option);
     }
-
-    renderPlaceList();
-}
-
-
-//
-// A place matches up to (but not including) levelIndex when every filter
-// level *before* it either isn't set or matches this place - i.e. "is this
-// place still a valid candidate for picking a value at levelIndex", not "does
-// it match levelIndex's own filter too". That's what lets the chip row for a
-// level keep showing every sibling value (so you can jump straight from one
-// country to another) instead of only the one currently selected there.
-//
-function placeMatchesFiltersUpTo(place, levelIndex) {
-
-    for (let i = 0; i < levelIndex; i++) {
-
-        const level = PLACE_FILTER_LEVELS[i];
-
-        if (placesFilter[level] !== null && place[level] !== placesFilter[level]) {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-
-function placePassesAllFilters(place) {
-    return placeMatchesFiltersUpTo(place, PLACE_FILTER_LEVELS.length);
-}
-
-
-function distinctValuesAtLevel(levelIndex) {
-
-    const level = PLACE_FILTER_LEVELS[levelIndex];
-    const values = new Set();
-
-    for (const place of placesById.values()) {
-
-        if (place[level] && placeMatchesFiltersUpTo(place, levelIndex)) {
-            values.add(place[level]);
-        }
-    }
-
-    return [...values].sort();
-}
-
-
-//
-// If a place backing the currently-selected chip at some level disappeared
-// (deleted, or a filter above it just changed to something incompatible),
-// that level - and everything below it, since their candidates depend on
-// it - falls back to "not filtered" instead of silently showing an empty
-// list with no obvious way out.
-//
-function sanitizePlacesFilter() {
-
-    PLACE_FILTER_LEVELS.forEach((level, levelIndex) => {
-
-        if (placesFilter[level] !== null && !distinctValuesAtLevel(levelIndex).includes(placesFilter[level])) {
-
-            for (let i = levelIndex; i < PLACE_FILTER_LEVELS.length; i++) {
-                placesFilter[PLACE_FILTER_LEVELS[i]] = null;
-            }
-        }
-    });
-}
-
-
-function setPlaceFilter(level, value) {
-
-    const levelIndex = PLACE_FILTER_LEVELS.indexOf(level);
-
-    if (placesFilter[level] === value) {
-
-        placesFilter[level] = null;
-
-    } else {
-
-        placesFilter[level] = value;
-
-        for (let i = levelIndex + 1; i < PLACE_FILTER_LEVELS.length; i++) {
-            placesFilter[PLACE_FILTER_LEVELS[i]] = null;
-        }
-    }
-
-    renderPlaceList();
-}
-
-
-function renderPlaceFilterChips() {
-
-    sanitizePlacesFilter();
-
-    const container = document.getElementById("place-filter-chips");
-
-    container.innerHTML = "";
-
-    for (const [levelIndex, level] of PLACE_FILTER_LEVELS.entries()) {
-
-        //
-        // Progressive reveal: Country only appears once a Continent chip is
-        // picked, State only once Country is picked, and so on - rather than
-        // dumping all four rows on screen at once before there's any real
-        // narrowing to show. The first level (Continent) has no prior level
-        // to wait on, so it always renders as soon as there's a value for it.
-        //
-        const previousLevel = PLACE_FILTER_LEVELS[levelIndex - 1];
-
-        if (previousLevel && placesFilter[previousLevel] === null) {
-            break;
-        }
-
-        const values = distinctValuesAtLevel(levelIndex);
-
-        if (values.length === 0) {
-            break;
-        }
-
-        const row = document.createElement("div");
-        row.className = "place-filter-row";
-
-        const label = document.createElement("span");
-        label.className = "place-filter-label";
-        label.textContent = level.charAt(0).toUpperCase() + level.slice(1) + ":";
-        row.appendChild(label);
-
-        for (const value of values) {
-
-            const chip = document.createElement("button");
-
-            chip.type = "button";
-            chip.className = "place-filter-chip" + (placesFilter[level] === value ? " active" : "");
-            chip.textContent = value;
-            chip.onclick = () => setPlaceFilter(level, value);
-
-            row.appendChild(chip);
-        }
-
-        container.appendChild(row);
-    }
-}
-
-
-function renderPlaceList() {
-
-    renderPlaceFilterChips();
-
-    const list = document.getElementById("place-list");
-
-    list.innerHTML = "";
-
-    //
-    // Picking a continent is the entry point into the list, not an optional
-    // narrowing on top of an already-shown flat list - with a lot of saved
-    // places, showing everything by default is exactly the wall of rows the
-    // filter chips exist to avoid.
-    //
-    if (placesFilter.continent === null) {
-
-        const hint = document.createElement("div");
-        hint.className = "list-item-details";
-        hint.textContent = "Pick a continent above to see places.";
-
-        list.appendChild(hint);
-        return;
-    }
-
-    for (const place of placesById.values()) {
-
-        if (!placePassesAllFilters(place)) {
-            continue;
-        }
-
-        const item = document.createElement("div");
-
-        item.className = "vehicle-item list-row" + (place.id === selectedPlaceId ? " selected" : "");
-        item.onclick = () => selectPlace(place.id);
-
-        item.innerHTML =
-            `<span class="list-item-label"><span>${place.description}` +
-            `<div class="list-item-details">${place.address}</div></span></span>` +
-            `<button class="remove-place-button" data-id="${place.id}">Delete</button>`;
-
-        list.appendChild(item);
-    }
-
-    for (const button of list.querySelectorAll(".remove-place-button")) {
-
-        button.onclick = (event) => {
-            event.stopPropagation();
-            withSpinner(button, () => removePlace(Number(button.dataset.id)));
-        };
-    }
-}
-
-
-//
-// A place has an actual location, so selecting one claims the shared map
-// focus (see clearFocus()) the way selecting a vehicle or previewing a
-// path does: pan to it and drop a marker, clearing whatever the others
-// had.
-//
-function selectPlace(placeId) {
-
-    const alreadySelected = selectedPlaceId === placeId;
-
-    clearFocus();
-
-    if (!alreadySelected) {
-
-        selectedPlaceId = placeId;
-
-        const place = placesById.get(placeId);
-
-        if (place) {
-            map.panTo([place.lat, place.lng]);
-            showPlaceMarker(place);
-        }
-    }
-
-    renderFocusDependentViews();
-    renderPlaceList();
-}
-
-
-async function addPlace() {
-
-    const descriptionInput = document.getElementById("place-description");
-
-    const response = await fetch(API + "/api/places", {
-
-        method: "POST",
-
-        headers: {
-            "Content-Type": "application/json"
-        },
-
-        body: JSON.stringify({
-            description: descriptionInput.value
-        })
-
-    });
-
-    const data = await response.json();
-
-    if (!response.ok) {
-        alert(data.detail || "Could not add place");
-        return;
-    }
-
-    descriptionInput.value = "";
-
-    loadPlaces();
-}
-
-
-async function removePlace(placeId) {
-
-    const place = placesById.get(placeId);
-
-    if (!confirm(`Delete place "${place ? place.description : placeId}"?`)) {
-        return;
-    }
-
-    const response = await fetch(API + "/api/places/" + placeId, { method: "DELETE" });
-
-    if (!response.ok) {
-
-        const data = await response.json();
-        alert(data.detail || "Could not delete place");
-        return;
-    }
-
-    if (selectedPlaceId === placeId) {
-        selectedPlaceId = null;
-    }
-
-    loadPlaces();
 }
 
 
@@ -1089,7 +756,7 @@ async function loadGasPrices() {
 
 
 //
-// Unlike showPlaceMarker() (one marker for whatever's currently selected),
+// Unlike showRestingVehicleMarker() (one marker for whatever's selected),
 // every known gas price gets its own always-on marker - this *is* the map
 // overlay, not a selection highlight. Diffs against the existing
 // gasPriceMarkers layer (add/update in place/remove) the same way

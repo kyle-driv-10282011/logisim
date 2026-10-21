@@ -2167,6 +2167,20 @@ def run_migrations():
     #
     forget_unused_paths(cur)
 
+    #
+    # Same for places (see forget_unused_places()) - a finished detour
+    # trip's resume_destination_place_id is history, not a live reference,
+    # so it's nulled out like a settled trip's path_id instead of blocking
+    # the place from ever being forgotten.
+    #
+    cur.execute("ALTER TABLE trips DROP CONSTRAINT IF EXISTS trips_resume_destination_place_id_fkey")
+    cur.execute(
+        "ALTER TABLE trips ADD CONSTRAINT trips_resume_destination_place_id_fkey "
+        "FOREIGN KEY (resume_destination_place_id) REFERENCES places(id) ON DELETE SET NULL"
+    )
+
+    forget_unused_places(cur)
+
     conn.commit()
 
     cur.execute("SELECT COUNT(*) FROM places WHERE country IS NULL")
@@ -3796,12 +3810,23 @@ def delete_vehicle(id: int):
     conn = db()
     cur = conn.cursor()
 
+    #
+    # Its trips cascade away with it, which can leave the path it was
+    # driving (and that path's places) with nothing using them.
+    #
+    cur.execute("SELECT DISTINCT path_id FROM trips WHERE vehicle_id = %s", (id,))
+    trip_path_ids = [row[0] for row in cur.fetchall()]
+
     cur.execute(
-        "DELETE FROM vehicles WHERE id=%s RETURNING id",
+        "DELETE FROM vehicles WHERE id=%s RETURNING id, place_id",
         (id,)
     )
 
     deleted = cur.fetchone()
+
+    if deleted is not None:
+        forget_unused_paths(cur, trip_path_ids)
+        forget_unused_places(cur, [deleted[1]])
 
     conn.commit()
 
@@ -4121,6 +4146,11 @@ def delete_gas_price(place_id: int):
     cur.execute("DELETE FROM gas_prices WHERE place_id=%s RETURNING place_id", (place_id,))
 
     deleted = cur.fetchone()
+
+    #
+    # The price may have been the only thing keeping this place around.
+    #
+    forget_unused_places(cur, [place_id])
 
     conn.commit()
 
@@ -4513,8 +4543,53 @@ def forget_unused_paths(cur, path_ids=None):
                 LIMIT 1
             )
         )
+        RETURNING p.origin_place_id, p.destination_place_id
         """,
         (path_ids, path_ids)
+    )
+
+    #
+    # A forgotten path's two ends may have been the last thing keeping
+    # those places around (e.g. the spot a vehicle just drove away from).
+    # The startup sweep (path_ids=None) sweeps every place itself instead.
+    #
+    if path_ids is not None:
+        forget_unused_places(cur, [place_id for row in cur.fetchall() for place_id in row])
+
+
+#
+# Places are behind-the-scenes too, now that there's no Places tab - one
+# only sticks around while something still points at it: a vehicle
+# sitting there (sold ones included, they keep their last location), a
+# path that's being driven, a gas price, or a detour still in progress
+# that has to resume to it. Anything else is deleted; the next drive to
+# the same description just geocodes it fresh. Same targeted-ids-only
+# rule as forget_unused_paths() while running, for the same reason - a
+# job can resolve a place a moment before inserting whatever row uses it.
+#
+def forget_unused_places(cur, place_ids=None):
+
+    if place_ids is not None:
+
+        place_ids = list({place_id for place_id in place_ids if place_id is not None})
+
+        if not place_ids:
+            return
+
+    cur.execute(
+        """
+        DELETE FROM places p
+        WHERE (%s::int[] IS NULL OR p.id = ANY(%s::int[]))
+        AND NOT EXISTS (SELECT 1 FROM vehicles v WHERE v.place_id = p.id)
+        AND NOT EXISTS (SELECT 1 FROM paths x WHERE x.origin_place_id = p.id OR x.destination_place_id = p.id)
+        AND NOT EXISTS (SELECT 1 FROM gas_prices g WHERE g.place_id = p.id)
+        AND NOT EXISTS (
+            SELECT 1 FROM trips t
+            WHERE t.resume_destination_place_id = p.id
+            AND t.path_id IS NOT NULL
+        )
+        """,
+        (place_ids, place_ids)
     )
 
 

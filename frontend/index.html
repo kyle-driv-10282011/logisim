@@ -548,52 +548,6 @@
             padding: 3px 0;
         }
 
-        /*
-         * Continent/country/state/city filter chips (Places tab) - a
-         * breadcrumb-style drill-down instead of a stack of dropdowns:
-         * click a chip to narrow the list to it, click it again to clear
-         * that level (and whatever was chosen below it, since those
-         * choices no longer make sense once the parent changes).
-         */
-        .place-filter-row {
-            display: flex;
-            flex-wrap: wrap;
-            align-items: center;
-            gap: 4px;
-            margin-bottom: 6px;
-        }
-
-        .place-filter-label {
-            font-size: 11px;
-            font-weight: bold;
-            color: #555;
-            margin-right: 2px;
-        }
-
-        .place-filter-chip {
-            font-size: 11px;
-            padding: 2px 8px;
-            border-radius: 10px;
-            border: 1px solid #ccc;
-            background: white;
-            color: #333;
-            cursor: pointer;
-        }
-
-        .place-filter-chip:hover {
-            background: #f5f5f5;
-        }
-
-        .place-filter-chip.active {
-            background: #3388ff;
-            border-color: #3388ff;
-            color: white;
-        }
-
-        .place-filter-chip.active:hover {
-            background: #2f7ae5;
-        }
-
         #vehicle-details {
             margin-top: 16px;
             padding-top: 10px;
@@ -689,7 +643,6 @@
         </button>
         <div class="tab-menu-list" id="tab-menu-list">
             <button class="tab-button" id="tab-button-vehiclemodels" onclick="withSpinner(this, () => showTab('vehiclemodels'))">Vehicle Models</button>
-            <button class="tab-button" id="tab-button-places" onclick="withSpinner(this, () => showTab('places'))">Places</button>
             <button class="tab-button active" id="tab-button-myvehicles" onclick="withSpinner(this, () => showTab('myvehicles'))">My Vehicles</button>
             <button class="tab-button" id="tab-button-gasprices" onclick="withSpinner(this, () => showTab('gasprices'))">Gas Prices</button>
             <button class="tab-button" id="tab-button-jobs" onclick="withSpinner(this, () => showTab('jobs'))">Background Jobs</button>
@@ -739,19 +692,6 @@
             <input id="vehicle-model-image" placeholder="Image filename (frontend/images/...)" value="2026-Chevy-Express.png">
 
             <button onclick="withSpinner(this, addVehicleModel)">Add Vehicle Model</button>
-        </div>
-
-    </div>
-
-    <div class="tab-content" id="tab-places">
-
-        <b>Places</b>
-        <div id="place-filter-chips"></div>
-        <div id="place-list"></div>
-
-        <div class="panel-form">
-            <input id="place-description" placeholder="A description (Target near Minneapolis) or an address">
-            <button onclick="withSpinner(this, addPlace)">Add Place</button>
         </div>
 
     </div>

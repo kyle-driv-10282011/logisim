@@ -311,7 +311,7 @@ CREATE TABLE trips (
     -- place (_run_resume_trip_job() in app.py), so a refueling stop doesn't
     -- require the user to manually re-plan the rest of the drive. NULL for
     -- an ordinary trip.
-    resume_destination_place_id INTEGER REFERENCES places(id),
+    resume_destination_place_id INTEGER REFERENCES places(id) ON DELETE SET NULL,
 
     -- Whether arriving at this trip's destination should top the tank back
     -- up to full (settle_arrived_vehicles()) - true for both a
