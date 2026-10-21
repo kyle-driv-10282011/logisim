@@ -622,7 +622,7 @@
         <div id="sim-clock-text"></div>
         <div id="time-multiplier-control">
             <label for="time-multiplier-input">Time x</label>
-            <input id="time-multiplier-input" type="number" min="0.1" step="1">
+            <input autocomplete="off" id="time-multiplier-input" type="number" min="0.1" step="1">
             <button id="time-multiplier-set-button" onclick="withSpinner(this, setTimeMultiplier)">Set</button>
         </div>
         <label id="auto-refuel-control" title="When a driving vehicle is low on fuel and can't finish its trip, divert it to the nearest reachable gas station automatically">
@@ -659,31 +659,31 @@
 
         <div class="panel-form">
             <label for="vehicle-model-year">Year</label>
-            <input id="vehicle-model-year" type="number" placeholder="Year" value="2026">
+            <input autocomplete="off" id="vehicle-model-year" type="number" placeholder="Year" value="2026">
 
             <label for="vehicle-model-brand">Brand</label>
-            <input id="vehicle-model-brand" placeholder="Brand" value="Chevy">
+            <input autocomplete="off" id="vehicle-model-brand" placeholder="Brand" value="Chevy">
 
             <label for="vehicle-model-model">Model</label>
-            <input id="vehicle-model-model" placeholder="Model" value="Express">
+            <input autocomplete="off" id="vehicle-model-model" placeholder="Model" value="Express">
 
             <label for="vehicle-model-person-capacity">Person capacity</label>
-            <input id="vehicle-model-person-capacity" type="number" min="1" placeholder="Person capacity" value="2">
+            <input autocomplete="off" id="vehicle-model-person-capacity" type="number" min="1" placeholder="Person capacity" value="2">
 
             <label for="vehicle-model-cargo-capacity">Cargo capacity (cu ft)</label>
-            <input id="vehicle-model-cargo-capacity" type="number" min="0" step="0.1" placeholder="Cargo capacity (cu ft)" value="240">
+            <input autocomplete="off" id="vehicle-model-cargo-capacity" type="number" min="0" step="0.1" placeholder="Cargo capacity (cu ft)" value="240">
 
             <label for="vehicle-model-cost">Cost ($)</label>
-            <input id="vehicle-model-cost" type="number" min="0" step="0.01" placeholder="Cost ($)" value="45000">
+            <input autocomplete="off" id="vehicle-model-cost" type="number" min="0" step="0.01" placeholder="Cost ($)" value="45000">
 
             <label for="vehicle-model-mpg">MPG</label>
-            <input id="vehicle-model-mpg" type="number" min="0" step="0.1" placeholder="MPG" value="18">
+            <input autocomplete="off" id="vehicle-model-mpg" type="number" min="0" step="0.1" placeholder="MPG" value="18">
 
             <label for="vehicle-model-fuel-tank">Fuel tank (gallons)</label>
-            <input id="vehicle-model-fuel-tank" type="number" min="0" step="0.1" placeholder="Fuel tank (gallons)" value="20">
+            <input autocomplete="off" id="vehicle-model-fuel-tank" type="number" min="0" step="0.1" placeholder="Fuel tank (gallons)" value="20">
 
             <label for="vehicle-model-image">Image filename (frontend/images/...)</label>
-            <input id="vehicle-model-image" placeholder="Image filename (frontend/images/...)" value="2026-Chevy-Express.png">
+            <input autocomplete="off" id="vehicle-model-image" placeholder="Image filename (frontend/images/...)" value="2026-Chevy-Express.png">
 
             <button onclick="withSpinner(this, addVehicleModel)">Add Vehicle Model</button>
         </div>
@@ -694,8 +694,8 @@
 
         <div class="panel-form">
             <select id="vehicle-model-select"></select>
-            <input id="vehicle-location" placeholder="A description (Target near Minneapolis) or an address" value="Minneapolis">
-            <input id="vehicle-starting-mileage" type="number" min="0" step="1" placeholder="Starting mileage" value="0">
+            <input autocomplete="off" id="vehicle-location" placeholder="A description (Target near Minneapolis) or an address" value="Minneapolis">
+            <input autocomplete="off" id="vehicle-starting-mileage" type="number" min="0" step="1" placeholder="Starting mileage" value="0">
             <button onclick="withSpinner(this, addVehicle)">Add Vehicle</button>
         </div>
 
@@ -726,9 +726,9 @@
         <div id="gasprice-list" style="display:none"></div>
 
         <div class="panel-form">
-            <input id="gasprice-description" placeholder="A description (Shell near Minneapolis) or an address">
-            <input id="gasprice-brand" placeholder="Brand or name (optional, e.g. Shell)">
-            <input id="gasprice-price" type="number" min="0.01" step="0.01" placeholder="Price per gallon ($)">
+            <input autocomplete="off" id="gasprice-description" placeholder="A description (Shell near Minneapolis) or an address">
+            <input autocomplete="off" id="gasprice-brand" placeholder="Brand or name (optional, e.g. Shell)">
+            <input autocomplete="off" id="gasprice-price" type="number" min="0.01" step="0.01" placeholder="Price per gallon ($)">
             <button onclick="withSpinner(this, addGasPrice)">Add / Update Price</button>
         </div>
 

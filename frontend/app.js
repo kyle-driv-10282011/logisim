@@ -1070,13 +1070,15 @@ function renderVehicleList() {
         //
         // vehicle.status (GET /api/vehicles) only gets re-fetched when a
         // vehicle enters or leaves the active-trips set (see
-        // pollActiveTrips()'s setsEqual() check) - going DRIVING -> STRANDED
-        // doesn't change set membership at all, so that fetch never fires
-        // and vehicle.status would otherwise stay stuck on "DRIVING"
-        // forever once a vehicle strands. trip.status (from the 1s poll)
-        // is always current, so prefer it for exactly that transition.
+        // pollActiveTrips()'s setsEqual() check) - going DRIVING -> STRANDED,
+        // or back to DRIVING after a roadside refuel, doesn't change set
+        // membership at all, so that fetch never fires and vehicle.status
+        // stays stuck on whichever it was last loaded as. trip.status (from
+        // the latest live-update refresh) is always current and only ever
+        // DRIVING or STRANDED (active_trips() drops ARRIVED), so it wins
+        // whenever there's a trip - both directions, not just stranding.
         //
-        const displayStatus = trip && trip.status === "STRANDED" ? "STRANDED" : vehicle.status;
+        const displayStatus = trip ? trip.status : vehicle.status;
 
         const driving = displayStatus === "DRIVING" || displayStatus === "STRANDED";
         const ready = displayStatus === "READY";
