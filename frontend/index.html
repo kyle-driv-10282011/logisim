@@ -61,11 +61,50 @@
 
         /*
          * Sits just left of the gas station toggle, same badge shape -
-         * green while live updates are polling, like the gas toggle's
-         * own active state.
+         * green while live updates are on (at the Config tab's refresh
+         * setting), like the gas toggle's own active state.
          */
         #live-updates-toggle {
             right: 52px;
+        }
+
+        .config-label {
+            font-size: 12px;
+        }
+
+        #refresh-interval-slider {
+            width: 100%;
+            margin: 0;
+        }
+
+        /*
+         * One label per slider stop, spread edge to edge so each sits
+         * roughly under its own notch (see renderRefreshIntervalTicks()).
+         */
+        #refresh-interval-ticks {
+            display: flex;
+            justify-content: space-between;
+            font-size: 10px;
+            color: #555;
+        }
+
+        #refresh-interval-ticks span {
+            flex: 1;
+            text-align: center;
+            cursor: pointer;
+        }
+
+        #refresh-interval-ticks span:first-child {
+            text-align: left;
+        }
+
+        #refresh-interval-ticks span:last-child {
+            text-align: right;
+        }
+
+        .config-hint {
+            font-size: 11px;
+            color: #555;
         }
 
         #gasprice-overlay-toggle.active,
@@ -686,6 +725,7 @@
             <button class="tab-button" id="tab-button-paths" onclick="withSpinner(this, () => showTab('paths'))">Paths</button>
             <button class="tab-button" id="tab-button-gasprices" onclick="withSpinner(this, () => showTab('gasprices'))">Gas Prices</button>
             <button class="tab-button" id="tab-button-jobs" onclick="withSpinner(this, () => showTab('jobs'))">Background Jobs</button>
+            <button class="tab-button" id="tab-button-config" onclick="withSpinner(this, () => showTab('config'))">Config</button>
         </div>
     </div>
 
@@ -871,6 +911,22 @@
         <div id="jobs-summary" style="font-size:12px;color:#555;margin-bottom:10px;"></div>
 
         <div id="jobs-list"></div>
+
+    </div>
+
+    <div class="tab-content" id="tab-config">
+
+        <div class="panel-form">
+            <label for="refresh-interval-slider" class="config-label">
+                Refresh: <b id="refresh-interval-value"></b>
+            </label>
+            <input id="refresh-interval-slider" type="range" min="0" max="6" step="1" oninput="setRefreshInterval(this.value)">
+            <div id="refresh-interval-ticks"></div>
+            <div class="config-hint">
+                When the map and vehicle list update on their own. The &#128225; badge on the map
+                pauses or resumes this - it only ever switches between off and the setting here.
+            </div>
+        </div>
 
     </div>
 

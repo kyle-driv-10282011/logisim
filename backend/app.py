@@ -5323,8 +5323,125 @@ def start_trip(req: StartTripRequest):
 
 
 
+#
+# Event-driven refresh for the frontend's Config tab: rather than polling
+# every second, the client asks for its chosen refresh_on mode and gets
+# back next_refresh_seconds - how many real seconds until the next moment
+# any driving trip hits that kind of event - and doesn't call again until
+# then. Every trip's schedule is fixed at departure (realized_seconds), so
+# these are exact, not estimates:
+#
+#   - "arrival": the trip ends - arrives, or the tank runs dry (STRANDED).
+#   - "miles": the trip crosses its next multiple of every_miles, plus the
+#     end of the trip (no further mile marks can come after it).
+#   - "refill": a gas-station leg (auto_refuel) arrives - that's when the
+#     tank is topped up. A regular trip that can't finish on what's in the
+#     tank also gets checkpoints at the AUTO_REFUEL_FUEL_FRACTION low mark
+#     and the dry point: auto-divert starts its detour on the server by
+#     then, and the client can only schedule that detour's arrival once a
+#     refresh has actually seen it.
+#   - "never": no automatic refresh at all.
+#
+REFRESH_MODES = ("never", "refill", "miles", "arrival")
+
+TRIP_STARTING_JOB_TYPES = (
+    "resume_trip_after_refuel",
+    "auto_divert_to_gas_station",
+    "drive_to_refuel",
+    "divert_to_gas_station",
+)
+
+TRIP_JOB_RECHECK_SECONDS = 2.0
+
+
+def seconds_until_refresh_event(
+    refresh_on,
+    every_miles,
+    distances_miles,
+    realized_seconds,
+    realized_duration_seconds,
+    mpg,
+    fuel_tank_gallons,
+    starting_fuel_gallons,
+    roadside_refuel_count,
+    auto_refuel,
+    paused_seconds,
+    elapsed_real_seconds,
+    time_multiplier,
+    current_miles
+):
+
+    if refresh_on == "never":
+        return None
+
+    total_miles = distances_miles[-1]
+    schedule_elapsed = elapsed_real_seconds * time_multiplier - paused_seconds
+
+    #
+    # Same fuel math as resolve_trip_progress() - where (and when) the trip
+    # actually stops, whether at its destination or wherever it runs dry.
+    #
+    total_fuel_available = None
+    end_miles = total_miles
+    end_elapsed = realized_duration_seconds
+
+    if mpg and mpg > 0:
+
+        total_fuel_available = starting_fuel_gallons + roadside_refuel_count * fuel_tank_gallons
+
+        if total_fuel_available * mpg < total_miles:
+            end_miles = total_fuel_available * mpg
+            end_elapsed = interpolate_seconds_at_distance(distances_miles, realized_seconds, end_miles)
+
+    event_miles = []
+    event_elapsed = []
+
+    if refresh_on == "arrival":
+        event_elapsed.append(end_elapsed)
+
+    elif refresh_on == "miles":
+
+        if every_miles and every_miles > 0:
+
+            next_mark = (math.floor(current_miles / every_miles) + 1) * every_miles
+
+            if next_mark < end_miles:
+                event_miles.append(next_mark)
+
+        event_elapsed.append(end_elapsed)
+
+    elif refresh_on == "refill":
+
+        if auto_refuel:
+            event_elapsed.append(realized_duration_seconds)
+
+        elif total_fuel_available is not None and end_miles < total_miles:
+
+            if fuel_tank_gallons:
+
+                low_miles = (total_fuel_available - fuel_tank_gallons * AUTO_REFUEL_FUEL_FRACTION) * mpg
+
+                if current_miles < low_miles < end_miles:
+                    event_miles.append(low_miles)
+
+            event_elapsed.append(end_elapsed)
+
+    for miles in event_miles:
+        event_elapsed.append(interpolate_seconds_at_distance(distances_miles, realized_seconds, miles))
+
+    upcoming = [elapsed for elapsed in event_elapsed if elapsed > schedule_elapsed]
+
+    if not upcoming:
+        return None
+
+    return (min(upcoming) - schedule_elapsed) / time_multiplier
+
+
 @app.get("/api/trips/active")
-def active_trips():
+def active_trips(refresh_on: str = "never", every_miles: Optional[float] = None):
+
+    if refresh_on not in REFRESH_MODES:
+        raise HTTPException(status_code=400, detail=f"refresh_on must be one of {', '.join(REFRESH_MODES)}")
 
     conn = db()
     cur = conn.cursor()
@@ -5369,6 +5486,7 @@ def active_trips():
             t.starting_fuel_gallons,
             t.roadside_refuel_count,
             t.paused_seconds,
+            t.auto_refuel,
             t.resume_destination_place_id,
             t.trip_meter_offset_miles,
             EXTRACT(EPOCH FROM (NOW() - t.started_at))
@@ -5390,10 +5508,24 @@ def active_trips():
     #
     resume_places_by_id = fetch_places_by_id(cur, [row[-3] for row in rows if row[-3] is not None])
 
+    #
+    # A detour/resume leg that's still being routed in job_executor is a
+    # trip about to appear that no current row can predict - check back
+    # shortly instead of waiting on the next event of whatever's driving.
+    #
+    cur.execute(
+        "SELECT EXISTS (SELECT 1 FROM jobs WHERE status IN ('pending', 'running') AND job_type = ANY(%s))",
+        (list(TRIP_STARTING_JOB_TYPES),)
+    )
+
+    trip_job_in_flight = cur.fetchone()[0]
+
     cur.close()
     conn.close()
 
     trips = []
+
+    next_refresh_seconds = None
 
     for (
         trip_id,
@@ -5415,6 +5547,7 @@ def active_trips():
         starting_fuel_gallons,
         roadside_refuel_count,
         paused_seconds,
+        auto_refuel,
         resume_destination_place_id,
         trip_meter_offset_miles,
         elapsed_real_seconds
@@ -5486,4 +5619,20 @@ def active_trips():
             "trip_meter_miles": trip_meter_offset_miles + derived["distance_miles"]
         })
 
-    return {"trips": trips}
+        if derived["status"] == "DRIVING":
+
+            trip_refresh_seconds = seconds_until_refresh_event(
+                refresh_on, every_miles, distances_miles, realized_seconds, realized_duration_seconds,
+                mpg, fuel_tank_gallons, starting_fuel_gallons, roadside_refuel_count, auto_refuel,
+                paused_seconds, float(elapsed_real_seconds), time_multiplier, derived["distance_miles"]
+            )
+
+            if trip_refresh_seconds is not None and (
+                next_refresh_seconds is None or trip_refresh_seconds < next_refresh_seconds
+            ):
+                next_refresh_seconds = trip_refresh_seconds
+
+    if trip_job_in_flight and refresh_on != "never":
+        next_refresh_seconds = min(next_refresh_seconds or TRIP_JOB_RECHECK_SECONDS, TRIP_JOB_RECHECK_SECONDS)
+
+    return {"trips": trips, "next_refresh_seconds": next_refresh_seconds}

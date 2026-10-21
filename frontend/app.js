@@ -520,7 +520,8 @@ const TAB_LABELS = {
     myvehicles: "My Vehicles",
     paths: "Paths",
     gasprices: "Gas Prices",
-    jobs: "Background Jobs"
+    jobs: "Background Jobs",
+    config: "Config"
 };
 
 
@@ -568,7 +569,7 @@ document.getElementById("origin").addEventListener("input", () => {
 
 function showTab(tab) {
 
-    for (const name of ["vehiclemodels", "places", "myvehicles", "paths", "gasprices", "jobs"]) {
+    for (const name of ["vehiclemodels", "places", "myvehicles", "paths", "gasprices", "jobs", "config"]) {
 
         document.getElementById(`tab-${name}`).classList.toggle("active", name === tab);
         document.getElementById(`tab-button-${name}`).classList.toggle("active", name === tab);
@@ -576,6 +577,15 @@ function showTab(tab) {
 
     document.getElementById("tab-menu-current").textContent = TAB_LABELS[tab];
     closeTabMenu();
+
+    //
+    // Jobs only refresh on live-update events now (see refreshLiveData()),
+    // so opening the tab fetches them fresh rather than showing whatever
+    // the last event left behind.
+    //
+    if (tab === "jobs") {
+        loadJobs();
+    }
 
     //
     // Jumping to Paths with a vehicle focused (selectedVehicleId/
@@ -1716,6 +1726,7 @@ async function refuelVehicle(vehicleId) {
     } finally {
         refuelInFlightVehicleId = null;
         loadVehicles();
+        refreshLiveData();
     }
 }
 
@@ -2360,6 +2371,8 @@ async function divertToGasStation(vehicleId, gasStationPlaceId) {
 
         await pollJob(submitted.job_id);
 
+        refreshLiveData();
+
     } catch (e) {
         alert(e.message);
     } finally {
@@ -2393,6 +2406,13 @@ async function roadsideRefuel(vehicleId) {
         alert(data.detail || "Could not send roadside fuel");
         return;
     }
+
+    //
+    // Refueling un-strands the trip, so it has events again - this tab's
+    // own actions always re-fetch (and re-arm the next live-update event)
+    // rather than waiting on one that may never come.
+    //
+    refreshLiveData();
 }
 
 
@@ -3384,13 +3404,24 @@ async function startTrip() {
     selectedTripVehicleId = null;
 
     loadVehicles();
+    refreshLiveData();
 }
 
 
 async function pollActiveTrips() {
 
-    const response = await fetch(API + "/api/trips/active");
+    const refreshOption = activeRefreshOption();
+
+    const params = new URLSearchParams({ refresh_on: refreshOption.refreshOn });
+
+    if (refreshOption.everyMiles) {
+        params.set("every_miles", refreshOption.everyMiles);
+    }
+
+    const response = await fetch(API + "/api/trips/active?" + params);
     const data = await response.json();
+
+    scheduleNextRefresh(data.next_refresh_seconds);
 
     const seen = new Set();
 
@@ -3580,102 +3611,212 @@ loadJobs();
 loadSettings();
 
 //
-// Live updates (the map badge next to the gas station toggle) gate every
-// timer below that polls the backend - turning them off stops all that
-// background traffic, e.g. to keep Nominatim's shared rate limit free
-// for a create_path job. updateSimClock() isn't gated: it only
-// extrapolates locally from the last loadSettings() anchor, no request.
-// Remembered per browser; storage can throw (private mode, blocked site
-// data), in which case it just defaults back to on.
+// Live updates are event-driven rather than a fixed-rate poll: each GET
+// /api/trips/active names the Config tab's refresh_on mode, and the
+// backend answers with next_refresh_seconds - when the next such event
+// (a mile mark, a refill, an arrival) is due for any driving vehicle -
+// so nothing is fetched in between. See seconds_until_refresh_event() in
+// app.py for exactly what counts as each event.
 //
+// The map badge next to the gas station toggle only switches between
+// "off" and whatever the slider is set to. updateSimClock() keeps ticking
+// either way: it only extrapolates locally from the last loadSettings()
+// anchor, no request. Both settings are remembered per browser; storage
+// can throw (private mode, blocked site data), in which case they just
+// fall back to the defaults below.
+//
+const REFRESH_OPTIONS = [
+    { label: "Never", refreshOn: "never" },
+    { label: "On Fuel Refill", refreshOn: "refill" },
+    { label: "10 miles", refreshOn: "miles", everyMiles: 10 },
+    { label: "50 miles", refreshOn: "miles", everyMiles: 50 },
+    { label: "100 Miles", refreshOn: "miles", everyMiles: 100 },
+    { label: "1000 Miles", refreshOn: "miles", everyMiles: 1000 },
+    { label: "On arrival", refreshOn: "arrival" }
+];
+
+const DEFAULT_REFRESH_INDEX = 2;
+
 const LIVE_UPDATES_STORAGE_KEY = "liveUpdatesEnabled";
+const REFRESH_INDEX_STORAGE_KEY = "refreshIntervalIndex";
+
+//
+// Rechecked after a refresh that failed outright (backend down, network
+// blip) - otherwise nothing would ever schedule the next one.
+//
+const REFRESH_RETRY_SECONDS = 5;
+
+//
+// next_refresh_seconds is the exact moment of the event, so this lands
+// just past it - by then the backend's settle has definitely seen it.
+//
+const REFRESH_EVENT_BUFFER_MS = 500;
 
 let liveUpdatesEnabled = true;
+let refreshIndex = DEFAULT_REFRESH_INDEX;
+let refreshTimer = null;
 
 try {
+
     liveUpdatesEnabled = localStorage.getItem(LIVE_UPDATES_STORAGE_KEY) !== "false";
+
+    const storedIndex = Number(localStorage.getItem(REFRESH_INDEX_STORAGE_KEY));
+
+    if (localStorage.getItem(REFRESH_INDEX_STORAGE_KEY) !== null && REFRESH_OPTIONS[storedIndex]) {
+        refreshIndex = storedIndex;
+    }
+
 } catch (e) {
-    // fall back to on
+    // fall back to the defaults
+}
+
+function saveSetting(key, value) {
+
+    try {
+        localStorage.setItem(key, String(value));
+    } catch (e) {
+        // not persisted, still applies for this page load
+    }
+}
+
+//
+// What pollActiveTrips() actually asks the backend for - "never" while the
+// badge is off, so an off badge stops scheduling the same way the Never
+// setting does.
+//
+function activeRefreshOption() {
+
+    return liveUpdatesEnabled ? REFRESH_OPTIONS[refreshIndex] : REFRESH_OPTIONS[0];
+}
+
+function scheduleNextRefresh(seconds) {
+
+    clearTimeout(refreshTimer);
+    refreshTimer = null;
+
+    if (!liveUpdatesEnabled || seconds === null || seconds === undefined) {
+        return;
+    }
+
+    refreshTimer = setTimeout(refreshLiveData, Math.max(1, seconds) * 1000 + REFRESH_EVENT_BUFFER_MS);
+}
+
+//
+// One refresh event: everything that used to poll on its own timer
+// (active trips, jobs, settings re-sync, the selected vehicle's city)
+// now updates together, only when an event is due. pollActiveTrips()
+// schedules the next one itself from its response.
+//
+async function refreshLiveData() {
+
+    try {
+        await pollActiveTrips();
+    } catch (e) {
+        scheduleNextRefresh(REFRESH_RETRY_SECONDS);
+        return;
+    }
+
+    loadJobs();
+    loadSettings();
+
+    if (selectedVehicleIsDriving()) {
+        fetchCurrentCity();
+    }
 }
 
 function renderLiveUpdatesToggle() {
 
     const toggle = document.getElementById("live-updates-toggle");
+    const label = REFRESH_OPTIONS[refreshIndex].label;
 
     toggle.classList.toggle("active", liveUpdatesEnabled);
     toggle.title = liveUpdatesEnabled
-        ? "Live updates on - click to pause"
-        : "Live updates paused - click to resume";
+        ? `Live updates on (${label}) - click to pause`
+        : `Live updates paused - click to resume (${label})`;
 }
 
 function toggleLiveUpdates() {
 
     liveUpdatesEnabled = !liveUpdatesEnabled;
 
-    try {
-        localStorage.setItem(LIVE_UPDATES_STORAGE_KEY, String(liveUpdatesEnabled));
-    } catch (e) {
-        // not persisted, still applies for this page load
-    }
-
+    saveSetting(LIVE_UPDATES_STORAGE_KEY, liveUpdatesEnabled);
     renderLiveUpdatesToggle();
 
     //
-    // Catch up right away on resume instead of waiting out each timer's
-    // next tick - vehicles may have moved a long way while paused.
+    // Pausing just drops the pending event. Resuming catches up right
+    // away - vehicles may have moved a long way while paused - and that
+    // refresh's response schedules the next event.
     //
     if (liveUpdatesEnabled) {
-        pollActiveTrips();
-        loadJobs();
-        loadSettings();
+        refreshLiveData();
+    } else {
+        scheduleNextRefresh(null);
     }
 }
 
-function whileLive(fn) {
+function renderRefreshIntervalControl() {
 
-    return () => {
-        if (liveUpdatesEnabled) {
-            fn();
-        }
-    };
+    document.getElementById("refresh-interval-slider").value = refreshIndex;
+    document.getElementById("refresh-interval-value").textContent = REFRESH_OPTIONS[refreshIndex].label;
 }
 
-renderLiveUpdatesToggle();
+function renderRefreshIntervalTicks() {
 
-setInterval(whileLive(pollActiveTrips), 1000);
+    const ticks = document.getElementById("refresh-interval-ticks");
 
-setInterval(whileLive(loadJobs), 2000);
+    ticks.innerHTML = "";
 
-setInterval(updateSimClock, 1000);
+    REFRESH_OPTIONS.forEach((option, index) => {
 
-//
-// Re-syncs against the backend's own anchor every few seconds, correcting
-// for client clock drift and picking up a multiplier change made from
-// another browser/tab - the 1s updateSimClock() tick above just
-// extrapolates smoothly between these refreshes.
-//
-setInterval(whileLive(loadSettings), 5000);
+        const tick = document.createElement("span");
+
+        tick.textContent = option.label;
+        tick.onclick = () => setRefreshInterval(index);
+
+        ticks.appendChild(tick);
+    });
+}
+
+function setRefreshInterval(index) {
+
+    refreshIndex = Number(index);
+
+    saveSetting(REFRESH_INDEX_STORAGE_KEY, refreshIndex);
+
+    renderRefreshIntervalControl();
+    renderLiveUpdatesToggle();
+
+    //
+    // Re-asks with the new mode so the pending event is replaced by the
+    // new mode's next one, rather than firing on the old schedule first.
+    //
+    refreshLiveData();
+}
 
 //
 // Gated on the selected vehicle actually still being in activeTripsById,
-// not just selectedVehicleId being set - both endpoints 404/no-op for a
-// vehicle that isn't currently driving (READY, SOLD, or just arrived and
+// not just selectedVehicleId being set - /api/vehicles/{id}/city 404s for
+// a vehicle that isn't currently driving (READY, SOLD, or just arrived and
 // past its grace period), and a vehicle stays "selected" in the In Route
 // tab long after it stops driving (nothing ever clears the selection on
-// its own). Without this check, either poll would keep firing every tick
-// forever for a long-idle selection, filling the browser console with
-// failed-request noise that no amount of try/catch on the JS side can
-// suppress - the browser logs the network failure itself.
+// its own). Without this check, every refresh would fire it for a
+// long-idle selection, filling the browser console with failed-request
+// noise that no amount of try/catch on the JS side can suppress - the
+// browser logs the network failure itself.
 //
 function selectedVehicleIsDriving() {
     return selectedVehicleId !== null && activeTripsById.has(selectedVehicleId);
 }
 
-setInterval(() => {
+renderRefreshIntervalTicks();
+renderRefreshIntervalControl();
+renderLiveUpdatesToggle();
 
-    if (liveUpdatesEnabled && selectedVehicleIsDriving()) {
-        fetchCurrentCity();
-    }
+//
+// The first load always happens, badge on or off - with it off (or set to
+// Never) it's just a one-time snapshot, and nothing gets scheduled after.
+// Jobs and settings already loaded above, so only trips are fetched here.
+//
+pollActiveTrips().catch(() => scheduleNextRefresh(REFRESH_RETRY_SECONDS));
 
-}, 7000);
-
+setInterval(updateSimClock, 1000);
