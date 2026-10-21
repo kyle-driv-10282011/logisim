@@ -316,6 +316,7 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
     pending_resumes = []
     refueling_vehicle_ids = []
     auto_divert_candidates = []
+    arrived_path_ids = []
 
     auto_refuel_level = get_auto_refuel_level(conn, cur)
 
@@ -378,6 +379,8 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
         if cur.fetchone() is None:
             continue
 
+        arrived_path_ids.append(path_id)
+
         if auto_refuel:
             refueling_vehicle_ids.append(vehicle_id)
 
@@ -408,6 +411,12 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
             """,
             (refueling_vehicle_ids,)
         )
+
+    #
+    # An arrived trip's path has done its job - forgotten in the same
+    # commit as the arrival itself (see forget_unused_paths()).
+    #
+    forget_unused_paths(cur, arrived_path_ids)
 
     conn.commit()
 
@@ -792,7 +801,7 @@ geolocator = Nominatim(user_agent="logisim-vehicle-sim", timeout=10)
 # forward and reverse geocoding never ran at the same time, but a vehicle
 # currently driving polls its own reverse-geocoded city every 7s (GET
 # /api/vehicles/{id}/city) while job_executor can concurrently be running a
-# create_path/gas-price-upload job that forward-geocodes - two independent
+# drive/gas-price-upload job that forward-geocodes - two independent
 # 1/sec limiters can burst to ~2 outbound requests/sec between them, which
 # is exactly the kind of burst Nominatim's real, combined limit rejects.
 # geocode_throttle_gate() is a third, lower-level gate shared by both, so
@@ -988,7 +997,7 @@ def geocode_full(place):
 # in init.sql) rather than duplicating lat/lng themselves, so a place's
 # description/address/coordinates live in exactly one row no matter how
 # many vehicles or paths point at it. The lat/lng are handed back too
-# since callers like create_path() need real coordinates for road_route()
+# since callers like _drive_vehicle_to() need real coordinates for road_route()
 # regardless of the id.
 #
 def find_or_create_place(cur, description):
@@ -1270,7 +1279,7 @@ def find_gas_stations_in_city(city_text):
 # Keyed far coarser than ROUND_DECIMALS (~1km instead of ~1m) - a driving
 # vehicle's position is new on every 7s poll, so a ~1m key almost never
 # hit and every poll cost a Nominatim call through the same
-# geocode_throttle_gate() a create_path job's forward geocodes wait on.
+# geocode_throttle_gate() a drive job's forward geocodes wait on.
 # reverse_geocode() only asks for a city (zoom=10), which a ~1km cell
 # can't meaningfully change.
 #
@@ -2124,6 +2133,40 @@ def run_migrations():
     #
     cur.execute("ALTER TABLE trips ADD COLUMN IF NOT EXISTS trip_meter_offset_miles DOUBLE PRECISION NOT NULL DEFAULT 0")
 
+    #
+    # Paths are ephemeral now - one only exists while a trip is driving it
+    # (see forget_unused_paths()). A trip keeps its own copy of the path's
+    # length so the odometer outlives the path, and deleting a path nulls
+    # out a settled trip's path_id instead of cascading the trip (and its
+    # mileage) away with it.
+    #
+    cur.execute("ALTER TABLE trips ADD COLUMN IF NOT EXISTS distance_miles DOUBLE PRECISION")
+
+    cur.execute(
+        """
+        UPDATE trips t
+        SET distance_miles = (p.distances_miles ->> -1)::double precision
+        FROM paths p
+        WHERE p.id = t.path_id
+        AND t.distance_miles IS NULL
+        """
+    )
+
+    cur.execute("ALTER TABLE trips ALTER COLUMN path_id DROP NOT NULL")
+    cur.execute("ALTER TABLE trips DROP CONSTRAINT IF EXISTS trips_path_id_fkey")
+    cur.execute(
+        "ALTER TABLE trips ADD CONSTRAINT trips_path_id_fkey "
+        "FOREIGN KEY (path_id) REFERENCES paths(id) ON DELETE SET NULL"
+    )
+
+    #
+    # Startup is the one moment nothing can be mid-way through creating a
+    # path for a trip (job_executor is brand new), so it's safe to sweep
+    # every path here - including all the saved ones from before paths
+    # became ephemeral.
+    #
+    forget_unused_paths(cur)
+
     conn.commit()
 
     cur.execute("SELECT COUNT(*) FROM places WHERE country IS NULL")
@@ -2154,7 +2197,7 @@ def run_migrations():
 # is too slow, and too likely to blow a proxy/browser timeout, to run
 # inline in the request that triggers it - Nominatim's public instance has
 # no bulk endpoint and is rate-capped, so a CSV upload of many addresses or
-# even a single create_path() can take well past what a client is willing
+# even a single drive to a new destination can take well past what a client is willing
 # to wait on one HTTP request. Both run their real work in this pool
 # instead, tracked via the jobs table, and hand the request back a job id
 # to poll (GET /api/jobs/{id}) rather than blocking on the result.
@@ -2670,31 +2713,14 @@ class CreateVehicleModelRequest(BaseModel):
 
 
 
-class CreatePathRequest(BaseModel):
+class DriveRequest(BaseModel):
 
     #
-    # Free-text addresses or place descriptions, resolved to a place row
-    # on the way in (see find_or_create_place() in app.py) - the path
-    # stores each place's id, not its own copy of the coordinates.
+    # Free-text address or place description, resolved to a place row on
+    # the way in (see find_or_create_place()) - the trip always starts
+    # from wherever the vehicle currently is.
     #
-    origin: str
     destination: str
-
-    #
-    # Set by the frontend when Origin was prefilled from a selected
-    # vehicle's own current place (see showTab()'s vehicle-aware branch in
-    # app.js), rather than typed fresh - takes priority over `origin` and
-    # skips geocoding it entirely. Re-geocoding that vehicle's own already-
-    # resolved address text was the bug this exists to avoid: Nominatim
-    # doesn't reliably return the exact same coordinates for the same query
-    # twice, so re-resolving it could land a hair outside ROUND_DECIMALS of
-    # the vehicle's actual place, silently creating a near-duplicate place
-    # a few meters off - the new path's origin then no longer matches the
-    # vehicle it was created from (coordsMatch() in app.js), so it never
-    # shows up as a path that vehicle can take. NULL for an ordinary path
-    # typed (or picked from the datalist) with no vehicle behind it.
-    #
-    origin_place_id: Optional[int] = None
 
 
 
@@ -2919,7 +2945,7 @@ def create_vehicle(req: CreateVehicleRequest):
         raise HTTPException(status_code=404, detail="Vehicle model not found")
 
     #
-    # Geocoded/resolved up front (same as create_path()'s origin/
+    # Geocoded/resolved up front (same as _drive_vehicle_to()'s
     # destination) so a bad location name fails fast, before the vehicle
     # row is inserted.
     #
@@ -3204,9 +3230,8 @@ def list_vehicles(include_sold: bool = False):
                 AND v.place_id IS DISTINCT FROM latest_trip.destination_place_id
         FROM vehicles v
         LEFT JOIN (
-            SELECT t.vehicle_id, SUM((p.distances_miles ->> -1)::double precision) AS miles
+            SELECT t.vehicle_id, SUM(COALESCE(t.distance_miles, 0)) AS miles
             FROM trips t
-            JOIN paths p ON p.id = t.path_id
             WHERE t.cancelled_at IS NULL
             AND (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) >= t.realized_duration_seconds
             GROUP BY t.vehicle_id
@@ -3214,7 +3239,7 @@ def list_vehicles(include_sold: bool = False):
         LEFT JOIN LATERAL (
             SELECT p.destination_place_id
             FROM trips t
-            JOIN paths p ON p.id = t.path_id
+            LEFT JOIN paths p ON p.id = t.path_id
             WHERE t.vehicle_id = v.id
             AND t.cancelled_at IS NULL
             ORDER BY t.started_at DESC
@@ -3902,9 +3927,10 @@ def vehicle_city(id: int):
 
 #
 # Unlike vehicle_city() above (a driving vehicle's live mid-trip position),
-# this is for a settled vehicle sitting at its place - used to prefill the
-# Paths tab's Origin field with a disambiguated address when a vehicle is
-# selected (see showTab() in app.js). The place's address was already
+# this is for a settled vehicle sitting at its place - its disambiguated
+# full address (the frontend's old Paths tab used it to prefill Origin; a
+# drive now always starts from the vehicle's place id, so nothing in the
+# UI calls this anymore). The place's address was already
 # resolved once at creation (geocode_full(), via find_or_create_place()),
 # so this is a plain join - no fresh geocoding call needed.
 #
@@ -4380,182 +4406,13 @@ async def upload_gas_prices(file: UploadFile = File(...)):
 
 
 
-#
-# The geocoding (find_or_create_place(), x2) and routing (road_route())
-# below are both live third-party HTTP calls - too slow, and too likely to
-# blow a proxy/browser timeout, to do inline in the request. This builds
-# the same result a synchronous create_path() used to return directly, but
-# is only ever called from job_executor (see _run_create_path_job()),
-# which stores it on the job row for the frontend to poll for instead.
-#
-def _build_path_result(origin, destination, origin_place_id=None):
-
-    conn = db()
-    cur = conn.cursor()
-
-    try:
-
-        if origin_place_id is not None:
-
-            #
-            # Already know exactly which place this is (see
-            # CreatePathRequest.origin_place_id's own comment) - skip
-            # geocoding `origin` as free text entirely.
-            #
-            place = fetch_places_by_id(cur, [origin_place_id]).get(origin_place_id)
-
-            if place is None:
-                raise HTTPException(status_code=404, detail="origin_place_id not found")
-
-            origin_lat, origin_lng = place["lat"], place["lng"]
-            origin = place["description"]
-
-        else:
-            origin_place_id, origin_lat, origin_lng = find_or_create_place(cur, origin)
-
-        destination_place_id, destination_lat, destination_lng = find_or_create_place(cur, destination)
-
-        #
-        # Same origin/destination place is the same path - return the existing
-        # one instead of re-routing and inserting a duplicate.
-        #
-        cur.execute(
-            """
-            SELECT id, origin_place_id, destination_place_id,
-                route, distances_miles, max_speeds_mph, road_names, road_name_boundary_miles
-            FROM paths
-            WHERE origin_place_id = %s AND destination_place_id = %s
-            """,
-            (origin_place_id, destination_place_id)
-        )
-
-        existing = cur.fetchone()
-
-        if existing is not None:
-
-            zones = fetch_zones_for_paths(cur, [existing[0]]).get(existing[0], [])
-            places_by_id = fetch_places_by_id(cur, [existing[1], existing[2]])
-
-            #
-            # Nothing new for the path itself, but find_or_create_place() above
-            # may have inserted new places rows - commit those rather than
-            # rolling them back on close.
-            #
-            conn.commit()
-
-            return {
-
-                "id": existing[0],
-
-                "origin": places_by_id[existing[1]]["description"],
-
-                "origin_lat": places_by_id[existing[1]]["lat"],
-
-                "origin_lng": places_by_id[existing[1]]["lng"],
-
-                "destination": places_by_id[existing[2]]["description"],
-
-                "destination_lat": places_by_id[existing[2]]["lat"],
-
-                "destination_lng": places_by_id[existing[2]]["lng"],
-
-                "route": existing[3],
-
-                "distances_miles": existing[4],
-
-                "max_speeds_mph": existing[5],
-
-                "road_names": existing[6],
-
-                "road_name_boundary_miles": existing[7],
-
-                "zones": zones
-            }
-
-        route, distances_miles, max_speeds_mph, road_names, road_name_boundary_miles = road_route(
-            (origin_lat, origin_lng), (destination_lat, destination_lng)
-        )
-
-        cur.execute(
-            """
-            INSERT INTO paths
-            (
-                origin_place_id,
-                destination_place_id,
-                route,
-                distances_miles,
-                max_speeds_mph,
-                road_names,
-                road_name_boundary_miles
-            )
-
-            VALUES
-            (%s,%s,%s,%s,%s,%s,%s)
-
-            RETURNING id
-            """,
-            (
-                origin_place_id,
-                destination_place_id,
-                json.dumps(route),
-                json.dumps(distances_miles),
-                json.dumps(max_speeds_mph),
-                json.dumps(road_names),
-                json.dumps(road_name_boundary_miles)
-            )
-        )
-
-        path_id = cur.fetchone()[0]
-
-        #
-        # The saved places' own descriptions, not the raw typed text - same
-        # labels list_paths() returns, so the frontend can drop this result
-        # straight into its path list instead of re-fetching every path.
-        #
-        places_by_id = fetch_places_by_id(cur, [origin_place_id, destination_place_id])
-
-        conn.commit()
-
-        return {
-
-            "id": path_id,
-
-            "origin": places_by_id[origin_place_id]["description"],
-
-            "origin_lat": origin_lat,
-
-            "origin_lng": origin_lng,
-
-            "destination": places_by_id[destination_place_id]["description"],
-
-            "destination_lat": destination_lat,
-
-            "destination_lng": destination_lng,
-
-            "route": route,
-
-            "distances_miles": distances_miles,
-
-            "max_speeds_mph": max_speeds_mph,
-
-            "road_names": road_names,
-
-            "road_name_boundary_miles": road_name_boundary_miles,
-
-            "zones": []
-        }
-
-    finally:
-        cur.close()
-        conn.close()
-
 
 #
 # Shared by _divert_to_gas_station() (current live position -> a chosen gas
 # station) and _resume_trip_after_refuel() (that gas station -> wherever
 # the vehicle actually still needs to go) - both already have real place
 # ids and coordinates for both ends (no free-text geocoding needed, unlike
-# _build_path_result() above), so this only ever does the OSRM routing
+# _drive_vehicle_to()), so this only ever does the OSRM routing
 # step, reusing an existing path between the same two places instead of
 # re-routing one that's already been driven.
 #
@@ -4572,6 +4429,19 @@ def find_or_create_path_between_places(
 
     if existing is not None:
         return existing
+
+    return insert_routed_path(
+        cur, origin_place_id, origin_lat, origin_lng, destination_place_id, destination_lat, destination_lng
+    )
+
+
+#
+# Routes origin -> destination via OSRM and saves it as a new path row,
+# returning (path_id, route, distances_miles, max_speeds_mph).
+#
+def insert_routed_path(
+    cur, origin_place_id, origin_lat, origin_lng, destination_place_id, destination_lat, destination_lng
+):
 
     route, distances_miles, max_speeds_mph, road_names, road_name_boundary_miles = road_route(
         (origin_lat, origin_lng), (destination_lat, destination_lng)
@@ -4598,6 +4468,54 @@ def find_or_create_path_between_places(
     path_id = cur.fetchone()[0]
 
     return path_id, route, distances_miles, max_speeds_mph
+
+
+#
+# Paths are behind-the-scenes and short-lived: one only exists while some
+# vehicle is actually driving it. "Driving it" means a vehicle's latest
+# trip is an uncancelled one on this path that hasn't settled yet (the
+# vehicle isn't at the path's destination - same test
+# settle_arrived_vehicles() uses), which covers STRANDED trips too, since
+# those still owe the rest of the route. Anything else is deleted - a
+# settled trip just keeps a NULL path_id and its own distance_miles.
+#
+# Called with the specific path ids that might have just become unused
+# (an arrival, a cancelled trip, auto-divert's unchosen candidate routes),
+# never a blanket sweep while running - a drive job commits its new path a
+# moment before inserting the trip that uses it, and a blanket sweep in
+# that gap would delete it. path_ids=None (sweep everything) is only for
+# startup, before any job can be running.
+#
+def forget_unused_paths(cur, path_ids=None):
+
+    if path_ids is not None:
+
+        path_ids = [path_id for path_id in path_ids if path_id is not None]
+
+        if not path_ids:
+            return
+
+    cur.execute(
+        """
+        DELETE FROM paths p
+        WHERE (%s::int[] IS NULL OR p.id = ANY(%s::int[]))
+        AND NOT EXISTS (
+            SELECT 1
+            FROM trips t
+            JOIN vehicles v ON v.id = t.vehicle_id
+            WHERE t.path_id = p.id
+            AND t.cancelled_at IS NULL
+            AND v.place_id IS DISTINCT FROM p.destination_place_id
+            AND t.id = (
+                SELECT t2.id FROM trips t2
+                WHERE t2.vehicle_id = v.id
+                ORDER BY t2.started_at DESC
+                LIMIT 1
+            )
+        )
+        """,
+        (path_ids, path_ids)
+    )
 
 
 #
@@ -4637,11 +4555,11 @@ def start_diversion_trip(
     cur.execute(
         """
         INSERT INTO trips
-        (vehicle_id, path_id, traffic_base_datetime, traffic_bias, zones_snapshot, starting_fuel_gallons, resume_destination_place_id, auto_refuel, trip_meter_offset_miles)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        (vehicle_id, path_id, distance_miles, traffic_base_datetime, traffic_bias, zones_snapshot, starting_fuel_gallons, resume_destination_place_id, auto_refuel, trip_meter_offset_miles)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
-        (vehicle_id, path_id, game_time, 1.0, json.dumps(zones), starting_fuel_gallons, resume_destination_place_id, auto_refuel, trip_meter_offset_miles)
+        (vehicle_id, path_id, distances_miles[-1], game_time, 1.0, json.dumps(zones), starting_fuel_gallons, resume_destination_place_id, auto_refuel, trip_meter_offset_miles)
     )
 
     trip_id = cur.fetchone()[0]
@@ -4685,11 +4603,20 @@ def _divert_to_gas_station(
     try:
 
         cur.execute(
-            "UPDATE trips SET cancelled_at = NOW() WHERE id = %s RETURNING trip_meter_offset_miles",
+            "UPDATE trips SET cancelled_at = NOW() WHERE id = %s RETURNING trip_meter_offset_miles, path_id",
             (current_trip_id,)
         )
 
-        trip_meter_offset_miles = cur.fetchone()[0] + partial_miles_driven
+        previous_trip_meter_offset_miles, cancelled_path_id = cur.fetchone()
+
+        trip_meter_offset_miles = previous_trip_meter_offset_miles + partial_miles_driven
+
+        #
+        # The cancelled trip's path, plus every candidate route auto-divert
+        # tried below - forgotten before commit unless the new detour trip
+        # ends up driving it (see forget_unused_paths()).
+        #
+        possibly_unused_path_ids = [cancelled_path_id]
 
         cur.execute(
             "UPDATE vehicles SET starting_mileage = starting_mileage + %s, fuel_gallons = %s WHERE id = %s",
@@ -4710,9 +4637,11 @@ def _divert_to_gas_station(
 
                 candidate = stations_by_id[candidate_id]
 
-                _, _, candidate_distances_miles, _ = find_or_create_path_between_places(
+                candidate_path_id, _, candidate_distances_miles, _ = find_or_create_path_between_places(
                     cur, origin_place_id, lat, lng, candidate_id, candidate["lat"], candidate["lng"]
                 )
+
+                possibly_unused_path_ids.append(candidate_path_id)
 
                 road_miles = candidate_distances_miles[-1]
 
@@ -4732,6 +4661,8 @@ def _divert_to_gas_station(
             gas_station_place_id, station["lat"], station["lng"],
             current_fuel_gallons, resume_destination_place_id, True, trip_meter_offset_miles
         )
+
+        forget_unused_paths(cur, possibly_unused_path_ids)
 
         conn.commit()
 
@@ -4853,12 +4784,76 @@ def _run_resume_trip_job(job_id, vehicle_id, origin_place_id, destination_place_
     update_job(job_id, status="done", result=result)
 
 
-def _run_create_path_job(job_id, origin, destination, origin_place_id=None):
+#
+# The only way a user starts a trip now: a free-text destination, routed
+# from wherever the vehicle currently is. The path is created here, behind
+# the scenes, and only lives as long as the trip driving it (see
+# forget_unused_paths()) - always a fresh route rather than reusing an
+# existing path, since paths no longer outlive their trip anyway. Runs in
+# job_executor for the same reason creating a path always did: geocoding
+# the destination and routing it can take well past an HTTP timeout.
+#
+def _drive_vehicle_to(vehicle_id, destination):
+
+    conn = db()
+    cur = conn.cursor()
+
+    try:
+
+        cur.execute("SELECT place_id FROM vehicles WHERE id = %s", (vehicle_id,))
+
+        row = cur.fetchone()
+
+        if row is None:
+            raise HTTPException(status_code=404, detail="Vehicle not found")
+
+        origin_place_id = row[0]
+        origin = fetch_places_by_id(cur, [origin_place_id])[origin_place_id]
+
+        destination_place_id, destination_lat, destination_lng = find_or_create_place(cur, destination)
+
+        if destination_place_id == origin_place_id:
+            raise HTTPException(status_code=400, detail=f"Vehicle is already at {destination}")
+
+        path_id, _, _, _ = insert_routed_path(
+            cur, origin_place_id, origin["lat"], origin["lng"],
+            destination_place_id, destination_lat, destination_lng
+        )
+
+        #
+        # Committed before the trip exists, since start_trip_on_path() runs
+        # on its own connection - so a failed start has to forget the path
+        # itself rather than just rolling back.
+        #
+        conn.commit()
+
+    finally:
+        cur.close()
+        conn.close()
+
+    try:
+        return start_trip_on_path(vehicle_id, path_id)
+    except Exception:
+
+        conn = db()
+        cur = conn.cursor()
+
+        try:
+            forget_unused_paths(cur, [path_id])
+            conn.commit()
+        finally:
+            cur.close()
+            conn.close()
+
+        raise
+
+
+def _run_drive_job(job_id, vehicle_id, destination):
 
     update_job(job_id, status="running")
 
     try:
-        result = _build_path_result(origin, destination, origin_place_id)
+        result = _drive_vehicle_to(vehicle_id, destination)
     except Exception as e:
         update_job(job_id, status="error", error=getattr(e, "detail", str(e)))
         return
@@ -4866,12 +4861,17 @@ def _run_create_path_job(job_id, origin, destination, origin_place_id=None):
     update_job(job_id, status="done", result=result)
 
 
-@app.post("/api/paths", status_code=202)
-def create_path(req: CreatePathRequest):
+@app.post("/api/vehicles/{id}/drive", status_code=202)
+def drive_vehicle(id: int, req: DriveRequest):
 
-    job_id = create_job("create_path")
+    destination = req.destination.strip()
 
-    job_executor.submit(_run_create_path_job, job_id, req.origin, req.destination, req.origin_place_id)
+    if not destination:
+        raise HTTPException(status_code=400, detail="Enter a destination")
+
+    job_id = create_job("drive_to_destination")
+
+    job_executor.submit(_run_drive_job, job_id, id, destination)
 
     return {"job_id": job_id}
 
@@ -4931,31 +4931,6 @@ def list_paths():
         }
         for row in rows
     ]
-
-
-
-@app.delete("/api/paths/{id}")
-def delete_path(id: int):
-
-    conn = db()
-    cur = conn.cursor()
-
-    cur.execute(
-        "DELETE FROM paths WHERE id=%s RETURNING id",
-        (id,)
-    )
-
-    deleted = cur.fetchone()
-
-    conn.commit()
-
-    cur.close()
-    conn.close()
-
-    if deleted is None:
-        raise HTTPException(status_code=404, detail="Path not found")
-
-    return {"deleted": id}
 
 
 
@@ -5167,8 +5142,11 @@ def delete_zone(id: int):
 
 
 
-@app.post("/api/trips")
-def start_trip(req: StartTripRequest):
+#
+# Shared by POST /api/trips and the drive job (_drive_vehicle_to()) -
+# raises HTTPException for anything that keeps the vehicle from leaving.
+#
+def start_trip_on_path(vehicle_id, path_id, traffic_bias=1.0, simulated_datetime=None):
 
     conn = db()
     cur = conn.cursor()
@@ -5183,7 +5161,7 @@ def start_trip(req: StartTripRequest):
     #
     settle_arrived_vehicles(conn, cur, time_multiplier)
 
-    cur.execute("SELECT sold, place_id, fuel_gallons FROM vehicles WHERE id=%s", (req.vehicle_id,))
+    cur.execute("SELECT sold, place_id, fuel_gallons FROM vehicles WHERE id=%s", (vehicle_id,))
 
     vehicle_row = cur.fetchone()
 
@@ -5201,7 +5179,7 @@ def start_trip(req: StartTripRequest):
 
     cur.execute(
         "SELECT route, distances_miles, max_speeds_mph, origin_place_id FROM paths WHERE id=%s",
-        (req.path_id,)
+        (path_id,)
     )
 
     path_row = cur.fetchone()
@@ -5234,7 +5212,7 @@ def start_trip(req: StartTripRequest):
         AND t.cancelled_at IS NULL
         AND (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) < t.realized_duration_seconds
         """,
-        (req.vehicle_id, time_multiplier)
+        (vehicle_id, time_multiplier)
     )
 
     if cur.fetchone() is not None:
@@ -5250,7 +5228,7 @@ def start_trip(req: StartTripRequest):
     # with the clock shown in the frontend.
     #
     traffic_base_datetime = (
-        to_local_naive(req.simulated_datetime) if req.simulated_datetime else game_time
+        to_local_naive(simulated_datetime) if simulated_datetime else game_time
     )
 
     #
@@ -5259,7 +5237,7 @@ def start_trip(req: StartTripRequest):
     # removed later doesn't retroactively contradict a schedule (and
     # displayed speed) already computed for a trip in progress.
     #
-    zones = fetch_zones_for_paths(cur, [req.path_id]).get(req.path_id, [])
+    zones = fetch_zones_for_paths(cur, [path_id]).get(path_id, [])
 
     #
     # Fuel isn't checked against the path's distance here - a vehicle is
@@ -5269,11 +5247,11 @@ def start_trip(req: StartTripRequest):
     #
     cur.execute(
         """
-        INSERT INTO trips (vehicle_id, path_id, traffic_base_datetime, traffic_bias, zones_snapshot, starting_fuel_gallons)
-        VALUES (%s, %s, %s, %s, %s, %s)
+        INSERT INTO trips (vehicle_id, path_id, distance_miles, traffic_base_datetime, traffic_bias, zones_snapshot, starting_fuel_gallons)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
-        (req.vehicle_id, req.path_id, traffic_base_datetime, req.traffic_bias, json.dumps(zones), vehicle_fuel_gallons)
+        (vehicle_id, path_id, distances_miles[-1], traffic_base_datetime, traffic_bias, json.dumps(zones), vehicle_fuel_gallons)
     )
 
     trip_id = cur.fetchone()[0]
@@ -5283,7 +5261,7 @@ def start_trip(req: StartTripRequest):
     # only run after the row above exists.
     #
     realized_seconds = build_trip_schedule(
-        distances_miles, max_speeds_mph, zones, traffic_base_datetime, req.traffic_bias, trip_id
+        distances_miles, max_speeds_mph, zones, traffic_base_datetime, traffic_bias, trip_id
     )
 
     realized_duration_seconds = realized_seconds[-1]
@@ -5306,9 +5284,9 @@ def start_trip(req: StartTripRequest):
 
         "id": trip_id,
 
-        "vehicle_id": req.vehicle_id,
+        "vehicle_id": vehicle_id,
 
-        "path_id": req.path_id,
+        "path_id": path_id,
 
         "position": route[0],
 
@@ -5321,6 +5299,11 @@ def start_trip(req: StartTripRequest):
         "status": "DRIVING"
     }
 
+
+@app.post("/api/trips")
+def start_trip(req: StartTripRequest):
+
+    return start_trip_on_path(req.vehicle_id, req.path_id, req.traffic_bias, req.simulated_datetime)
 
 
 #
@@ -5345,6 +5328,7 @@ def start_trip(req: StartTripRequest):
 REFRESH_MODES = ("never", "refill", "miles", "arrival")
 
 TRIP_STARTING_JOB_TYPES = (
+    "drive_to_destination",
     "resume_trip_after_refuel",
     "auto_divert_to_gas_station",
     "drive_to_refuel",
@@ -5492,7 +5476,7 @@ def active_trips(refresh_on: str = "never", every_miles: Optional[float] = None)
             EXTRACT(EPOCH FROM (NOW() - t.started_at))
         FROM trips t
         JOIN vehicles v ON v.id = t.vehicle_id
-        JOIN paths p ON p.id = t.path_id
+        LEFT JOIN paths p ON p.id = t.path_id
         JOIN vehicle_models vs ON vs.id = v.vehicle_model_id
         WHERE t.cancelled_at IS NULL
         ORDER BY t.vehicle_id, t.started_at DESC
@@ -5552,6 +5536,15 @@ def active_trips(refresh_on: str = "never", every_miles: Optional[float] = None)
         trip_meter_offset_miles,
         elapsed_real_seconds
     ) in rows:
+
+        #
+        # LEFT JOIN, so DISTINCT ON still lands on each vehicle's actual
+        # latest trip - an inner join would silently skip a settled one
+        # whose path is already forgotten and fall back to some older trip.
+        # No path means that latest trip is settled: nothing to show.
+        #
+        if route is None:
+            continue
 
         derived = derive_position(
             trip_id,

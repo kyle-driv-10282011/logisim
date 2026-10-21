@@ -259,7 +259,16 @@ CREATE TABLE trips (
 
     vehicle_id INTEGER NOT NULL REFERENCES vehicles(id) ON DELETE CASCADE,
 
-    path_id INTEGER NOT NULL REFERENCES paths(id) ON DELETE CASCADE,
+    -- Paths only exist while a trip is actually driving them - the path is
+    -- forgotten once its trip arrives or is cancelled for a diversion (see
+    -- forget_unused_paths() in app.py), so a settled trip keeps a NULL
+    -- path_id and its own distance_miles copy instead.
+    path_id INTEGER REFERENCES paths(id) ON DELETE SET NULL,
+
+    -- The path's total length, copied at trip creation so the vehicle's
+    -- completed-trip odometer (list_vehicles()) survives the path itself
+    -- being forgotten.
+    distance_miles DOUBLE PRECISION,
 
     started_at TIMESTAMP DEFAULT NOW(),
 

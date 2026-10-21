@@ -4,17 +4,6 @@
 //
 const API = "";
 
-//
-// Mirrors the backend's own tier classification (app.py) so the path
-// preview can color-code each section by its effective speed limit
-// without a round trip - same thresholds/defaults, kept in sync by hand.
-//
-const MIN_REALISTIC_SPEED_MPH = 5;
-const MAX_REALISTIC_SPEED_MPH = 85;
-const INTERSTATE_MIN_MPH = 55;
-const ARTERIAL_MIN_MPH = 35;
-const TIER_DEFAULT_MPH = { interstate: 70, arterial: 50, local: 30 };
-
 let map;
 
 //
@@ -182,7 +171,6 @@ async function setTimeMultiplier() {
 
 const tripLayers = new Map();      // vehicle_id -> { marker, routeLine }
 let vehicleModelsById = new Map();         // vehicle_model_id -> vehicle model (from GET /api/vehicle-models)
-let pathsById = new Map();         // path_id -> path (from GET /api/paths)
 let vehiclesById = new Map();      // vehicle_id -> vehicle - current fleet, not sold (from GET /api/vehicles)
 let placesById = new Map();        // place_id -> place (from GET /api/places)
 let activeTripsById = new Map();   // vehicle_id -> trip (from the last poll)
@@ -191,35 +179,7 @@ let selectedVehicleId = null;      // vehicle id followed in the In Route tab
 let selectedTripVehicleId = null;  // vehicle id chosen (in the Vehicles tab) to start a trip
 let selectedVehicleModelId = null;         // vehicle model id highlighted in the Vehicle Models tab (purely visual, no map focus)
 let selectedPlaceId = null;        // place id focused in the Places tab
-let selectedPathId = null;         // path id currently previewed in the Paths tab
 
-//
-// Set by createPath() when it was reached via a vehicle's "create one in
-// the Paths tab" hint (see renderPathSelectForTripVehicle()), so the Paths
-// tab can offer a way back to that vehicle once the new path exists -
-// previewPath() (which createPath() calls right after creating one) clears
-// selectedTripVehicleId via clearFocus(), so this is the only place that
-// remembers where the user came from. null means "didn't come from a
-// vehicle", not just "no path created yet" - cleared by clearFocus() itself
-// so it doesn't linger past whatever focus change happens next.
-//
-let pathCreatedFromVehicleId = null;
-
-//
-// Set alongside the Origin field whenever it's prefilled from a selected
-// vehicle's own place (showTab()'s vehicle-aware branch below), so
-// createPath() can send it straight through as origin_place_id instead of
-// re-geocoding whatever text ends up in the box. Re-geocoding a vehicle's
-// own already-resolved address was a real bug: Nominatim doesn't reliably
-// return the exact same coordinates for the same query twice, so the new
-// path's origin could land a hair outside ROUND_DECIMALS of the vehicle's
-// actual place - a near-duplicate place a few meters off, invisible to
-// coordsMatch() and so never offered as a path that vehicle can take.
-// Cleared the moment the user edits Origin by hand (see the "input"
-// listener near the bottom of this file), since at that point whatever
-// they're typing may no longer describe that vehicle's place at all.
-//
-let originPlaceId = null;
 
 //
 // Places tab's continent/country/state/city filter (see renderPlaceFilterChips()
@@ -338,7 +298,6 @@ function clearFocus() {
     selectedVehicleId = null;
     selectedTripVehicleId = null;
     selectedPlaceId = null;
-    pathCreatedFromVehicleId = null;
 
     clearRestingVehicleMarker();
     clearPlaceMarker();
@@ -350,8 +309,7 @@ function clearFocus() {
 function renderFocusDependentViews() {
 
     renderVehicleList();
-    renderPathSelectForTripVehicle();
-    renderBackToVehicleHint();
+    renderDriveForm();
 }
 
 
@@ -553,23 +511,9 @@ document.addEventListener("click", (event) => {
 });
 
 
-//
-// Typing over a vehicle-prefilled Origin means the user wants a different
-// starting point than that vehicle's own place - drop originPlaceId so
-// createPath() falls back to geocoding whatever's actually in the box,
-// instead of silently ignoring the edit and creating a path from the
-// vehicle's place anyway. Setting .value from JS (as showTab()/
-// fillOriginWithFullAddress() both do) doesn't fire "input", so this only
-// reacts to genuine typing.
-//
-document.getElementById("origin").addEventListener("input", () => {
-    originPlaceId = null;
-});
-
-
 function showTab(tab) {
 
-    for (const name of ["vehiclemodels", "places", "myvehicles", "paths", "gasprices", "jobs", "config"]) {
+    for (const name of ["vehiclemodels", "places", "myvehicles", "gasprices", "jobs", "config"]) {
 
         document.getElementById(`tab-${name}`).classList.toggle("active", name === tab);
         document.getElementById(`tab-button-${name}`).classList.toggle("active", name === tab);
@@ -585,63 +529,6 @@ function showTab(tab) {
     //
     if (tab === "jobs") {
         loadJobs();
-    }
-
-    //
-    // Jumping to Paths with a vehicle focused (selectedVehicleId/
-    // selectedTripVehicleId - clearFocus() keeps these mutually exclusive)
-    // most likely means "make a path starting from that vehicle", so
-    // default Origin to where it is rather than leaving whatever was
-    // typed there before.
-    //
-    if (tab === "paths") {
-
-        const vehicle = vehiclesById.get(selectedVehicleId !== null ? selectedVehicleId : selectedTripVehicleId);
-
-        if (vehicle) {
-
-            // current_location is just a city name, which is ambiguous
-            // between same-named cities in different states - fill it in
-            // right away so Origin isn't left blank, then swap in the full
-            // street address once it resolves (reverse-geocoding is rate
-            // limited on the backend, so this can take a moment). Either
-            // way, origin_place_id (set below) is what actually determines
-            // where the path starts from - this text is just what the user
-            // sees.
-            document.getElementById("origin").value = vehicle.current_location;
-            originPlaceId = vehicle.place_id;
-
-            fillOriginWithFullAddress(vehicle.id);
-
-        } else {
-
-            originPlaceId = null;
-        }
-    }
-}
-
-
-async function fillOriginWithFullAddress(vehicleId) {
-
-    const response = await fetch(API + "/api/vehicles/" + vehicleId + "/address");
-
-    if (!response.ok) {
-        return;
-    }
-
-    const data = await response.json();
-
-    //
-    // Ignore a stale response if the user switched tabs or vehicles, or
-    // edited Origin by hand, while this was in flight.
-    //
-    const stillFocused = vehicleId === (selectedVehicleId !== null ? selectedVehicleId : selectedTripVehicleId);
-    const origin = document.getElementById("origin");
-
-    if (stillFocused && document.getElementById("tab-paths").classList.contains("active")
-        && origin.value === vehiclesById.get(vehicleId).current_location) {
-
-        origin.value = data.address;
     }
 }
 
@@ -1530,7 +1417,7 @@ async function loadVehicles() {
     }
 
     renderVehicleList();
-    renderPathSelectForTripVehicle();
+    renderDriveForm();
 }
 
 
@@ -1540,7 +1427,17 @@ function renderVehicleList() {
 
     list.innerHTML = "";
 
+    //
+    // Selecting a vehicle (READY or driving) narrows the list to just that
+    // one - clicking it again deselects and brings the rest back.
+    //
+    const focusedVehicleId = selectedVehicleId !== null ? selectedVehicleId : selectedTripVehicleId;
+
     for (const vehicle of vehiclesById.values()) {
+
+        if (focusedVehicleId !== null && vehicle.id !== focusedVehicleId) {
+            continue;
+        }
 
         const item = document.createElement("div");
 
@@ -1695,7 +1592,7 @@ function renderVehicleList() {
 //
 // When the vehicle isn't already at a gas station, POST .../refuel starts
 // a background job (drive there, refuel, park - see app.py) instead of
-// refueling instantly, so this has to poll it the same way createPath()
+// refueling instantly, so this has to poll it the same way driveToDestination()
 // and divertToGasStation() do rather than treating every response as
 // already finished.
 //
@@ -1780,89 +1677,82 @@ function selectTripVehicle(vehicleId) {
 
 
 //
-// A vehicle can only start a trip on a path whose origin is where it
-// currently is (enforced server-side too, in POST /api/trips) - so the
-// dropdown only offers paths matching the selected vehicle's
-// current_lat/current_lng, rather than every path that's ever been created.
+// Paths are behind the scenes now (see forget_unused_paths() in app.py):
+// selecting a READY vehicle shows a destination box, and driving there
+// creates the path from the vehicle's current place and starts the trip
+// in one background job - nothing to pick, and nothing left behind once
+// it arrives.
 //
-const COORD_MATCH_EPSILON = 0.0001; // matches the backend's ROUND_DECIMALS precision
+function renderDriveForm() {
 
-function coordsMatch(lat1, lng1, lat2, lng2) {
-
-    return Math.abs(lat1 - lat2) < COORD_MATCH_EPSILON && Math.abs(lng1 - lng2) < COORD_MATCH_EPSILON;
-}
-
-
-function renderPathSelectForTripVehicle() {
-
-    const select = document.getElementById("path-select");
-    const hint = document.getElementById("path-select-hint");
-
-    const previousValue = select.value;
+    const form = document.getElementById("drive-form");
     const vehicle = vehiclesById.get(selectedTripVehicleId);
 
-    select.innerHTML = '<option value="">Select a path...</option>';
-
     if (!vehicle) {
-
-        select.disabled = true;
-        hint.style.display = "none";
-
-        updateStartTripVisibility();
+        form.style.display = "none";
         return;
     }
 
-    select.disabled = false;
+    form.style.display = "";
 
-    const matching = [...pathsById.values()].filter((path) =>
-        coordsMatch(path.origin_lat, path.origin_lng, vehicle.current_lat, vehicle.current_lng)
-    );
-
-    for (const path of matching) {
-
-        const option = document.createElement("option");
-
-        option.value = path.id;
-        option.textContent = pathLabel(path);
-
-        select.appendChild(option);
-    }
-
-    if (matching.some((path) => String(path.id) === previousValue)) {
-        select.value = previousValue;
-    }
-
-    //
-    // Shown whenever a vehicle is selected, not just when it has zero
-    // matching paths - there's always a reason to jump straight to making
-    // another path from here, even if some already exist.
-    //
-    hint.style.display = "";
-
-    //
-    // showTab("paths") already prefills Origin from whichever vehicle is
-    // focused (selectedTripVehicleId here, since this hint only renders
-    // once a vehicle is selected for a trip - see the !vehicle guard
-    // above) via its own vehicle-aware logic, so jumping there from this
-    // link lands right where a "create one" click implies: a path form
-    // already started from this vehicle's location.
-    //
-    hint.innerHTML = (
-        matching.length === 0
-            ? `No paths from ${vehicle.current_location} yet - `
-            : `Need another path from ${vehicle.current_location}? `
-    ) + `<a href="#" class="hint-link" onclick="showTab('paths'); return false;">create one in the Paths tab</a>.`;
-
-    updateStartTripVisibility();
+    document.getElementById("drive-form-label").textContent =
+        `Drive ${vehicle.name} from ${vehicle.current_location} to:`;
 }
 
 
-function updateStartTripVisibility() {
+async function driveToDestination() {
 
-    const pathId = document.getElementById("path-select").value;
+    const vehicleId = selectedTripVehicleId;
 
-    document.getElementById("start-trip-button").style.display =
-        selectedTripVehicleId !== null && pathId !== "" ? "" : "none";
+    if (vehicleId === null) {
+        return;
+    }
+
+    const input = document.getElementById("drive-destination");
+
+    const response = await fetch(API + "/api/vehicles/" + vehicleId + "/drive", {
+
+        method: "POST",
+
+        headers: {
+            "Content-Type": "application/json"
+        },
+
+        body: JSON.stringify({ destination: input.value })
+
+    });
+
+    const submitted = await response.json();
+
+    if (!response.ok) {
+        alert(submitted.detail || "Could not start trip");
+        return;
+    }
+
+    try {
+        await pollJob(submitted.job_id);
+    } catch (e) {
+        alert(e.message);
+        return;
+    }
+
+    input.value = "";
+
+    await refreshLiveData();
+    await loadVehicles();
+    loadPlaces();
+
+    //
+    // Keep following the same vehicle, now as a driving one (its live
+    // card and map position) rather than dropping back to the full list.
+    //
+    selectVehicle(vehicleId);
+
+    const trip = activeTripsById.get(vehicleId);
+
+    if (trip) {
+        map.fitBounds(L.latLngBounds(trip.route));
+    }
 }
 
 
@@ -2457,957 +2347,6 @@ async function addVehicle() {
 }
 
 
-function pathLabel(path) {
-
-    return `${path.origin}-${path.destination}`;
-}
-
-
-//
-// distances_miles is cumulative miles from the origin at every route
-// point (see road_route() in app.py) - its last entry is the path's
-// total distance, not a separately stored value.
-//
-function pathDistanceMiles(path) {
-
-    return path.distances_miles[path.distances_miles.length - 1];
-}
-
-
-async function loadPaths() {
-
-    const response = await fetch(API + "/api/paths");
-    const paths = await response.json();
-
-    pathsById = new Map(paths.map((path) => [path.id, path]));
-
-    renderPathList();
-    renderPathSelectForTripVehicle();
-}
-
-
-//
-// Collapsed by default, same reasoning (and pattern) as the Gas Prices
-// tab's station list - a fleet that's been driving routes all over the
-// place can build up a long list of paths, and there's no reason to dump
-// all of it into the tab the moment it's opened. previewPath() expands
-// this itself (see below) whenever a path is actually selected - clicking
-// an already-visible row, or a brand-new path just created - so the
-// highlighted selection is never hidden behind a collapsed list.
-//
-let pathListExpanded = false;
-
-function togglePathList() {
-
-    pathListExpanded = !pathListExpanded;
-
-    renderPathList();
-}
-
-
-function renderPathList() {
-
-    const list = document.getElementById("path-list");
-    const arrow = document.getElementById("path-list-arrow");
-    const summary = document.getElementById("path-list-summary");
-
-    summary.textContent = `Paths (${pathsById.size})`;
-    arrow.innerHTML = pathListExpanded ? "&#9662;" : "&#9656;";
-    list.style.display = pathListExpanded ? "" : "none";
-
-    list.innerHTML = "";
-
-    if (!pathListExpanded) {
-        return;
-    }
-
-    for (const path of pathsById.values()) {
-
-        const item = document.createElement("div");
-
-        item.className = "vehicle-item list-row" + (path.id === selectedPathId ? " selected" : "");
-        item.onclick = () => previewPath(path);
-
-        item.innerHTML =
-            `<span>${pathLabel(path)} <span class="path-distance">(${Math.round(pathDistanceMiles(path))} mi)</span></span>` +
-            `<button class="remove-path-button" data-id="${path.id}">Remove</button>`;
-
-        list.appendChild(item);
-    }
-
-    for (const button of list.querySelectorAll(".remove-path-button")) {
-
-        button.onclick = (event) => {
-            event.stopPropagation();
-            withSpinner(button, () => removePath(Number(button.dataset.id)));
-        };
-    }
-}
-
-
-async function removePath(pathId) {
-
-    const path = pathsById.get(pathId);
-
-    if (!confirm(`Remove path "${path ? pathLabel(path) : pathId}"?`)) {
-        return;
-    }
-
-    await fetch(API + "/api/paths/" + pathId, { method: "DELETE" });
-
-    if (zoneDraftPath && zoneDraftPath.id === pathId) {
-
-        zoneDraftPath = null;
-        selectedSection = null;
-
-        resetZoneDraw();
-        clearRouteSections();
-
-        document.getElementById("zone-form").style.display = "none";
-        document.getElementById("zone-editor").style.display = "none";
-    }
-
-    if (selectedPathId === pathId) {
-        selectedPathId = null;
-    }
-
-    loadPaths();
-}
-
-
-function roadTier(freeFlowMph) {
-
-    if (freeFlowMph >= INTERSTATE_MIN_MPH) {
-        return "interstate";
-    }
-
-    if (freeFlowMph >= ARTERIAL_MIN_MPH) {
-        return "arterial";
-    }
-
-    return "local";
-}
-
-
-function zoneAtMiles(zones, positionMiles) {
-
-    for (const zone of zones || []) {
-        if (zone.start_miles <= positionMiles && positionMiles < zone.end_miles) {
-            return zone;
-        }
-    }
-
-    return null;
-}
-
-
-function segmentSpeedLimitMph(path, segmentIndex) {
-
-    //
-    // Same override rule as the backend's segment_speed_mph(): a zone
-    // covering this segment replaces the road entirely, otherwise fall
-    // back to OSRM's reported speed floored by the tier default.
-    //
-    const zone = zoneAtMiles(path.zones, path.distances_miles[segmentIndex]);
-
-    if (zone) {
-        return zone.speed_limit_mph;
-    }
-
-    const reported = Math.max(
-        MIN_REALISTIC_SPEED_MPH,
-        Math.min(MAX_REALISTIC_SPEED_MPH, path.max_speeds_mph[segmentIndex])
-    );
-
-    return Math.max(reported, TIER_DEFAULT_MPH[roadTier(reported)]);
-}
-
-
-function speedOverlayColor(mph) {
-
-    if (mph >= 65) {
-        return "#2f9e44";
-    }
-
-    if (mph >= 45) {
-        return "#f08c00";
-    }
-
-    return "#e03131";
-}
-
-
-//
-// The whole route is split into clickable "sections" - each one either an
-// existing road_zone (its exact start/end) or a run of consecutive segments
-// sharing the same non-zoned speed color. Every section shows its effective
-// speed limit (zone override or tier default), so the whole road is visible
-// and editable, not just stretches that already have a zone.
-//
-function buildRouteSections(path) {
-
-    const sections = [];
-    const segmentCount = path.max_speeds_mph.length;
-
-    if (segmentCount === 0) {
-        return sections;
-    }
-
-    const sectionAt = (i) => {
-
-        const zone = zoneAtMiles(path.zones, path.distances_miles[i]);
-
-        return {
-            zone,
-            mph: zone ? zone.speed_limit_mph : segmentSpeedLimitMph(path, i),
-            key: zone ? `zone:${zone.id}` : `tier:${speedOverlayColor(segmentSpeedLimitMph(path, i))}`
-        };
-    };
-
-    let runStart = 0;
-    let run = sectionAt(0);
-
-    for (let i = 1; i <= segmentCount; i++) {
-
-        const current = i < segmentCount ? sectionAt(i) : null;
-
-        if (!current || current.key !== run.key) {
-
-            sections.push({
-
-                startIndex: runStart,
-
-                endIndex: i,
-
-                startMiles: path.distances_miles[runStart],
-
-                endMiles: path.distances_miles[i],
-
-                speedLimitMph: run.mph,
-
-                zone: run.zone
-            });
-
-            runStart = i;
-            run = current;
-        }
-    }
-
-    return sections;
-}
-
-
-let zoneDraftPath = null;    // path currently shown in the zone editor
-let zoneDraftPoints = [];    // cumulative-miles values of picked points (0-2 of them), for "Draw a zone"
-let zoneDraftMarkers = [];   // Leaflet markers for the picked points
-let zoneDrawArmed = false;   // true while waiting for the next map click to pick a point
-let routeSectionLines = [];  // every drawn Leaflet polyline for the current path's sections
-let selectedSection = null;  // { zoneId: number|null, startMiles, endMiles } loaded into the edit form
-
-
-function nearestRouteIndex(route, latlng) {
-
-    let bestIndex = 0;
-    let bestDist = Infinity;
-
-    for (let i = 0; i < route.length; i++) {
-
-        const dLat = route[i][0] - latlng.lat;
-        const dLon = route[i][1] - latlng.lng;
-        const dist = dLat * dLat + dLon * dLon;
-
-        if (dist < bestDist) {
-            bestDist = dist;
-            bestIndex = i;
-        }
-    }
-
-    return bestIndex;
-}
-
-
-function formatHour(hour) {
-
-    const h = Math.floor(hour);
-    const m = Math.round((hour - h) * 60);
-
-    return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
-}
-
-
-function zoneSummary(zone) {
-
-    const rush = zone.rush_hour_start !== null && zone.rush_hour_end !== null
-        ? ` (rush ${formatHour(zone.rush_hour_start)}-${formatHour(zone.rush_hour_end)}, severity ${zone.rush_hour_factor})`
-        : "";
-
-    return `mile ${zone.start_miles.toFixed(1)}-${zone.end_miles.toFixed(1)}: ` +
-        `${Math.round(zone.speed_limit_mph)} mph${rush}`;
-}
-
-
-function clearRouteSections() {
-
-    for (const line of routeSectionLines) {
-        map.removeLayer(line);
-    }
-
-    routeSectionLines = [];
-}
-
-
-function sectionIsSelected(section) {
-
-    if (!selectedSection) {
-        return false;
-    }
-
-    if (selectedSection.zoneId !== null) {
-        return section.zone !== null && section.zone.id === selectedSection.zoneId;
-    }
-
-    return section.zone === null
-        && Math.abs(section.startMiles - selectedSection.startMiles) < 1e-6
-        && Math.abs(section.endMiles - selectedSection.endMiles) < 1e-6;
-}
-
-
-//
-// The visible line is much thinner than a comfortable click target,
-// especially for short zones - so each section also gets an invisible,
-// much wider "hit" line stacked on top of it purely to catch clicks
-// (Leaflet's default CSS gives interactive vector layers
-// `pointer-events: auto`, so a zero-opacity stroke still registers
-// clicks across its full weight).
-//
-const SECTION_CLICK_WEIGHT = 24;
-
-
-function renderRouteSections(path) {
-
-    clearRouteSections();
-
-    let selectedLine = null;
-
-    for (const section of buildRouteSections(path)) {
-
-        const selected = sectionIsSelected(section);
-        const points = path.route.slice(section.startIndex, section.endIndex + 1);
-
-        //
-        // While "Draw a custom zone" is armed, a section's own click
-        // shouldn't fire - the click still needs to bubble up to the map's
-        // click handler below, which is what actually places draft points.
-        //
-        const onClick = () => {
-
-            if (zoneDrawArmed) {
-                return;
-            }
-
-            selectSection(path, section);
-        };
-
-        const lineWeight = selected ? 8 : (section.zone ? 6 : 4);
-
-        //
-        // A custom zone's color alone can coincidentally match the tier
-        // color of the plain road right next to it (e.g. a 50mph zone
-        // butting up against a 50mph arterial default), so weight/dash
-        // alone can be too subtle to notice at a glance. A dark casing
-        // drawn underneath - wider than the zone's own line, so only its
-        // edges peek out - makes any custom zone unmistakable regardless
-        // of what color it happens to render in.
-        //
-        if (section.zone) {
-
-            routeSectionLines.push(L.polyline(points, {
-
-                color: "#1a1a1a",
-
-                weight: lineWeight + 5,
-
-                opacity: 0.9
-
-            }).addTo(map));
-        }
-
-        const line = L.polyline(points, {
-
-            color: selected ? "#c92a2a" : speedOverlayColor(section.speedLimitMph),
-
-            weight: lineWeight,
-
-            dashArray: section.zone ? null : "6 4",
-
-            opacity: selected ? 0.95 : 0.85
-
-        }).addTo(map);
-
-        const hitLine = L.polyline(points, {
-
-            weight: SECTION_CLICK_WEIGHT,
-
-            opacity: 0
-
-        }).addTo(map);
-
-        line.on("click", onClick);
-        hitLine.on("click", onClick);
-
-        routeSectionLines.push(line, hitLine);
-
-        if (selected) {
-            selectedLine = line;
-        }
-    }
-
-    //
-    // Drawn last so the highlighted section renders on top of any
-    // overlapping neighbor.
-    //
-    if (selectedLine) {
-        selectedLine.bringToFront();
-    }
-}
-
-
-function fillZoneForm(values) {
-
-    document.getElementById("zone-range-label").textContent =
-        `mile ${values.startMiles.toFixed(1)} - ${values.endMiles.toFixed(1)}`;
-
-    document.getElementById("zone-speed").value = Math.round(values.speedLimitMph);
-    document.getElementById("zone-rush-start").value = values.rushHourStart ?? "";
-    document.getElementById("zone-rush-end").value = values.rushHourEnd ?? "";
-    document.getElementById("zone-rush-factor").value = values.rushHourFactor;
-
-    document.getElementById("zone-delete-button").style.display =
-        selectedSection.zoneId !== null ? "" : "none";
-
-    document.getElementById("zone-draw-hint").style.display = "none";
-    document.getElementById("zone-form").style.display = "";
-}
-
-
-function selectZoneObject(path, zone) {
-
-    selectedSection = { zoneId: zone.id, startMiles: zone.start_miles, endMiles: zone.end_miles };
-
-    fillZoneForm({
-
-        startMiles: zone.start_miles,
-
-        endMiles: zone.end_miles,
-
-        speedLimitMph: zone.speed_limit_mph,
-
-        rushHourStart: zone.rush_hour_start,
-
-        rushHourEnd: zone.rush_hour_end,
-
-        rushHourFactor: zone.rush_hour_factor
-    });
-
-    renderRouteSections(path);
-    renderZoneList(path);
-}
-
-
-function selectFreshSection(path, startMiles, endMiles, defaultSpeedMph) {
-
-    selectedSection = { zoneId: null, startMiles, endMiles };
-
-    fillZoneForm({
-
-        startMiles,
-
-        endMiles,
-
-        speedLimitMph: defaultSpeedMph,
-
-        rushHourStart: null,
-
-        rushHourEnd: null,
-
-        rushHourFactor: 0.6
-    });
-
-    renderRouteSections(path);
-    renderZoneList(path);
-}
-
-
-function selectSection(path, section) {
-
-    if (section.zone) {
-        selectZoneObject(path, section.zone);
-    } else {
-        selectFreshSection(path, section.startMiles, section.endMiles, section.speedLimitMph);
-    }
-}
-
-
-function renderZoneList(path) {
-
-    const list = document.getElementById("zone-list");
-
-    list.innerHTML = "";
-
-    for (const zone of path.zones || []) {
-
-        const item = document.createElement("div");
-
-        const selected = selectedSection && selectedSection.zoneId === zone.id;
-
-        item.className = "vehicle-item list-row" + (selected ? " selected" : "");
-        item.style.cursor = "pointer";
-        item.onclick = () => selectZoneObject(path, zone);
-
-        item.innerHTML =
-            `<span>${zoneSummary(zone)}</span>` +
-            `<button class="remove-zone-button" data-id="${zone.id}">Delete</button>`;
-
-        list.appendChild(item);
-    }
-
-    for (const button of list.querySelectorAll(".remove-zone-button")) {
-
-        button.onclick = (event) => {
-            event.stopPropagation();
-            withSpinner(button, () => removeZone(Number(button.dataset.id)));
-        };
-    }
-}
-
-
-function resetZoneDraw() {
-
-    zoneDrawArmed = false;
-    zoneDraftPoints = [];
-
-    for (const marker of zoneDraftMarkers) {
-        map.removeLayer(marker);
-    }
-
-    zoneDraftMarkers = [];
-
-    document.getElementById("zone-draw-hint").style.display = "none";
-}
-
-
-function renderZoneEditor(path) {
-
-    zoneDraftPath = path;
-    selectedSection = null;
-
-    resetZoneDraw();
-
-    document.getElementById("zone-form").style.display = "none";
-    document.getElementById("zone-editor").style.display = "";
-    document.getElementById("zone-editor-path-label").textContent =
-        `${pathLabel(path)} (${Math.round(pathDistanceMiles(path))} mi)`;
-
-    renderRouteSections(path);
-    renderZoneList(path);
-}
-
-
-function startZoneDraw() {
-
-    selectedSection = null;
-
-    resetZoneDraw();
-
-    zoneDrawArmed = true;
-
-    document.getElementById("zone-draw-hint").style.display = "";
-    document.getElementById("zone-form").style.display = "none";
-
-    renderRouteSections(zoneDraftPath);
-}
-
-
-function cancelZoneForm() {
-
-    selectedSection = null;
-
-    resetZoneDraw();
-
-    document.getElementById("zone-form").style.display = "none";
-
-    renderRouteSections(zoneDraftPath);
-    renderZoneList(zoneDraftPath);
-}
-
-
-map.on("click", (event) => {
-
-    if (!zoneDrawArmed || !zoneDraftPath) {
-        return;
-    }
-
-    const index = nearestRouteIndex(zoneDraftPath.route, event.latlng);
-
-    const marker = L.circleMarker(zoneDraftPath.route[index], {
-
-        radius: 6,
-
-        color: "orange"
-
-    }).addTo(map);
-
-    zoneDraftMarkers.push(marker);
-    zoneDraftPoints.push(zoneDraftPath.distances_miles[index]);
-
-    if (zoneDraftPoints.length === 2) {
-
-        const [a, b] = zoneDraftPoints;
-
-        zoneDrawArmed = false;
-
-        document.getElementById("zone-draw-hint").style.display = "none";
-
-        for (const marker of zoneDraftMarkers) {
-            map.removeLayer(marker);
-        }
-
-        zoneDraftMarkers = [];
-
-        selectFreshSection(zoneDraftPath, Math.min(a, b), Math.max(a, b), 35);
-    }
-});
-
-
-async function saveZone() {
-
-    const rushStartRaw = document.getElementById("zone-rush-start").value;
-    const rushEndRaw = document.getElementById("zone-rush-end").value;
-
-    const url = selectedSection.zoneId !== null
-        ? API + "/api/zones/" + selectedSection.zoneId
-        : API + "/api/paths/" + zoneDraftPath.id + "/zones";
-
-    const method = selectedSection.zoneId !== null ? "PUT" : "POST";
-
-    const response = await fetch(url, {
-
-        method,
-
-        headers: {
-            "Content-Type": "application/json"
-        },
-
-        body: JSON.stringify({
-
-            start_miles: selectedSection.startMiles,
-
-            end_miles: selectedSection.endMiles,
-
-            speed_limit_mph: Number(document.getElementById("zone-speed").value),
-
-            rush_hour_start: rushStartRaw === "" ? null : Number(rushStartRaw),
-
-            rush_hour_end: rushEndRaw === "" ? null : Number(rushEndRaw),
-
-            rush_hour_factor: Number(document.getElementById("zone-rush-factor").value)
-
-        })
-
-    });
-
-    const data = await response.json();
-
-    if (!response.ok) {
-        alert(data.detail || "Could not save zone");
-        return;
-    }
-
-    const pathId = zoneDraftPath.id;
-
-    selectedSection = { zoneId: data.id, startMiles: data.start_miles, endMiles: data.end_miles };
-
-    //
-    // Whether this save created a fresh zone or updated an existing one,
-    // the section now definitely corresponds to a real zone - show the
-    // delete button even if this was just created (fillZoneForm() only
-    // ran with zoneId still null, before the save completed).
-    //
-    document.getElementById("zone-delete-button").style.display = "";
-
-    await loadPaths();
-
-    const refreshed = pathsById.get(pathId);
-
-    if (refreshed) {
-
-        zoneDraftPath = refreshed;
-
-        renderRouteSections(refreshed);
-        renderZoneList(refreshed);
-    }
-}
-
-
-function deleteSelectedZone() {
-
-    if (selectedSection && selectedSection.zoneId !== null) {
-        return removeZone(selectedSection.zoneId);
-    }
-}
-
-
-async function removeZone(zoneId) {
-
-    if (!confirm("Delete this zone?")) {
-        return;
-    }
-
-    const pathId = zoneDraftPath.id;
-
-    if (selectedSection && selectedSection.zoneId === zoneId) {
-        selectedSection = null;
-        document.getElementById("zone-form").style.display = "none";
-    }
-
-    await fetch(API + "/api/zones/" + zoneId, { method: "DELETE" });
-
-    await loadPaths();
-
-    const refreshed = pathsById.get(pathId);
-
-    if (refreshed) {
-
-        zoneDraftPath = refreshed;
-
-        renderRouteSections(refreshed);
-        renderZoneList(refreshed);
-    }
-}
-
-
-function previewPath(path) {
-
-    clearFocus();
-    renderFocusDependentViews();
-
-    selectedPathId = path.id;
-    pathListExpanded = true;
-    renderPathList();
-
-    map.fitBounds(L.latLngBounds(path.route));
-
-    renderZoneEditor(path);
-}
-
-
-function clearOriginInput() {
-
-    document.getElementById("origin").value = "";
-
-    //
-    // Same reasoning as swapOriginDestination() below - a directly-set
-    // .value doesn't fire "input", so the listener that normally drops
-    // originPlaceId on a manual edit never runs; this has to clear it
-    // itself instead of leaving a stale place_id behind an empty box.
-    //
-    originPlaceId = null;
-}
-
-
-function clearDestinationInput() {
-
-    document.getElementById("destination").value = "";
-}
-
-
-function swapOriginDestination() {
-
-    const originInput = document.getElementById("origin");
-    const destinationInput = document.getElementById("destination");
-
-    const temp = originInput.value;
-    originInput.value = destinationInput.value;
-    destinationInput.value = temp;
-
-    //
-    // Whatever now sits in Origin came from the Destination box, which has
-    // no known place_id behind it - keeping the old one would silently
-    // create the path from the vehicle's place instead of the text now
-    // actually shown.
-    //
-    originPlaceId = null;
-}
-
-
-async function createPath() {
-
-    //
-    // previewPath() below clears selectedTripVehicleId (via clearFocus()),
-    // so this is captured before that happens - it's how renderBackToVehicleHint()
-    // knows to offer a way back once the new path exists.
-    //
-    const originVehicleId = selectedTripVehicleId;
-
-    const response = await fetch(API + "/api/paths", {
-
-        method: "POST",
-
-        headers: {
-            "Content-Type": "application/json"
-        },
-
-        body: JSON.stringify({
-
-            origin: document.getElementById("origin").value,
-
-            origin_place_id: originPlaceId,
-
-            destination: document.getElementById("destination").value
-
-        })
-
-    });
-
-    const submitted = await response.json();
-
-    if (!response.ok) {
-        alert(submitted.detail || "Could not create path");
-        return;
-    }
-
-    let path;
-
-    try {
-        path = await pollJob(submitted.job_id);
-    } catch (e) {
-        alert(e.message);
-        return;
-    }
-
-    //
-    // The job result is already the same shape as a GET /api/paths entry,
-    // so it goes straight into pathsById rather than re-downloading every
-    // path's full route geometry via loadPaths() just to pick up one new
-    // row. Set before previewPath(), whose renderPathList() reads it.
-    //
-    pathsById.set(path.id, path);
-    renderPathSelectForTripVehicle();
-
-    previewPath(path);
-
-    pathCreatedFromVehicleId = originVehicleId;
-    renderBackToVehicleHint();
-
-    loadPlaces();
-
-    document.getElementById("path-select").value = path.id;
-    updateStartTripVisibility();
-}
-
-
-//
-// Only shown right after creating a path that was reached from a vehicle's
-// own "create one in the Paths tab" hint (see renderPathSelectForTripVehicle()) -
-// re-validated against the vehicle's current status every render (not just
-// once at creation) since it could have been sold or started driving via
-// another tab/session in the meantime.
-//
-function renderBackToVehicleHint() {
-
-    const hint = document.getElementById("back-to-vehicle-hint");
-
-    const vehicle = pathCreatedFromVehicleId !== null ? vehiclesById.get(pathCreatedFromVehicleId) : null;
-
-    if (!vehicle || vehicle.status !== "READY") {
-        hint.style.display = "none";
-        return;
-    }
-
-    hint.style.display = "";
-
-    hint.innerHTML =
-        `<a href="#" class="hint-link" onclick="backToVehicle(${vehicle.id}); return false;">` +
-        `&larr; Back to ${vehicle.name}</a>`;
-}
-
-
-function backToVehicle(vehicleId) {
-
-    showTab("myvehicles");
-    selectTripVehicle(vehicleId);
-}
-
-
-async function startTrip() {
-
-    const vehicleId = selectedTripVehicleId;
-    const pathId = document.getElementById("path-select").value;
-
-    const response = await fetch(API + "/api/trips", {
-
-        method: "POST",
-
-        headers: {
-            "Content-Type": "application/json"
-        },
-
-        body: JSON.stringify({
-
-            vehicle_id: Number(vehicleId),
-
-            path_id: Number(pathId)
-
-        })
-
-    });
-
-    const data = await response.json();
-
-    if (!response.ok) {
-        alert(data.detail || "Could not start trip");
-        return;
-    }
-
-    //
-    // Remove any previous layers for this vehicle (e.g. a prior completed trip)
-    //
-    const existing = tripLayers.get(data.vehicle_id);
-
-    if (existing) {
-        map.removeLayer(existing.marker);
-        map.removeLayer(existing.routeLine);
-    }
-
-    const routeLine = L.polyline(data.route, {
-
-        color: "blue",
-
-        weight: 5
-
-    }).addTo(map);
-
-    const marker = L.marker(data.position).addTo(map);
-
-    marker.bindTooltip(
-        `Drive time: ${formatHMS(data.duration_seconds)}` +
-        ` (playing in ${formatHMS(data.sim_duration_seconds)})`,
-        { permanent: true, direction: "top", offset: [0, -10] }
-    ).openTooltip();
-
-    marker.on("click", () => selectVehicle(data.vehicle_id));
-
-    tripLayers.set(data.vehicle_id, { marker, routeLine });
-
-    map.fitBounds(routeLine.getBounds());
-
-    selectedTripVehicleId = null;
-
-    loadVehicles();
-    refreshLiveData();
-}
-
-
 async function pollActiveTrips() {
 
     const refreshOption = activeRefreshOption();
@@ -3604,7 +2543,6 @@ loadVehicleModels()
             '<div class="list-loading-error">Could not load vehicles - refresh to try again.</div>';
     })
     .finally(loadGasPrices);
-loadPaths();
 loadPlaces();
 loadJobs();
 
