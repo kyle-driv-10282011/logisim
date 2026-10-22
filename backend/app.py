@@ -4152,9 +4152,41 @@ def list_gas_prices(request: Request):
     return JSONResponse(content=jsonable_encoder(rows), headers={"ETag": etag, "Cache-Control": "no-cache"})
 
 
+#
+# Plenty of real stations in OSM aren't tagged amenity=fuel - e.g. a plain
+# building=yes that's simply *named* "Gas Station" - so a fuel-ish name
+# counts too, not just the tag.
+#
+FUEL_STATION_NAME_PATTERN = re.compile(
+    r"\b(gas(oline)? station|gas bar|fuel|petrol|filling station|service station|gasolinera|gasolina|"
+    r"station[- ]service|tankstelle|posto de combust[ií]vel)\b",
+    re.IGNORECASE
+)
+
+
 def is_fuel_station_match(raw):
 
-    return raw.get("class") == "amenity" and raw.get("type") == "fuel"
+    if raw.get("type") == "fuel":
+        return True
+
+    return bool(FUEL_STATION_NAME_PATTERN.search(raw.get("name") or raw.get("display_name", "").split(",")[0]))
+
+
+#
+# "a village", "an amenity" - human wording for what a non-station match
+# actually is. OSM's type is often just "yes" (building=yes, i.e. "some
+# building"), which reads as nonsense on its own, so the class is used then.
+#
+def describe_match_kind(raw):
+
+    kind = raw.get("type")
+
+    if not kind or kind == "yes":
+        kind = raw.get("class") or "location"
+
+    kind = kind.replace("_", " ")
+
+    return ("an " if kind[0] in "aeiou" else "a ") + kind
 
 
 #
@@ -4197,15 +4229,13 @@ def resolve_gas_station_place(cur, description, confirm_location):
 
     if not confirm_location and not is_fuel_station_match(raw):
 
-        kind = (raw.get("type") or raw.get("class") or "location").replace("_", " ")
-
         raise HTTPException(
             status_code=409,
             detail={
                 "code": "not_a_gas_station",
                 "message": (
                     f'No gas station found for "{description}" - the closest match is '
-                    f'{address} (a {kind}, not a gas station).'
+                    f'{address} ({describe_match_kind(raw)}, not a gas station).'
                 ),
                 "match": address
             }
