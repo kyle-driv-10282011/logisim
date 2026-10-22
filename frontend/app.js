@@ -2258,12 +2258,29 @@ function activeRefreshOption() {
     return liveUpdatesEnabled ? REFRESH_OPTIONS[refreshIndex] : REFRESH_OPTIONS[0];
 }
 
+//
+// "Off" - the badge paused, or the slider on Never - still isn't frozen
+// forever: a slow fallback refresh keeps the page from drifting
+// arbitrarily far out of date. It replaces whatever the backend said
+// (always nothing for "never") rather than adding to it.
+//
+const OFF_REFRESH_SECONDS = 20 * 60;
+
+function refreshIsOff() {
+
+    return activeRefreshOption().refreshOn === "never";
+}
+
 function scheduleNextRefresh(seconds) {
 
     clearTimeout(refreshTimer);
     refreshTimer = null;
 
-    if (!liveUpdatesEnabled || seconds === null || seconds === undefined) {
+    if (refreshIsOff()) {
+        seconds = OFF_REFRESH_SECONDS;
+    }
+
+    if (seconds === null || seconds === undefined) {
         return;
     }
 
@@ -2301,7 +2318,7 @@ function renderLiveUpdatesToggle() {
     toggle.classList.toggle("active", liveUpdatesEnabled);
     toggle.title = liveUpdatesEnabled
         ? `Live updates on (${label}) - click to pause`
-        : `Live updates paused - click to resume (${label})`;
+        : `Live updates paused (refreshing every 20 min) - click to resume (${label})`;
 }
 
 function toggleLiveUpdates() {
@@ -2312,9 +2329,10 @@ function toggleLiveUpdates() {
     renderLiveUpdatesToggle();
 
     //
-    // Pausing just drops the pending event. Resuming catches up right
-    // away - vehicles may have moved a long way while paused - and that
-    // refresh's response schedules the next event.
+    // Pausing swaps the pending event for the slow off-fallback (see
+    // scheduleNextRefresh()). Resuming catches up right away - vehicles
+    // may have moved a long way while paused - and that refresh's
+    // response schedules the next event.
     //
     if (liveUpdatesEnabled) {
         refreshLiveData();
@@ -2383,7 +2401,7 @@ renderLiveUpdatesToggle();
 
 //
 // The first load always happens, badge on or off - with it off (or set to
-// Never) it's just a one-time snapshot, and nothing gets scheduled after.
+// Never) the next one is just the 20-minute fallback.
 // Jobs and settings already loaded above, so only trips are fetched here.
 //
 pollActiveTrips().catch(() => scheduleNextRefresh(REFRESH_RETRY_SECONDS));
