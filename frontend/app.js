@@ -886,11 +886,53 @@ function renderGasPriceList() {
 }
 
 
+//
+// Inline result line under the Add / Update Price form (gasprice-add-result)
+// rather than alert() popups - a green confirmation of exactly what was
+// saved where, or a red explanation of what went wrong, left in place until
+// the next attempt so it can be read at leisure.
+//
+function showGasPriceResult(kind, message) {
+
+    const result = document.getElementById("gasprice-add-result");
+
+    result.className = "form-result " + kind;
+    result.textContent = message;
+}
+
+
+function gasPriceErrorMessage(data, fallback) {
+
+    const detail = data && data.detail;
+
+    if (detail && typeof detail === "object") {
+        return detail.message || fallback;
+    }
+
+    return detail || fallback;
+}
+
+
 async function addGasPrice() {
 
     const descriptionInput = document.getElementById("gasprice-description");
     const brandInput = document.getElementById("gasprice-brand");
     const priceInput = document.getElementById("gasprice-price");
+
+    const description = descriptionInput.value.trim();
+    const price = Number(priceInput.value);
+
+    if (!description) {
+        showGasPriceResult("error", "Not saved - enter the station's location (an address, or a name with the city and state).");
+        return;
+    }
+
+    if (!(price > 0)) {
+        showGasPriceResult("error", "Not saved - enter a price per gallon above $0.");
+        return;
+    }
+
+    showGasPriceResult("pending", `Looking up "${description}"...`);
 
     const submit = (confirmLocation) => fetch(API + "/api/gas-prices", {
 
@@ -901,37 +943,59 @@ async function addGasPrice() {
         },
 
         body: JSON.stringify({
-            description: descriptionInput.value,
-            brand: brandInput.value || null,
-            price_per_gallon: Number(priceInput.value),
+            description,
+            brand: brandInput.value.trim() || null,
+            price_per_gallon: price,
             confirm_location: confirmLocation
         })
 
     });
 
-    let response = await submit(false);
-    let data = await response.json();
+    let response;
+    let data;
 
-    //
-    // The description resolved somewhere that isn't a gas station (e.g.
-    // "gas station near X" matching town X itself - see
-    // resolve_gas_station_place() in app.py). Say what it found and let
-    // the user decide, rather than silently pricing the middle of town.
-    //
-    if (response.status === 409 && data.detail && data.detail.code === "not_a_gas_station") {
+    try {
 
-        if (!confirm(`${data.detail.message}\n\nSave the price at that location anyway?`)) {
-            return;
+        response = await submit(false);
+        data = await response.json();
+
+        //
+        // The description resolved somewhere that isn't a gas station (e.g.
+        // "gas station near X" matching town X itself - see
+        // resolve_gas_station_place() in app.py). Say what it found and let
+        // the user decide, rather than silently pricing the middle of town.
+        //
+        if (response.status === 409 && data.detail && data.detail.code === "not_a_gas_station") {
+
+            if (!confirm(`${data.detail.message}\n\nSave the price at that location anyway?`)) {
+                showGasPriceResult("error", `Not saved - ${data.detail.message}`);
+                return;
+            }
+
+            response = await submit(true);
+            data = await response.json();
         }
 
-        response = await submit(true);
-        data = await response.json();
+    } catch (e) {
+        showGasPriceResult("error", "Not saved - couldn't reach the server. Check your connection and try again.");
+        return;
     }
 
     if (!response.ok) {
-        alert((data.detail && data.detail.message) || data.detail || "Could not add gas price");
+        showGasPriceResult("error", "Not saved - " + gasPriceErrorMessage(data, "the server couldn't add this gas price."));
         return;
     }
+
+    const previous = gasPricesByPlaceId.get(data.place_id);
+    const label = gasStationLabel(data.brand, data.description);
+    const where = data.place && data.place.address ? ` at ${data.place.address}` : "";
+
+    showGasPriceResult(
+        "success",
+        previous
+            ? `Updated ${label}${where}: $${previous.price_per_gallon.toFixed(2)} → $${data.price_per_gallon.toFixed(2)}/gal.`
+            : `Added ${label}${where} at $${data.price_per_gallon.toFixed(2)}/gal.`
+    );
 
     descriptionInput.value = "";
     brandInput.value = "";
