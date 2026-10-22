@@ -993,7 +993,12 @@ def geocode_full(place):
             detail=f"Could not geocode location: {place}"
         )
 
-    return (location.latitude, location.longitude, location.address, location.raw.get("address", {}))
+    #
+    # The full raw result rides along last - its OSM class/type is what
+    # tells a real fuel station apart from, say, the town a "gas station
+    # near X" search fell back to (see is_fuel_station_match()).
+    #
+    return (location.latitude, location.longitude, location.address, location.raw.get("address", {}), location.raw)
 
 
 #
@@ -1015,13 +1020,23 @@ def geocode_full(place):
 #
 def find_or_create_place(cur, description):
 
-    #
-    # A description (or Nominatim address) that's already been saved needs
-    # no fresh geocode at all - checked first, before geocode_full(), since
-    # each Nominatim call costs at least a second behind
-    # geocode_throttle_gate() and the dedup-by-coordinates check below can
-    # only run after paying that cost.
-    #
+    saved = find_saved_place(cur, description)
+
+    if saved is not None:
+        return saved
+
+    return create_place_from_geocode(cur, description, geocode_full(description))
+
+
+#
+# A description (or Nominatim address) that's already been saved needs no
+# fresh geocode at all - checked first, before geocode_full(), since each
+# Nominatim call costs at least a second behind geocode_throttle_gate() and
+# the dedup-by-coordinates check in create_place_from_geocode() can only
+# run after paying that cost. Returns (place_id, lat, lng) or None.
+#
+def find_saved_place(cur, description):
+
     cur.execute(
         """
         SELECT id, lat, lng FROM places
@@ -1035,10 +1050,17 @@ def find_or_create_place(cur, description):
 
     saved = cur.fetchone()
 
-    if saved is not None:
-        return saved[0], saved[1], saved[2]
+    return (saved[0], saved[1], saved[2]) if saved is not None else None
 
-    lat, lng, address, raw_address = geocode_full(description)
+
+#
+# The second half of find_or_create_place(), taking an already-made
+# geocode_full() result - split out so upsert_gas_price() can inspect that
+# result before deciding to save it, without geocoding twice.
+#
+def create_place_from_geocode(cur, description, geocoded):
+
+    lat, lng, address, raw_address, _ = geocoded
 
     lat = round_coord(lat)
     lng = round_coord(lng)
@@ -2799,6 +2821,13 @@ class CreateGasPriceRequest(BaseModel):
     #
     brand: Optional[str] = None
 
+    #
+    # Set once the user has confirmed a location that isn't recognizably
+    # a gas station (see resolve_gas_station_place()) - save the price
+    # there anyway.
+    #
+    confirm_location: bool = False
+
 
 
 class RoadZoneRequest(BaseModel):
@@ -4123,6 +4152,73 @@ def list_gas_prices(request: Request):
     return JSONResponse(content=jsonable_encoder(rows), headers={"ETag": etag, "Cache-Control": "no-cache"})
 
 
+def is_fuel_station_match(raw):
+
+    return raw.get("class") == "amenity" and raw.get("type") == "fuel"
+
+
+#
+# Nominatim is a geocoder, not a POI search (see find_gas_stations_in_city()),
+# so a description like "gas station near Nisutlin" usually resolves to the
+# town itself - and used to be silently saved there, pricing the middle of
+# town as if it were a station. Instead, anything that isn't a known
+# station already (a place with a gas price) or an OSM amenity=fuel match
+# is refused with what *was* matched, so the frontend can say so and let
+# the user confirm (confirm_location) that the spot is right anyway - a
+# station's plain street address, for one, geocodes as a building, not
+# amenity=fuel, and is a perfectly good location to price.
+#
+def resolve_gas_station_place(cur, description, confirm_location):
+
+    saved = find_saved_place(cur, description)
+
+    if saved is not None:
+
+        if confirm_location:
+            return saved[0]
+
+        cur.execute("SELECT 1 FROM gas_prices WHERE place_id = %s", (saved[0],))
+
+        if cur.fetchone() is not None:
+            return saved[0]
+
+    try:
+        geocoded = geocode_full(description)
+    except HTTPException:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f'Couldn\'t find a location for "{description}". Try the station\'s street address, '
+                f'or its name with the city and state (e.g. "Shell, Minneapolis, MN").'
+            )
+        )
+
+    _, _, address, _, raw = geocoded
+
+    if not confirm_location and not is_fuel_station_match(raw):
+
+        kind = (raw.get("type") or raw.get("class") or "location").replace("_", " ")
+
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "not_a_gas_station",
+                "message": (
+                    f'No gas station found for "{description}" - the closest match is '
+                    f'{address} (a {kind}, not a gas station).'
+                ),
+                "match": address
+            }
+        )
+
+    if saved is not None:
+        return saved[0]
+
+    place_id, _, _ = create_place_from_geocode(cur, description, geocoded)
+
+    return place_id
+
+
 @app.post("/api/gas-prices")
 def upsert_gas_price(req: CreateGasPriceRequest):
 
@@ -4132,7 +4228,12 @@ def upsert_gas_price(req: CreateGasPriceRequest):
     conn = db()
     cur = conn.cursor()
 
-    place_id, _, _ = find_or_create_place(cur, req.description)
+    try:
+        place_id = resolve_gas_station_place(cur, req.description, req.confirm_location)
+    except HTTPException:
+        cur.close()
+        conn.close()
+        raise
 
     upsert_gas_price_row(cur, place_id, req.price_per_gallon, req.brand)
 

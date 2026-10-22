@@ -892,7 +892,7 @@ async function addGasPrice() {
     const brandInput = document.getElementById("gasprice-brand");
     const priceInput = document.getElementById("gasprice-price");
 
-    const response = await fetch(API + "/api/gas-prices", {
+    const submit = (confirmLocation) => fetch(API + "/api/gas-prices", {
 
         method: "POST",
 
@@ -903,15 +903,33 @@ async function addGasPrice() {
         body: JSON.stringify({
             description: descriptionInput.value,
             brand: brandInput.value || null,
-            price_per_gallon: Number(priceInput.value)
+            price_per_gallon: Number(priceInput.value),
+            confirm_location: confirmLocation
         })
 
     });
 
-    const data = await response.json();
+    let response = await submit(false);
+    let data = await response.json();
+
+    //
+    // The description resolved somewhere that isn't a gas station (e.g.
+    // "gas station near X" matching town X itself - see
+    // resolve_gas_station_place() in app.py). Say what it found and let
+    // the user decide, rather than silently pricing the middle of town.
+    //
+    if (response.status === 409 && data.detail && data.detail.code === "not_a_gas_station") {
+
+        if (!confirm(`${data.detail.message}\n\nSave the price at that location anyway?`)) {
+            return;
+        }
+
+        response = await submit(true);
+        data = await response.json();
+    }
 
     if (!response.ok) {
-        alert(data.detail || "Could not add gas price");
+        alert((data.detail && data.detail.message) || data.detail || "Could not add gas price");
         return;
     }
 
