@@ -1028,6 +1028,14 @@ async function addGasPrice() {
 //
 const SAVED_GAS_STATION_MIN_ZOOM = 14;
 
+//
+// The pin is a "here's what you just saved" cue, not a permanent marker -
+// it removes itself after this long.
+//
+const SAVED_GAS_STATION_PIN_MS = 60 * 1000;
+
+let savedGasStationTimer = null;
+
 function showSavedGasStation(gasPrice) {
 
     clearSavedGasStationMarker();
@@ -1050,10 +1058,15 @@ function showSavedGasStation(gasPrice) {
     ).openTooltip();
 
     map.setView(latLng, Math.max(map.getZoom(), SAVED_GAS_STATION_MIN_ZOOM));
+
+    savedGasStationTimer = setTimeout(clearSavedGasStationMarker, SAVED_GAS_STATION_PIN_MS);
 }
 
 
 function clearSavedGasStationMarker() {
+
+    clearTimeout(savedGasStationTimer);
+    savedGasStationTimer = null;
 
     if (savedGasStationMarker) {
         map.removeLayer(savedGasStationMarker);
