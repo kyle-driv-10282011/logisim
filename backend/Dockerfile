@@ -1,13 +1,10 @@
 FROM python:3.12-slim
 
 #
-# Outbound traffic (geocoding/routing calls to the public internet) goes
-# through this proxy, which reaches the internet directly rather than
-# through Zscaler's TLS-inspecting path - so no Zscaler root CA needs to be
-# trusted here. Declared as ARGs so `docker compose build` can pass them
-# through for pip during the build, and re-exported as ENV so they're also
-# set at runtime for requests/geopy. Left blank, they're a no-op and this
-# image falls back to reaching the internet directly.
+# Optional HTTP proxy for pip during the build (docker-compose.yml passes
+# the ones from .env), re-exported as ENV for requests/geopy at runtime -
+# compose sets them again at runtime too. Left empty in .env, they're a
+# no-op and the backend reaches the internet directly.
 #
 ARG HTTP_PROXY
 ARG HTTPS_PROXY

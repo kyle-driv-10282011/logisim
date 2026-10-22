@@ -6,7 +6,7 @@
 # Traefik's PROXY_SECRET. Nothing here publishes a port.
 #
 # Start Edge first (it creates edge-logisim), then:
-#   PROXY_SECRET in .env next to this file (= LOGISIM_PROXY_SECRET in Edge's)
+#   cp .env.example .env, and fill it in (PROXY_SECRET, optional HTTP proxy)
 #   docker compose up -d --build
 #
 
@@ -34,9 +34,10 @@ services:
   backend:
     build:
       context: ./backend
+      # Optional HTTP proxy, set in .env. Empty means a direct connection.
       args:
-        HTTP_PROXY: ${HTTP_PROXY:-http://us08dv2itm94.pmdomhq.protomold.com:8090}
-        HTTPS_PROXY: ${HTTPS_PROXY:-http://us08dv2itm94.pmdomhq.protomold.com:8090}
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
         NO_PROXY: ${NO_PROXY:-}
 
     container_name: vehicle-backend
@@ -48,13 +49,11 @@ services:
       # Routing service
       ROUTING_URL: https://router.project-osrm.org
 
-      # Outbound calls (geocoding/routing) go through this proxy, which
-      # reaches the internet directly rather than through Zscaler's
-      # TLS-inspecting path - overridable per machine via a real
-      # HTTP_PROXY/HTTPS_PROXY env var or a .env file next to this file.
-      HTTP_PROXY: ${HTTP_PROXY:-http://us08dv2itm94.pmdomhq.protomold.com:8090}
-      HTTPS_PROXY: ${HTTPS_PROXY:-http://us08dv2itm94.pmdomhq.protomold.com:8090}
-      NO_PROXY: ${NO_PROXY:-postgres,localhost,127.0.0.1}
+      # The same proxy at runtime, for geocoding (Nominatim), routing (OSRM)
+      # and gas station lookups (Overpass). Empty means a direct connection.
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
 
     depends_on:
       - postgres

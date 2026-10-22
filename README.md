@@ -28,12 +28,14 @@ the browser.
 ## Running it
 
 Start the Edge stack first (it creates the `edge-logisim` network and
-fetches the certificate). Put LogiSim's proxy secret in a `.env` next to
-`docker-compose.yml` — the same value as `LOGISIM_PROXY_SECRET` in Edge's
-`.env` (generate one with `openssl rand -hex 32`):
+fetches the certificate). Copy `.env.example` to `.env` next to
+`docker-compose.yml` and fill it in: `PROXY_SECRET` is required — the same
+value as `LOGISIM_PROXY_SECRET` in Edge's `.env` (generate one with
+`openssl rand -hex 32`) — and the HTTP proxy settings are optional (see
+[Outbound network access](#outbound-network-access)):
 
-```text
-PROXY_SECRET=...
+```bash
+cp .env.example .env
 ```
 
 Then:
@@ -61,24 +63,18 @@ On networks that intercept outbound TLS (e.g. a corporate Zscaler proxy),
 requests to these hosts can fail with `CERTIFICATE_VERIFY_FAILED`. Rather
 than trusting a machine-specific TLS-inspection root CA (fragile, and ends
 up committed to source control), the backend routes outbound traffic
-through an internal proxy that isn't subject to that interception. This is
-configured via `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`, both as Docker
-build args (needed at build time, since `pip install` also goes out over
-the network) and as runtime environment variables (`requests` and geopy's
-requests-based adapter both honor these automatically).
+through an internal proxy that isn't subject to that interception.
 
-`docker-compose.yml` defaults these to a working internal proxy address,
-but they're fully overridable per machine:
+The proxy is set per machine in `.env` (`HTTP_PROXY` / `HTTPS_PROXY` /
+`NO_PROXY`, see `.env.example`). They're used both as Docker build args
+(`pip install` goes out over the network too) and as runtime environment
+variables (`requests` and geopy honor them automatically). **Leave them
+empty for a direct connection** — that's the default, with no proxy
+hardcoded anywhere. After changing them, rebuild and recreate the backend:
 
 ```bash
-export HTTP_PROXY=http://your-proxy:port
-export HTTPS_PROXY=http://your-proxy:port
-docker compose build backend
-docker compose up -d backend
+docker compose up -d --build backend
 ```
-
-or via a `.env` file next to `docker-compose.yml`. Leave them unset (or set
-to an empty value) on a machine with unrestricted direct internet access.
 
 ## Data model
 
