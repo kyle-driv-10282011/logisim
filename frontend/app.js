@@ -180,6 +180,7 @@ let selectedVehicleModelId = null;         // vehicle model id highlighted in th
 
 
 let restingVehicleMarker = null;   // dot marking a clicked non-driving vehicle's resting location
+let savedGasStationMarker = null;  // pin on the station just added/updated via the Gas Prices form
 
 let gasPricesByPlaceId = new Map(); // place_id -> gas price row (from GET /api/gas-prices)
 const gasPriceMarkers = new Map();  // place_id -> persistent Leaflet circleMarker (the map overlay itself)
@@ -253,6 +254,7 @@ function clearFocus() {
     selectedTripVehicleId = null;
 
     clearRestingVehicleMarker();
+    clearSavedGasStationMarker();
 }
 
 
@@ -1012,6 +1014,51 @@ async function addGasPrice() {
 
     renderGasPriceMarkers();
     renderGasPriceList();
+
+    showSavedGasStation(data);
+}
+
+
+//
+// Centers the map on a just-saved station and pins it - its own marker,
+// not the overlay's, since the overlay is off by default (tens of
+// thousands of markers is slow) and the point is to show *this* one
+// either way. Zooms in only if the map is further out than street-ish
+// level, so a user already zoomed in close isn't yanked back out.
+//
+const SAVED_GAS_STATION_MIN_ZOOM = 14;
+
+function showSavedGasStation(gasPrice) {
+
+    clearSavedGasStationMarker();
+
+    const latLng = [gasPrice.lat, gasPrice.lng];
+
+    savedGasStationMarker = L.circleMarker(latLng, {
+
+        radius: 9,
+        color: "#1b5e20",
+        weight: 3,
+        fillColor: "#2f9e44",
+        fillOpacity: 1
+
+    }).addTo(map);
+
+    savedGasStationMarker.bindTooltip(
+        `${gasStationLabel(gasPrice.brand, gasPrice.description)}: $${gasPrice.price_per_gallon.toFixed(2)}/gal`,
+        { permanent: true, direction: "top", offset: [0, -10] }
+    ).openTooltip();
+
+    map.setView(latLng, Math.max(map.getZoom(), SAVED_GAS_STATION_MIN_ZOOM));
+}
+
+
+function clearSavedGasStationMarker() {
+
+    if (savedGasStationMarker) {
+        map.removeLayer(savedGasStationMarker);
+        savedGasStationMarker = null;
+    }
 }
 
 
