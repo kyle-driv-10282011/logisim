@@ -609,6 +609,70 @@
             padding: 3px 0;
         }
 
+        /*
+         * The selected driving vehicle's details (renderVehicleOverlay() in
+         * app.js), over the map's bottom-right corner - clear of the
+         * attribution below it and the clock box above it, scrolling if the
+         * map is too short for the whole dashboard.
+         */
+        #vehicle-overlay {
+            position: absolute;
+            right: 10px;
+            bottom: 24px;
+            z-index: 1000;
+            width: 250px;
+            max-height: calc(100% - 250px);
+            min-height: 0;
+            overflow-y: auto;
+            padding: 8px 10px 10px;
+            background: white;
+            border: 1px solid #3388ff;
+            border-radius: 4px;
+            box-shadow: 0 1px 6px rgba(0,0,0,0.35);
+            box-sizing: border-box;
+        }
+
+        #vehicle-overlay.collapsed {
+            padding-bottom: 8px;
+        }
+
+        .vehicle-overlay-header {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-bottom: 6px;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        #vehicle-overlay.collapsed .vehicle-overlay-header {
+            margin-bottom: 0;
+        }
+
+        .vehicle-overlay-toggle {
+            font-size: 10px;
+            color: #555;
+        }
+
+        .vehicle-overlay-name {
+            flex: 1;
+            min-width: 0;
+            font-weight: bold;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .vehicle-overlay-close {
+            border: none;
+            background: none;
+            font-size: 18px;
+            line-height: 1;
+            padding: 0 2px;
+            cursor: pointer;
+            color: #555;
+        }
+
         #vehicle-details {
             margin-top: 16px;
             padding-top: 10px;
@@ -736,6 +800,7 @@
 
 <div id="main">
     <div id="map"></div>
+    <div id="vehicle-overlay" style="display:none"></div>
     <div id="map-controls">
     <div id="sim-clock">
         <button id="current-file-label" class="current-file" onclick="returnToFileSelect()" title="Back to file select"></button>

@@ -286,7 +286,7 @@ function clearRestingVehicleMarker() {
 
 //
 // A followed driving vehicle and a vehicle picked to drive compete for the
-// same map focus (and the same narrowed vehicle list) - selecting either
+// same map focus (and the same highlighted card) - selecting either
 // should drop the other, rather than leaving e.g. a followed driving
 // vehicle still yanking the view back on every refresh. Every click entry
 // point below calls this first, then applies its own selection on top.
@@ -1292,16 +1292,11 @@ function renderVehicleList() {
     list.innerHTML = "";
 
     //
-    // Selecting a vehicle (READY or driving) narrows the list to just that
-    // one - clicking it again deselects and brings the rest back.
+    // Every vehicle stays listed while one is selected - the selected card
+    // is just highlighted (.selected), and a driving one's details show in
+    // the map overlay (renderVehicleOverlay()) rather than inline here.
     //
-    const focusedVehicleId = selectedVehicleId !== null ? selectedVehicleId : selectedTripVehicleId;
-
     for (const vehicle of vehiclesById.values()) {
-
-        if (focusedVehicleId !== null && vehicle.id !== focusedVehicleId) {
-            continue;
-        }
 
         const item = document.createElement("div");
 
@@ -1393,13 +1388,12 @@ function renderVehicleList() {
                       : `<button class="refuel-button" data-id="${vehicle.id}">Refuel</button>`) +
                   `<button class="sell-button" data-id="${vehicle.id}">Sell</button>` +
                   `</div>`
-                : "") +
-            (driving && vehicle.id === selectedVehicleId && trip
-                ? vehicleDetailHtml(vehicle, trip)
                 : "");
 
         list.appendChild(item);
     }
+
+    renderVehicleOverlay();
 
     for (const button of list.querySelectorAll(".sell-button")) {
 
@@ -1443,7 +1437,7 @@ function renderVehicleList() {
     // so a second, independent spinner/disabled mechanism on the same
     // (about to be replaced) button would just be redundant.
     //
-    for (const button of list.querySelectorAll(".divert-nearest-button")) {
+    for (const button of document.querySelectorAll("#vehicle-overlay .divert-nearest-button")) {
 
         if (!button.disabled) {
             button.onclick = (event) => {
@@ -1625,7 +1619,7 @@ async function driveToDestination() {
     const trip = activeTripsById.get(vehicleId);
 
     if (trip) {
-        map.fitBounds(L.latLngBounds(trip.route));
+        map.fitBounds(L.latLngBounds(trip.route), { paddingBottomRight: vehicleOverlayInset() });
     }
 }
 
@@ -1647,16 +1641,113 @@ function selectVehicle(vehicleId) {
         // pollActiveTrips() keeps following it every tick without touching
         // zoom.
         //
-        const trip = activeTripsById.get(vehicleId);
-
-        if (trip) {
-            map.panTo(trip.position);
-        }
-
         fetchCurrentCity();
     }
 
+    //
+    // Rendered before panning, so the overlay's size is known and the
+    // vehicle lands clear of it.
+    //
     renderFocusDependentViews();
+
+    const trip = activeTripsById.get(selectedVehicleId);
+
+    if (trip) {
+        panToVehicle(trip.position);
+    }
+}
+
+
+//
+// The selected driving vehicle's details, over the map's bottom-right
+// corner. Collapsing shrinks it to its header row; the choice sticks across
+// selections. The vehicle is kept out from under it by panToVehicle().
+//
+let vehicleOverlayCollapsed = false;
+
+function renderVehicleOverlay() {
+
+    const overlay = document.getElementById("vehicle-overlay");
+    const vehicle = vehiclesById.get(selectedVehicleId);
+    const trip = activeTripsById.get(selectedVehicleId);
+
+    if (!vehicle || !trip) {
+        overlay.style.display = "none";
+        overlay.innerHTML = "";
+        return;
+    }
+
+    overlay.style.display = "";
+    overlay.classList.toggle("collapsed", vehicleOverlayCollapsed);
+
+    overlay.innerHTML =
+        `<div class="vehicle-overlay-header" title="${vehicleOverlayCollapsed ? "Show" : "Hide"} details">` +
+        `<span class="vehicle-overlay-toggle">${vehicleOverlayCollapsed ? "&#9650;" : "&#9660;"}</span>` +
+        `<span class="vehicle-overlay-name">${vehicle.name}</span>` +
+        `<span class="status-badge status-${trip.status}">${trip.status}</span>` +
+        `<button class="vehicle-overlay-close" title="Deselect">&times;</button>` +
+        `</div>` +
+        (vehicleOverlayCollapsed ? "" : vehicleDetailHtml(vehicle, trip));
+
+    overlay.querySelector(".vehicle-overlay-header").onclick = toggleVehicleOverlay;
+
+    overlay.querySelector(".vehicle-overlay-close").onclick = (event) => {
+        event.stopPropagation();
+        selectVehicle(selectedVehicleId);
+    };
+}
+
+
+function toggleVehicleOverlay() {
+
+    vehicleOverlayCollapsed = !vehicleOverlayCollapsed;
+
+    renderVehicleList();
+
+    const trip = activeTripsById.get(selectedVehicleId);
+
+    if (trip) {
+        panToVehicle(trip.position);
+    }
+}
+
+
+//
+// How much of the map's right or bottom edge the vehicle overlay covers -
+// whichever leaves the roomier clear area (beside it vs. above it), the
+// other being 0. As { x, y } it doubles as fitBounds' paddingBottomRight.
+//
+function vehicleOverlayInset() {
+
+    const overlay = document.getElementById("vehicle-overlay");
+
+    if (overlay.style.display === "none") {
+        return L.point(0, 0);
+    }
+
+    const size = map.getSize();
+    const mapRect = map.getContainer().getBoundingClientRect();
+    const rect = overlay.getBoundingClientRect();
+
+    const clearWidth = rect.left - mapRect.left;
+    const clearHeight = rect.top - mapRect.top;
+
+    return clearWidth * size.y >= clearHeight * size.x
+        ? L.point(size.x - clearWidth, 0)
+        : L.point(0, size.y - clearHeight);
+}
+
+
+//
+// Centers the vehicle in the part of the map the overlay leaves clear, so
+// following it never parks it underneath.
+//
+function panToVehicle(latLng) {
+
+    const zoom = map.getZoom();
+    const offset = vehicleOverlayInset().divideBy(2);
+
+    map.panTo(map.unproject(map.project(latLng, zoom).add(offset), zoom));
 }
 
 
@@ -1987,11 +2078,9 @@ function tripometerHtml(miles) {
 
 
 //
-// The expanded block shown inline on a DRIVING/STRANDED vehicle's own card
-// once it's selected - this used to be a separate "In Route" tab's detail
-// panel, keyed off the same selectedVehicleId, just rendered somewhere
-// else on the page. Skips anything the compact card above it already
-// shows (name/model, status badge, trip miles, gas used, fuel gauge) so
+// The detail block in the map overlay (renderVehicleOverlay()) for the
+// selected DRIVING/STRANDED vehicle. Skips anything its compact card in
+// the list already shows (model, trip miles, gas used, fuel gauge) so
 // selecting a vehicle adds detail rather than repeating it.
 //
 function vehicleDetailHtml(vehicle, trip) {
@@ -2309,7 +2398,7 @@ async function pollActiveTrips() {
         // touching zoom (a full fitBounds/setView would fight the user's view).
         //
         if (trip.vehicle_id === selectedVehicleId) {
-            map.panTo(trip.position);
+            panToVehicle(trip.position);
         }
     }
 
