@@ -10,6 +10,11 @@ CREATE TABLE save_slots (
     -- Entered when the file is started (file-select screen).
     name TEXT NOT NULL,
 
+    -- The file's money, in Gold Doubloons (shown as $, cents and all). Every
+    -- change goes through the `ledger` table below - see record_money() in
+    -- app.py.
+    balance NUMERIC(14, 2) NOT NULL DEFAULT 10000,
+
     created TIMESTAMP DEFAULT NOW()
 );
 
@@ -179,6 +184,12 @@ CREATE TABLE vehicles (
     -- live level for a vehicle currently driving/stranded is derived per
     -- poll instead (see trips.starting_fuel_gallons below).
     fuel_gallons DOUBLE PRECISION NOT NULL DEFAULT 0,
+
+    -- What the gas now in the tank cost per gallon, on average - 0 for the
+    -- free tank a new vehicle starts with, blended with each purchase's
+    -- price as it's bought. A finished trip refunds the gas it burned at this
+    -- price (see settle_arrived_vehicles() in app.py).
+    fuel_cost_per_gallon DOUBLE PRECISION NOT NULL DEFAULT 0,
 
     -- Hauling vehicle models (year/brand/model/capacity/cost/mpg/image) live on the
     -- reusable vehicle model, not duplicated per vehicle - same pattern as paths
@@ -371,5 +382,40 @@ CREATE TABLE trips (
     -- station and the resume afterward), so the dashboard trip meter keeps
     -- counting through the stop instead of resetting each leg. See
     -- start_diversion_trip() in app.py.
-    trip_meter_offset_miles DOUBLE PRECISION NOT NULL DEFAULT 0
+    trip_meter_offset_miles DOUBLE PRECISION NOT NULL DEFAULT 0,
+
+    -- What all the fuel this leg had to burn cost: the tank it set out with
+    -- (starting_fuel_gallons x the vehicle's fuel_cost_per_gallon), plus
+    -- every roadside fill bought along the way. Divided by the gallons that
+    -- adds up to, it's the price per gallon this leg's burned gas is
+    -- refunded at.
+    fuel_value_dollars DOUBLE PRECISION NOT NULL DEFAULT 0,
+
+    -- Burned-gas cost from earlier legs of the same journey not refunded
+    -- yet - a leg cancelled for a diversion and the gas-station detour
+    -- itself pass theirs on, so the whole journey's gas is refunded together
+    -- once it reaches its real destination.
+    carried_fuel_cost DOUBLE PRECISION NOT NULL DEFAULT 0
+);
+
+
+-- Every change to a save file's balance, newest last: gas bought, gas
+-- refunded at the end of a trip, roadside fees. Amounts are signed (a
+-- charge is negative). save_slots.balance is always the running total.
+CREATE TABLE ledger (
+
+    id SERIAL PRIMARY KEY,
+
+    slot_id INTEGER NOT NULL REFERENCES save_slots(id) ON DELETE CASCADE,
+
+    amount NUMERIC(14, 2) NOT NULL,
+
+    -- gas_purchase, gas_refund or roadside_fee - see record_money() in app.py.
+    kind TEXT NOT NULL,
+
+    description TEXT NOT NULL,
+
+    vehicle_id INTEGER REFERENCES vehicles(id) ON DELETE SET NULL,
+
+    created TIMESTAMP DEFAULT NOW()
 );

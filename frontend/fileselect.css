@@ -110,6 +110,10 @@
     font-size: 10px;
 }
 
+.fs-file-gold {
+    color: #ffd23f;
+}
+
 .fs-prompt {
     margin: 4px 0 8px;
     color: #ffd23f;
@@ -217,4 +221,16 @@
 
 .current-file:hover {
     background: #ffe27a;
+}
+
+/* The file's Gold Doubloons, under the file chip in the clock box. */
+.balance-display {
+    font-size: 14px;
+    font-weight: bold;
+    color: #8a6d00;
+    margin-bottom: 2px;
+}
+
+.balance-display.negative {
+    color: #c92a2a;
 }

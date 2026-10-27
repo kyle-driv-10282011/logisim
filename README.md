@@ -63,6 +63,19 @@ them open. The browser names the file it's playing in an `X-Save-Slot`
 header on every API call (`current_slot()` in `app.py`). An existing
 database's world becomes File 1 ("Player 1") on first startup.
 
+### Gold Doubloons
+
+Each file has a balance in Gold Doubloons, written like dollars
+(`$14,328.45`), starting at $10,000.00. Gas is charged when it's bought:
+a Refuel at a station, the top-up on arriving at one (a Refuel drive or a
+gas-station detour), or a roadside refuel, which costs a full tank at the
+nearest station's price plus a $75 fee. Each vehicle tracks what the gas in
+its tank cost per gallon (a new vehicle's tank is free). When a trip
+finishes, the gas it burned is refunded at that price. A gas-station detour
+carries its cost forward, so the whole journey is refunded on reaching the
+real destination. Every charge and refund is in the file's ledger (Config
+tab, `GET /api/ledger`). The balance can go negative; nothing is blocked yet.
+
 ### Outbound network access
 
 The backend needs to reach two public services over the internet:

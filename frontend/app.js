@@ -13,6 +13,76 @@ const API = "";
 //
 let currentSlotId = null;
 
+//
+// Gold Doubloons, written exactly like US dollars: $14,328.45 (and
+// -$12.30 when a file is in the red).
+//
+const DOUBLOON_FORMAT = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
+
+function formatDoubloons(amount) {
+
+    return DOUBLOON_FORMAT.format(amount);
+}
+
+
+function renderBalance(balance) {
+
+    const display = document.getElementById("balance-display");
+
+    display.textContent = formatDoubloons(balance);
+    display.classList.toggle("negative", balance < 0);
+}
+
+
+//
+// Config tab's money history (GET /api/ledger) - fetched when the tab is
+// opened rather than on every refresh, since nobody needs it updating
+// while looking at something else.
+//
+const LEDGER_ENTRIES_SHOWN = 25;
+
+async function loadLedger() {
+
+    const response = await apiFetch(API + "/api/ledger?limit=" + LEDGER_ENTRIES_SHOWN);
+
+    if (!response.ok) {
+        return;
+    }
+
+    const data = await response.json();
+
+    document.getElementById("ledger-balance").textContent = formatDoubloons(data.balance);
+    renderBalance(data.balance);
+
+    const list = document.getElementById("ledger-list");
+
+    list.innerHTML = "";
+
+    if (!data.entries.length) {
+        list.innerHTML = '<div class="ledger-empty">No gas bought yet.</div>';
+        return;
+    }
+
+    for (const entry of data.entries) {
+
+        const row = document.createElement("div");
+        const description = document.createElement("span");
+        const amount = document.createElement("span");
+
+        row.className = "ledger-entry";
+
+        description.textContent = entry.description;
+        description.title = new Date(entry.created).toLocaleString();
+
+        amount.className = "ledger-amount" + (entry.amount < 0 ? " charge" : "");
+        amount.textContent = (entry.amount > 0 ? "+" : "") + formatDoubloons(entry.amount);
+
+        row.append(description, amount);
+        list.appendChild(row);
+    }
+}
+
+
 function apiFetch(url, options = {}) {
 
     const headers = new Headers(options.headers || {});
@@ -76,6 +146,8 @@ async function loadSettings() {
     }
 
     updateAutoRefuelToggle(settings.auto_refuel_level);
+
+    renderBalance(settings.balance);
 
     updateSimClock();
 }
@@ -500,6 +572,10 @@ function showTab(tab) {
     //
     if (tab === "jobs") {
         loadJobs();
+    }
+
+    if (tab === "config") {
+        loadLedger();
     }
 }
 
@@ -1989,7 +2065,7 @@ function vehicleDetailHtml(vehicle, trip) {
         statusLine =
             `Out of fuel - stranded ${trip.distance_miles.toFixed(1)} mi in<br>` +
             `<button id="roadside-refuel-button" data-id="${trip.vehicle_id}">` +
-            `Send roadside fuel ($${ROADSIDE_ASSIST_FEE_USD})</button>`;
+            `Send roadside fuel (gas + ${formatDoubloons(ROADSIDE_ASSIST_FEE)} fee)</button>`;
 
     } else {
 
@@ -2123,18 +2199,26 @@ async function divertToGasStation(vehicleId, gasStationPlaceId) {
 
 
 //
-// There's no money/budget system in the app yet (see ROADSIDE_ASSIST_FEE_USD
-// in app.py), so this fee isn't actually charged anywhere - it's just shown
-// to set expectations for when one exists.
+// Mirrors ROADSIDE_ASSIST_FEE in app.py - charged on top of a full tank of
+// gas at the nearest station's price, and never refunded.
 //
-const ROADSIDE_ASSIST_FEE_USD = 75;
+const ROADSIDE_ASSIST_FEE = 75;
 
 
 async function roadsideRefuel(vehicleId) {
 
     const vehicle = vehiclesById.get(vehicleId);
 
-    if (!confirm(`Send roadside fuel to ${vehicle ? vehicle.name : "this vehicle"} for $${ROADSIDE_ASSIST_FEE_USD}?`)) {
+    const tankGallons = vehicle && vehicle.vehicle_model ? vehicle.vehicle_model.fuel_tank_gallons : null;
+
+    if (!confirm(
+        `Send roadside fuel to ${vehicle ? vehicle.name : "this vehicle"}?
+
+` +
+        `Costs a full tank${tankGallons ? ` (${tankGallons} gal)` : ""} at the nearest gas station's price, ` +
+        `plus a ${formatDoubloons(ROADSIDE_ASSIST_FEE)} assistance fee. The gas is refunded when the trip ` +
+        `finishes; the fee isn't.`
+    )) {
         return;
     }
 

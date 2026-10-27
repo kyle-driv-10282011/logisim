@@ -161,6 +161,7 @@ function renderFileSelect() {
                 `<div class="fs-file-stats">` +
                 `<div>${slot.vehicles} vehicle${slot.vehicles === 1 ? "" : "s"}` +
                 (slot.driving ? ` · ${slot.driving} on the road` : "") + `</div>` +
+                `<div class="fs-file-gold">${formatDoubloons(slot.balance)}</div>` +
                 `<div>${Math.round(slot.total_miles).toLocaleString()} mi</div>` +
                 `<div>${formatFileClock(slot.game_time)} · x${slot.time_multiplier}</div>` +
                 `</div>`;

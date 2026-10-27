@@ -157,6 +157,30 @@
             background: #e3e3e3;
         }
 
+        .ledger-entry {
+            display: flex;
+            justify-content: space-between;
+            gap: 8px;
+            padding: 3px 0;
+            border-bottom: 1px solid #eee;
+            font-size: 11px;
+        }
+
+        .ledger-entry .ledger-amount {
+            flex-shrink: 0;
+            font-weight: bold;
+            color: #2f9e44;
+        }
+
+        .ledger-entry .ledger-amount.charge {
+            color: #c92a2a;
+        }
+
+        .ledger-empty {
+            font-size: 11px;
+            color: #777;
+        }
+
         .config-hint {
             font-size: 11px;
             color: #555;
@@ -692,6 +716,7 @@
     <div id="map"></div>
     <div id="sim-clock">
         <button id="current-file-label" class="current-file" onclick="returnToFileSelect()" title="Back to file select"></button>
+        <div id="balance-display" class="balance-display" title="Gold Doubloons"></div>
         <div id="sim-clock-text"></div>
         <div id="time-multiplier-control">
             <label for="time-multiplier-input">Time x</label>
@@ -824,6 +849,15 @@
     </div>
 
     <div class="tab-content" id="tab-config">
+
+        <div class="panel-form">
+            <span class="config-label"><b>Gold Doubloons</b> &middot; <span id="ledger-balance"></span></span>
+            <div class="config-hint">
+                Gas is charged when it's bought and refunded, at the price paid, for the gas a trip burns once it
+                finishes. A roadside refuel also costs a non-refundable fee.
+            </div>
+            <div id="ledger-list"></div>
+        </div>
 
         <div class="panel-form">
             <label for="refresh-interval-slider" class="config-label">
