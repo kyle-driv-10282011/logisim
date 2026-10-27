@@ -204,12 +204,20 @@
 }
 
 /*
- * The new-file intro card: the file-select screen's backdrop, its text
- * fading in, then the whole card fading out to the map (.fading).
+ * The new-file intro card, an 80s synthwave sunset: a violet-to-coral sky,
+ * a striped sun on the horizon, a neon grid floor rolling toward you, and
+ * grandpa's van drifting in a soft glow over it all with the story below.
+ * The whole card fades out to the map (.fading).
  */
 .intro-splash {
     z-index: 5100;
+    flex-direction: column;
+    gap: 28px;
+    overflow: hidden;
     cursor: pointer;
+    background:
+        repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.12) 0 2px, transparent 2px 4px),
+        linear-gradient(180deg, #12002b 0%, #2d0b52 30%, #6a1b74 48%, #d1477a 58%, #ff9a6b 62%, #1a0633 62%, #0b0220 100%);
     transition: opacity 1.5s ease;
 }
 
@@ -218,25 +226,92 @@
     pointer-events: none;
 }
 
-.intro-text {
-    max-width: 640px;
-    font-size: 16px;
-    line-height: 2.2;
-    text-align: center;
-    color: #ffd23f;
-    text-shadow: 3px 3px 0 #b3361b;
-    animation: intro-text-in 2s ease both;
+/* Sits on the horizon (62%), its lower half cut into fading bands. */
+.intro-sun {
+    position: absolute;
+    left: 50%;
+    bottom: 38%;
+    width: min(90vw, 900px);
+    aspect-ratio: 1;
+    transform: translate(-50%, 50%);
+    border-radius: 50%;
+    background: linear-gradient(180deg, #fff1a8 0%, #ffc85c 35%, #ff6b9a 70%, #c2378f 100%);
+    -webkit-mask: linear-gradient(180deg, #000 30%, transparent 30% 31.5%, #000 31.5% 34%, transparent 34% 36%,
+        #000 36% 38.5%, transparent 38.5% 41%, #000 41% 43.5%, transparent 43.5% 47%, #000 47%);
+    mask: linear-gradient(180deg, #000 30%, transparent 30% 31.5%, #000 31.5% 34%, transparent 34% 36%,
+        #000 36% 38.5%, transparent 38.5% 41%, #000 41% 43.5%, transparent 43.5% 47%, #000 47%);
+    clip-path: inset(0 0 50% 0);
+    animation: intro-sun-rise 2.5s ease both;
 }
 
-@keyframes intro-text-in {
-    from { opacity: 0; transform: translateY(8px); }
-    to { opacity: 1; transform: none; }
+/* Opacity only - transform is what centers it on the horizon. */
+@keyframes intro-sun-rise {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+/* The floor below the horizon, tilted away and scrolling toward the viewer. */
+.intro-grid {
+    position: absolute;
+    left: -50%;
+    right: -50%;
+    top: 62%;
+    height: 80%;
+    transform-origin: top;
+    transform: perspective(300px) rotateX(62deg);
+    background:
+        repeating-linear-gradient(90deg, rgba(255, 79, 216, 0.75) 0 2px, transparent 2px 60px),
+        repeating-linear-gradient(0deg, rgba(255, 79, 216, 0.75) 0 2px, transparent 2px 60px);
+    -webkit-mask: linear-gradient(180deg, transparent 0%, #000 25%);
+    mask: linear-gradient(180deg, transparent 0%, #000 25%);
+    animation: intro-grid-roll 1.2s linear infinite;
+}
+
+@keyframes intro-grid-roll {
+    from { background-position: 0 0, 0 0; }
+    to { background-position: 0 0, 0 60px; }
+}
+
+.intro-van {
+    position: relative;
+    width: min(76vw, 560px);
+    height: auto;
+    filter:
+        saturate(1.15) contrast(1.05)
+        drop-shadow(0 0 18px rgba(255, 120, 200, 0.55))
+        drop-shadow(0 0 48px rgba(120, 90, 255, 0.45));
+    animation: intro-fade-in 2s ease both, intro-van-float 5s ease-in-out 2s infinite;
+}
+
+@keyframes intro-van-float {
+    50% { transform: translateY(-8px); }
+}
+
+.intro-text {
+    position: relative;
+    max-width: 680px;
+    padding: 16px 20px;
+    font-size: 15px;
+    line-height: 2.1;
+    text-align: center;
+    color: #ffe9f7;
+    background: rgba(18, 0, 43, 0.55);
+    border: 2px solid rgba(255, 79, 216, 0.6);
+    border-radius: 6px;
+    box-shadow: 0 0 24px rgba(255, 79, 216, 0.35);
+    text-shadow: 0 0 6px #ff4fd8, 0 0 14px rgba(90, 220, 255, 0.7);
+    animation: intro-fade-in 2s ease 0.8s both;
+}
+
+@keyframes intro-fade-in {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; }
 }
 
 @media (max-width: 560px) {
 
     .intro-text {
-        font-size: 12px;
+        font-size: 11px;
     }
 }
 
