@@ -31,11 +31,29 @@
             flex: 1;
         }
 
-        #sim-clock {
+        /*
+         * The clock box with the map badges stacked under it, as one column
+         * in the map's top-right corner - the badges follow the box down
+         * however tall it gets (file chip, balance, ...) instead of sitting
+         * at a fixed offset it can grow past.
+         */
+        #map-controls {
             position: absolute;
             top: 10px;
             right: 10px;
             z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 8px;
+        }
+
+        #map-badges {
+            display: flex;
+            gap: 8px;
+        }
+
+        #sim-clock {
             background: white;
             padding: 8px 12px;
             border-radius: 4px;
@@ -46,10 +64,6 @@
 
         #gasprice-overlay-toggle,
         #live-updates-toggle {
-            position: absolute;
-            top: 100px;
-            right: 10px;
-            z-index: 1000;
             width: 34px;
             height: 34px;
             border-radius: 50%;
@@ -61,15 +75,6 @@
             font-size: 18px;
             cursor: pointer;
             user-select: none;
-        }
-
-        /*
-         * Sits just left of the gas station toggle, same badge shape -
-         * green while live updates are on (at the Config tab's refresh
-         * setting), like the gas toggle's own active state.
-         */
-        #live-updates-toggle {
-            right: 52px;
         }
 
         .config-label {
@@ -723,6 +728,7 @@
 
 <div id="main">
     <div id="map"></div>
+    <div id="map-controls">
     <div id="sim-clock">
         <button id="current-file-label" class="current-file" onclick="returnToFileSelect()" title="Back to file select"></button>
         <div id="balance-display" class="balance-display" title="Gold Doubloons"></div>
@@ -737,8 +743,15 @@
             Auto-refuel
         </label>
     </div>
-    <div id="live-updates-toggle" class="active" onclick="toggleLiveUpdates()" title="Live updates on - click to pause">&#128225;</div>
-    <div id="gasprice-overlay-toggle" onclick="toggleGasPriceOverlay()" title="Toggle gas stations on map">&#9981;</div>
+    <!--
+        Live updates (left - green while on, at the Config tab's refresh
+        setting) and the gas station overlay (right).
+    -->
+    <div id="map-badges">
+        <div id="live-updates-toggle" class="active" onclick="toggleLiveUpdates()" title="Live updates on - click to pause">&#128225;</div>
+        <div id="gasprice-overlay-toggle" onclick="toggleGasPriceOverlay()" title="Toggle gas stations on map">&#9981;</div>
+    </div>
+    </div>
 </div>
 
 <div id="vehicle-panel">
