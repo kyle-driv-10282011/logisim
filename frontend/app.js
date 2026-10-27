@@ -34,55 +34,6 @@ function renderBalance(balance) {
 }
 
 
-//
-// Config tab's money history (GET /api/ledger) - fetched when the tab is
-// opened rather than on every refresh, since nobody needs it updating
-// while looking at something else.
-//
-const LEDGER_ENTRIES_SHOWN = 25;
-
-async function loadLedger() {
-
-    const response = await apiFetch(API + "/api/ledger?limit=" + LEDGER_ENTRIES_SHOWN);
-
-    if (!response.ok) {
-        return;
-    }
-
-    const data = await response.json();
-
-    document.getElementById("ledger-balance").textContent = formatDoubloons(data.balance);
-    renderBalance(data.balance);
-
-    const list = document.getElementById("ledger-list");
-
-    list.innerHTML = "";
-
-    if (!data.entries.length) {
-        list.innerHTML = '<div class="ledger-empty">No gas bought yet.</div>';
-        return;
-    }
-
-    for (const entry of data.entries) {
-
-        const row = document.createElement("div");
-        const description = document.createElement("span");
-        const amount = document.createElement("span");
-
-        row.className = "ledger-entry";
-
-        description.textContent = entry.description;
-        description.title = new Date(entry.created).toLocaleString();
-
-        amount.className = "ledger-amount" + (entry.amount < 0 ? " charge" : "");
-        amount.textContent = (entry.amount > 0 ? "+" : "") + formatDoubloons(entry.amount);
-
-        row.append(description, amount);
-        list.appendChild(row);
-    }
-}
-
-
 function apiFetch(url, options = {}) {
 
     const headers = new Headers(options.headers || {});
@@ -574,9 +525,6 @@ function showTab(tab) {
         loadJobs();
     }
 
-    if (tab === "config") {
-        loadLedger();
-    }
 }
 
 

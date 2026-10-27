@@ -73,8 +73,9 @@ nearest station's price plus a $75 fee. Each vehicle tracks what the gas in
 its tank cost per gallon (a new vehicle's tank is free). When a trip
 finishes, the gas it burned is refunded at that price. A gas-station detour
 carries its cost forward, so the whole journey is refunded on reaching the
-real destination. Every charge and refund is in the file's ledger (Config
-tab, `GET /api/ledger`). The balance can go negative; nothing is blocked yet.
+real destination. Every charge and refund is on the **Budget** page (tab
+menu → Budget, `GET /api/ledger`): vehicle, location, trip, cost and the
+balance after it. The balance can go negative; nothing is blocked yet.
 
 ### Outbound network access
 

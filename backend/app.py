@@ -213,23 +213,44 @@ ROADSIDE_ASSIST_FEE = 75
 
 #
 # The one way a file's balance changes: a signed amount (negative = spent),
-# rounded to the cent, written to the ledger and applied to
-# save_slots.balance in the caller's transaction - so it commits (or rolls
-# back) together with whatever it paid for.
+# rounded to the cent, applied to save_slots.balance and written to the
+# ledger with the balance it left behind - in the caller's transaction, so it
+# commits (or rolls back) together with whatever it paid for.
 #
-def record_money(cur, slot_id, amount, kind, description, vehicle_id=None):
+# vehicle_name, location and trip are stored as text, as they read at the
+# time, for the Budget page: the vehicle can be deleted, and the places and
+# path behind a trip are forgotten once nothing uses them.
+#
+def record_money(
+    cur, slot_id, amount, kind, description, vehicle_id=None, vehicle_name=None, location=None, trip=None
+):
 
     amount = round(amount, 2)
 
     if amount == 0:
         return
 
+    cur.execute("UPDATE save_slots SET balance = balance + %s WHERE id = %s RETURNING balance", (amount, slot_id))
+
+    balance_after = cur.fetchone()[0]
+
     cur.execute(
-        "INSERT INTO ledger (slot_id, amount, kind, description, vehicle_id) VALUES (%s, %s, %s, %s, %s)",
-        (slot_id, amount, kind, description, vehicle_id)
+        """
+        INSERT INTO ledger (slot_id, amount, kind, description, vehicle_id, vehicle_name, location, trip, balance_after)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (slot_id, amount, kind, description, vehicle_id, vehicle_name, location, trip, balance_after)
     )
 
-    cur.execute("UPDATE save_slots SET balance = balance + %s WHERE id = %s", (amount, slot_id))
+
+#
+# "Minneapolis → Chicago" - how a trip reads on the Budget page: where the
+# whole journey started (trips.journey_origin, which carries through a
+# gas-station detour and the resumed leg after it) to where it was going.
+#
+def journey_label(journey_origin, destination):
+
+    return f"{journey_origin or '?'} → {destination}"
 
 
 def get_balance(cur, slot_id):
@@ -273,7 +294,7 @@ def trip_fuel_pool(starting_fuel_gallons, roadside_refuel_count, fuel_tank_gallo
 #
 def buy_fuel_to_full(
     cur, slot_id, vehicle_id, vehicle_name, gallons_in_tank, tank_cost_per_gallon,
-    fuel_tank_gallons, price_per_gallon, where
+    fuel_tank_gallons, price_per_gallon, where, trip=None
 ):
 
     gallons_bought = max(0.0, fuel_tank_gallons - gallons_in_tank)
@@ -288,8 +309,8 @@ def buy_fuel_to_full(
 
     record_money(
         cur, slot_id, -cost, "gas_purchase",
-        f"{vehicle_name}: {gallons_bought:.2f} gal at ${price_per_gallon:.2f}/gal ({where})",
-        vehicle_id
+        f"Gas: {gallons_bought:.2f} gal at ${price_per_gallon:.2f}/gal",
+        vehicle_id, vehicle_name, where, trip
     )
 
     return gallons_bought, cost
@@ -458,7 +479,7 @@ def settle_arrived_vehicles(conn, cur):
             vm.mpg, vm.fuel_tank_gallons, EXTRACT(EPOCH FROM (NOW() - t.started_at)),
             t.auto_divert_claimed_at, t.trip_meter_offset_miles, t.path_id,
             s.time_multiplier, s.auto_refuel_level, v.slot_id,
-            t.fuel_value_dollars, t.carried_fuel_cost, v.name
+            t.fuel_value_dollars, t.carried_fuel_cost, v.name, t.journey_origin
         FROM vehicles v
         JOIN settings s ON s.id = v.slot_id
         JOIN trips t ON t.id = (
@@ -504,7 +525,7 @@ def settle_arrived_vehicles(conn, cur):
         starting_fuel_gallons, roadside_refuel_count, paused_seconds,
         mpg, fuel_tank_gallons, elapsed_real_seconds, auto_divert_claimed_at, trip_meter_offset_miles, path_id,
         time_multiplier, auto_refuel_level, slot_id,
-        fuel_value_dollars, carried_fuel_cost, vehicle_name
+        fuel_value_dollars, carried_fuel_cost, vehicle_name, journey_origin
     ) in rows:
 
         progress = resolve_trip_progress(
@@ -583,11 +604,21 @@ def settle_arrived_vehicles(conn, cur):
 
         destination = fetch_places_by_id(cur, [destination_place_id])[destination_place_id]
 
+        #
+        # A detour's journey is still headed for its resume destination, not
+        # the gas station it just reached.
+        #
+        journey_destination = (
+            fetch_places_by_id(cur, [resume_destination_place_id])[resume_destination_place_id]["description"]
+            if resume_destination_place_id is not None else destination["description"]
+        )
+
+        trip_label = journey_label(journey_origin, journey_destination)
+
         if resume_destination_place_id is None:
             record_money(
-                cur, slot_id, journey_fuel_cost, "gas_refund",
-                f"{vehicle_name}: gas refund for the trip to {destination['description']}",
-                vehicle_id
+                cur, slot_id, journey_fuel_cost, "gas_refund", "Gas refund: trip finished",
+                vehicle_id, vehicle_name, destination["description"], trip_label
             )
 
         if auto_refuel:
@@ -607,7 +638,7 @@ def settle_arrived_vehicles(conn, cur):
 
             buy_fuel_to_full(
                 cur, slot_id, vehicle_id, vehicle_name, remaining_fuel_gallons, pool_cost_per_gallon,
-                fuel_tank_gallons or 0.0, price, destination["description"]
+                fuel_tank_gallons or 0.0, price, destination["description"], trip_label
             )
 
         if resume_destination_place_id is not None:
@@ -617,7 +648,7 @@ def settle_arrived_vehicles(conn, cur):
             #
             pending_resumes.append((
                 vehicle_id, destination_place_id, resume_destination_place_id,
-                trip_meter_offset_miles + distances_miles[-1], journey_fuel_cost, slot_id
+                trip_meter_offset_miles + distances_miles[-1], journey_fuel_cost, journey_origin, slot_id
             ))
 
     #
@@ -661,12 +692,13 @@ def settle_arrived_vehicles(conn, cur):
     conn.commit()
 
     for job_id, (
-        vehicle_id, gas_station_place_id, resume_destination_place_id, trip_meter_offset_miles, journey_fuel_cost, _
+        vehicle_id, gas_station_place_id, resume_destination_place_id, trip_meter_offset_miles, journey_fuel_cost,
+        journey_origin, _
     ) in zip(resume_job_ids, pending_resumes):
 
         job_executor.submit(
             _run_resume_trip_job, job_id, vehicle_id, gas_station_place_id, resume_destination_place_id, False,
-            trip_meter_offset_miles, journey_fuel_cost
+            trip_meter_offset_miles, journey_fuel_cost, journey_origin
         )
 
     for vehicle_id, trip_id, progress in auto_divert_candidates:
@@ -2474,6 +2506,39 @@ def run_migrations():
         """
     )
 
+    #
+    # Budget page columns (see record_money()). Rows written before these
+    # existed get their running balance rebuilt from the amounts - every
+    # file started at STARTING_BALANCE and only ever changed through the
+    # ledger - and their vehicle's current name where it still exists.
+    #
+    for column, column_type in (
+        ("vehicle_name", "TEXT"), ("location", "TEXT"), ("trip", "TEXT"), ("balance_after", "NUMERIC(14, 2)")
+    ):
+        cur.execute(f"ALTER TABLE ledger ADD COLUMN IF NOT EXISTS {column} {column_type}")
+
+    cur.execute(
+        f"""
+        UPDATE ledger l
+        SET balance_after = running.balance_after
+        FROM (
+            SELECT id, {STARTING_BALANCE} + SUM(amount) OVER (PARTITION BY slot_id ORDER BY id) AS balance_after
+            FROM ledger
+        ) running
+        WHERE running.id = l.id AND l.balance_after IS NULL
+        """
+    )
+
+    cur.execute(
+        """
+        UPDATE ledger l SET vehicle_name = v.name
+        FROM vehicles v
+        WHERE v.id = l.vehicle_id AND l.vehicle_name IS NULL
+        """
+    )
+
+    cur.execute("ALTER TABLE trips ADD COLUMN IF NOT EXISTS journey_origin TEXT")
+
     cur.execute("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS slot_id INTEGER")
     cur.execute("ALTER TABLE jobs DROP CONSTRAINT IF EXISTS jobs_slot_id_fkey")
     cur.execute(
@@ -3403,20 +3468,28 @@ def erase_save_slot(slot_id: int):
 # fee (see record_money()).
 #
 @app.get("/api/ledger")
-def list_ledger(limit: int = 50, slot: int = Depends(current_slot)):
+def list_ledger(limit: int = 50, before_id: Optional[int] = None, slot: int = Depends(current_slot)):
+
+    limit = max(1, min(limit, 500))
 
     conn = db()
     cur = conn.cursor()
 
+    #
+    # before_id pages backwards (the Budget page's "Load older"): entries
+    # older than the last one already shown. One extra row is fetched just
+    # to know whether there's anything left after this page.
+    #
     cur.execute(
         """
-        SELECT id, amount, kind, description, created
+        SELECT id, amount, kind, description, created, vehicle_name, location, trip, balance_after
         FROM ledger
         WHERE slot_id = %s
+        AND (%s::int IS NULL OR id < %s::int)
         ORDER BY id DESC
         LIMIT %s
         """,
-        (slot, max(1, min(limit, 500)))
+        (slot, before_id, before_id, limit + 1)
     )
 
     rows = cur.fetchall()
@@ -3428,6 +3501,7 @@ def list_ledger(limit: int = 50, slot: int = Depends(current_slot)):
 
     return {
         "balance": balance,
+        "has_more": len(rows) > limit,
         "entries": [
             {
                 "id": row[0],
@@ -3435,8 +3509,12 @@ def list_ledger(limit: int = 50, slot: int = Depends(current_slot)):
                 "kind": row[2],
                 "description": row[3],
                 "created": row[4].replace(tzinfo=ZoneInfo("UTC")),
+                "vehicle": row[5],
+                "location": row[6],
+                "trip": row[7],
+                "balance_after": float(row[8]) if row[8] is not None else None,
             }
-            for row in rows
+            for row in rows[:limit]
         ]
     }
 
@@ -4311,7 +4389,8 @@ def roadside_refuel_vehicle(id: int, slot: int = Depends(current_slot)):
         SELECT
             t.id, t.paused_seconds, t.roadside_refuel_count, t.starting_fuel_gallons,
             t.realized_seconds, t.realized_duration_seconds, p.distances_miles,
-            vs.mpg, vs.fuel_tank_gallons, EXTRACT(EPOCH FROM (NOW() - t.started_at)), p.route
+            vs.mpg, vs.fuel_tank_gallons, EXTRACT(EPOCH FROM (NOW() - t.started_at)), p.route,
+            t.journey_origin, COALESCE(t.resume_destination_place_id, p.destination_place_id)
         FROM trips t
         JOIN paths p ON p.id = t.path_id
         JOIN vehicles v ON v.id = t.vehicle_id
@@ -4334,7 +4413,8 @@ def roadside_refuel_vehicle(id: int, slot: int = Depends(current_slot)):
     (
         trip_id, paused_seconds, roadside_refuel_count, starting_fuel_gallons,
         realized_seconds, realized_duration_seconds, distances_miles,
-        mpg, fuel_tank_gallons, elapsed_real_seconds, route
+        mpg, fuel_tank_gallons, elapsed_real_seconds, route,
+        journey_origin, journey_destination_place_id
     ) = row
 
     elapsed_real_seconds = float(elapsed_real_seconds)
@@ -4380,14 +4460,23 @@ def roadside_refuel_vehicle(id: int, slot: int = Depends(current_slot)):
         (new_paused_seconds, new_roadside_refuel_count, gas_cost, trip_id)
     )
 
-    record_money(
-        cur, slot, -gas_cost, "gas_purchase",
-        f"{vehicle_name}: roadside fuel, {fuel_tank_gallons:.2f} gal at ${price_per_gallon:.2f}/gal "
-        f"(nearest station's price)",
-        id
+    trip_label = journey_label(
+        journey_origin,
+        fetch_places_by_id(cur, [journey_destination_place_id])[journey_destination_place_id]["description"]
     )
 
-    record_money(cur, slot, -ROADSIDE_ASSIST_FEE, "roadside_fee", f"{vehicle_name}: roadside assistance fee", id)
+    location = f"Roadside, near {nearest['description']}" if nearest else "Roadside"
+
+    record_money(
+        cur, slot, -gas_cost, "gas_purchase",
+        f"Roadside gas: {fuel_tank_gallons:.2f} gal at ${price_per_gallon:.2f}/gal (nearest station's price)",
+        id, vehicle_name, location, trip_label
+    )
+
+    record_money(
+        cur, slot, -ROADSIDE_ASSIST_FEE, "roadside_fee", "Roadside assistance fee",
+        id, vehicle_name, location, trip_label
+    )
 
     conn.commit()
 
@@ -5672,7 +5761,7 @@ def start_diversion_trip(
     origin_place_id, origin_lat, origin_lng,
     destination_place_id, destination_lat, destination_lng,
     starting_fuel_gallons, resume_destination_place_id, auto_refuel, trip_meter_offset_miles=0.0,
-    carried_fuel_cost=0.0
+    carried_fuel_cost=0.0, journey_origin=None
 ):
 
     #
@@ -5700,14 +5789,21 @@ def start_diversion_trip(
     cur.execute("SELECT fuel_cost_per_gallon FROM vehicles WHERE id = %s", (vehicle_id,))
     fuel_value_dollars = starting_fuel_gallons * cur.fetchone()[0]
 
+    #
+    # A fresh journey (a Refuel drive) starts here; a detour or resumed leg
+    # keeps the journey_origin it was handed.
+    #
+    if journey_origin is None:
+        journey_origin = fetch_places_by_id(cur, [origin_place_id])[origin_place_id]["description"]
+
     cur.execute(
         """
         INSERT INTO trips
-        (vehicle_id, path_id, distance_miles, traffic_base_datetime, traffic_bias, zones_snapshot, starting_fuel_gallons, resume_destination_place_id, auto_refuel, trip_meter_offset_miles, fuel_value_dollars, carried_fuel_cost)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        (vehicle_id, path_id, distance_miles, traffic_base_datetime, traffic_bias, zones_snapshot, starting_fuel_gallons, resume_destination_place_id, auto_refuel, trip_meter_offset_miles, fuel_value_dollars, carried_fuel_cost, journey_origin)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
-        (vehicle_id, path_id, distances_miles[-1], game_time, 1.0, json.dumps(zones), starting_fuel_gallons, resume_destination_place_id, auto_refuel, trip_meter_offset_miles, fuel_value_dollars, carried_fuel_cost)
+        (vehicle_id, path_id, distances_miles[-1], game_time, 1.0, json.dumps(zones), starting_fuel_gallons, resume_destination_place_id, auto_refuel, trip_meter_offset_miles, fuel_value_dollars, carried_fuel_cost, journey_origin)
     )
 
     trip_id = cur.fetchone()[0]
@@ -5756,14 +5852,17 @@ def _divert_to_gas_station(
             FROM vehicles v, vehicle_models vm
             WHERE t.id = %s AND v.id = t.vehicle_id AND vm.id = v.vehicle_model_id
             RETURNING t.trip_meter_offset_miles, t.path_id, t.starting_fuel_gallons, t.roadside_refuel_count,
-                vm.fuel_tank_gallons, t.fuel_value_dollars, t.carried_fuel_cost
+                vm.fuel_tank_gallons, t.fuel_value_dollars, t.carried_fuel_cost,
+                COALESCE(t.journey_origin, (
+                    SELECT pl.description FROM paths p JOIN places pl ON pl.id = p.origin_place_id WHERE p.id = t.path_id
+                ))
             """,
             (current_trip_id,)
         )
 
         (
             previous_trip_meter_offset_miles, cancelled_path_id, starting_fuel_gallons, roadside_refuel_count,
-            fuel_tank_gallons, fuel_value_dollars, carried_fuel_cost
+            fuel_tank_gallons, fuel_value_dollars, carried_fuel_cost, journey_origin
         ) = cur.fetchone()
 
         trip_meter_offset_miles = previous_trip_meter_offset_miles + partial_miles_driven
@@ -5833,7 +5932,8 @@ def _divert_to_gas_station(
             conn, cur, vehicle_id,
             origin_place_id, lat, lng,
             gas_station_place_id, station["lat"], station["lng"],
-            current_fuel_gallons, resume_destination_place_id, True, trip_meter_offset_miles, journey_fuel_cost
+            current_fuel_gallons, resume_destination_place_id, True, trip_meter_offset_miles, journey_fuel_cost,
+            journey_origin
         )
 
         forget_unused_paths(cur, possibly_unused_path_ids)
@@ -5916,7 +6016,8 @@ def _run_auto_divert_job(
 # (auto_refuel=True - see settle_arrived_vehicles()).
 #
 def _resume_trip_after_refuel(
-    vehicle_id, origin_place_id, destination_place_id, auto_refuel, trip_meter_offset_miles=0.0, carried_fuel_cost=0.0
+    vehicle_id, origin_place_id, destination_place_id, auto_refuel, trip_meter_offset_miles=0.0, carried_fuel_cost=0.0,
+    journey_origin=None
 ):
 
     conn = db()
@@ -5935,7 +6036,7 @@ def _resume_trip_after_refuel(
             conn, cur, vehicle_id,
             origin_place_id, origin["lat"], origin["lng"],
             destination_place_id, destination["lat"], destination["lng"],
-            fuel_gallons, None, auto_refuel, trip_meter_offset_miles, carried_fuel_cost
+            fuel_gallons, None, auto_refuel, trip_meter_offset_miles, carried_fuel_cost, journey_origin
         )
 
         conn.commit()
@@ -5949,14 +6050,15 @@ def _resume_trip_after_refuel(
 
 def _run_resume_trip_job(
     job_id, vehicle_id, origin_place_id, destination_place_id, auto_refuel, trip_meter_offset_miles=0.0,
-    carried_fuel_cost=0.0
+    carried_fuel_cost=0.0, journey_origin=None
 ):
 
     update_job(job_id, status="running")
 
     try:
         result = _resume_trip_after_refuel(
-            vehicle_id, origin_place_id, destination_place_id, auto_refuel, trip_meter_offset_miles, carried_fuel_cost
+            vehicle_id, origin_place_id, destination_place_id, auto_refuel, trip_meter_offset_miles, carried_fuel_cost,
+            journey_origin
         )
     except Exception as e:
         update_job(job_id, status="error", error=getattr(e, "detail", str(e)))
@@ -6437,13 +6539,14 @@ def start_trip_on_path(vehicle_id, path_id, traffic_bias=1.0, simulated_datetime
     #
     cur.execute(
         """
-        INSERT INTO trips (vehicle_id, path_id, distance_miles, traffic_base_datetime, traffic_bias, zones_snapshot, starting_fuel_gallons, fuel_value_dollars)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO trips (vehicle_id, path_id, distance_miles, traffic_base_datetime, traffic_bias, zones_snapshot, starting_fuel_gallons, fuel_value_dollars, journey_origin)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
         (
             vehicle_id, path_id, distances_miles[-1], traffic_base_datetime, traffic_bias, json.dumps(zones),
-            vehicle_fuel_gallons, vehicle_fuel_gallons * vehicle_fuel_cost_per_gallon
+            vehicle_fuel_gallons, vehicle_fuel_gallons * vehicle_fuel_cost_per_gallon,
+            fetch_places_by_id(cur, [vehicle_place_id])[vehicle_place_id]["description"]
         )
     )
 

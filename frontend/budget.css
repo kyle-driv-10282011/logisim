@@ -1,0 +1,137 @@
+/*
+ * The Budget page (budget.js): a full-width sheet over the map and panel,
+ * below the file-select screen.
+ */
+
+.budget-page {
+    position: fixed;
+    inset: 0;
+    z-index: 4000;
+    display: flex;
+    justify-content: center;
+    padding: 24px 16px;
+    overflow-y: auto;
+    background: rgba(18, 26, 82, 0.55);
+}
+
+.budget-sheet {
+    width: 100%;
+    max-width: 1100px;
+    align-self: flex-start;
+    padding: 18px 20px 20px;
+    background: white;
+    border-radius: 6px;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+    box-sizing: border-box;
+}
+
+.budget-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 14px;
+}
+
+.budget-title {
+    font-size: 20px;
+    font-weight: bold;
+}
+
+.budget-subtitle {
+    font-size: 13px;
+    color: #555;
+}
+
+#budget-balance {
+    color: #8a6d00;
+}
+
+#budget-balance.negative {
+    color: #c92a2a;
+}
+
+.budget-close {
+    font-size: 22px;
+    line-height: 1;
+    padding: 2px 10px;
+    cursor: pointer;
+}
+
+/* Scrolls sideways on its own on a narrow screen, rather than the page. */
+.budget-table-wrap {
+    overflow-x: auto;
+}
+
+.budget-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+
+.budget-table th {
+    position: sticky;
+    top: 0;
+    padding: 8px 10px;
+    text-align: left;
+    font-size: 12px;
+    color: #555;
+    background: #f5f5f5;
+    border-bottom: 2px solid #ddd;
+    white-space: nowrap;
+}
+
+.budget-table td {
+    padding: 8px 10px;
+    vertical-align: top;
+    border-bottom: 1px solid #eee;
+}
+
+.budget-table tbody tr:hover {
+    background: #fafafa;
+}
+
+.budget-table .budget-cost,
+.budget-table .budget-balance-after {
+    text-align: right;
+    white-space: nowrap;
+}
+
+.budget-amount {
+    font-weight: bold;
+}
+
+.budget-amount.charge {
+    color: #c92a2a;
+}
+
+.budget-amount.refund {
+    color: #2f9e44;
+}
+
+.budget-detail {
+    font-size: 11px;
+    color: #777;
+    white-space: normal;
+    min-width: 160px;
+}
+
+.budget-balance-after {
+    font-variant-numeric: tabular-nums;
+}
+
+.budget-balance-after.negative {
+    color: #c92a2a;
+}
+
+.budget-status {
+    padding: 14px 4px 0;
+    font-size: 13px;
+    color: #777;
+}
+
+.budget-load-more {
+    display: block;
+    margin: 14px auto 0;
+    padding: 6px 16px;
+}

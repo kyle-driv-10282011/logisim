@@ -395,7 +395,12 @@ CREATE TABLE trips (
     -- yet - a leg cancelled for a diversion and the gas-station detour
     -- itself pass theirs on, so the whole journey's gas is refunded together
     -- once it reaches its real destination.
-    carried_fuel_cost DOUBLE PRECISION NOT NULL DEFAULT 0
+    carried_fuel_cost DOUBLE PRECISION NOT NULL DEFAULT 0,
+
+    -- Where this leg's whole journey started - carried through a
+    -- gas-station detour and the resumed leg after it, so the Budget page
+    -- labels every leg's charges as the same trip (journey_label() in app.py).
+    journey_origin TEXT
 );
 
 
@@ -416,6 +421,16 @@ CREATE TABLE ledger (
     description TEXT NOT NULL,
 
     vehicle_id INTEGER REFERENCES vehicles(id) ON DELETE SET NULL,
+
+    -- What the Budget page shows, stored as text as it read at the time:
+    -- the vehicle can be deleted, and the places/path behind a trip are
+    -- forgotten once nothing uses them (see record_money() in app.py).
+    vehicle_name TEXT,
+    location TEXT,
+    trip TEXT,
+
+    -- The file's balance right after this entry.
+    balance_after NUMERIC(14, 2),
 
     created TIMESTAMP DEFAULT NOW()
 );

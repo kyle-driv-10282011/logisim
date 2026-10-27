@@ -10,6 +10,7 @@
 
     <link rel="stylesheet" href="styles.css">
     <link rel="stylesheet" href="fileselect.css">
+    <link rel="stylesheet" href="budget.css">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap">
 
     <style>
@@ -155,30 +156,6 @@
 
         .config-button:hover {
             background: #e3e3e3;
-        }
-
-        .ledger-entry {
-            display: flex;
-            justify-content: space-between;
-            gap: 8px;
-            padding: 3px 0;
-            border-bottom: 1px solid #eee;
-            font-size: 11px;
-        }
-
-        .ledger-entry .ledger-amount {
-            flex-shrink: 0;
-            font-weight: bold;
-            color: #2f9e44;
-        }
-
-        .ledger-entry .ledger-amount.charge {
-            color: #c92a2a;
-        }
-
-        .ledger-empty {
-            font-size: 11px;
-            color: #777;
         }
 
         .config-hint {
@@ -710,6 +687,38 @@
     </div>
 </div>
 
+<!--
+    Full-width page over the map, opened from the tab menu's "Budget" entry
+    (budget.js) - every Gold Doubloon charged or refunded in this file.
+-->
+<div id="budget-page" class="budget-page" style="display:none">
+    <div class="budget-sheet">
+        <div class="budget-header">
+            <div>
+                <div class="budget-title">Budget</div>
+                <div class="budget-subtitle">Gold Doubloons &middot; balance <b id="budget-balance"></b></div>
+            </div>
+            <button class="budget-close" onclick="closeBudgetPage()" title="Close (Esc)">&times;</button>
+        </div>
+        <div class="budget-table-wrap">
+            <table class="budget-table">
+                <thead>
+                    <tr>
+                        <th>Vehicle</th>
+                        <th>Location</th>
+                        <th>Trip</th>
+                        <th class="budget-cost">Cost</th>
+                        <th class="budget-balance-after">New balance</th>
+                    </tr>
+                </thead>
+                <tbody id="budget-rows"></tbody>
+            </table>
+        </div>
+        <div id="budget-status" class="budget-status"></div>
+        <button id="budget-load-more" class="budget-load-more" onclick="withSpinner(this, loadBudgetPage)" style="display:none">Load older</button>
+    </div>
+</div>
+
 <div id="app">
 
 <div id="main">
@@ -745,6 +754,7 @@
             <button class="tab-button" id="tab-button-gasprices" onclick="withSpinner(this, () => showTab('gasprices'))">Gas Prices</button>
             <button class="tab-button" id="tab-button-jobs" onclick="withSpinner(this, () => showTab('jobs'))">Background Jobs</button>
             <button class="tab-button" id="tab-button-config" onclick="withSpinner(this, () => showTab('config'))">Config</button>
+            <button class="tab-button" id="tab-button-budget" onclick="openBudgetPage()">Budget</button>
         </div>
     </div>
 
@@ -850,14 +860,6 @@
 
     <div class="tab-content" id="tab-config">
 
-        <div class="panel-form">
-            <span class="config-label"><b>Gold Doubloons</b> &middot; <span id="ledger-balance"></span></span>
-            <div class="config-hint">
-                Gas is charged when it's bought and refunded, at the price paid, for the gas a trip burns once it
-                finishes. A roadside refuel also costs a non-refundable fee.
-            </div>
-            <div id="ledger-list"></div>
-        </div>
 
         <div class="panel-form">
             <label for="refresh-interval-slider" class="config-label">
@@ -910,6 +912,7 @@
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="app.js"></script>
+<script src="budget.js"></script>
 <script src="fileselect.js"></script>
 
 </body>
