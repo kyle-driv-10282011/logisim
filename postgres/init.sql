@@ -405,7 +405,14 @@ CREATE TABLE trips (
     -- The id of the journey's first leg, carried the same way - what the
     -- Budget page's trip filter groups a journey's charges by, so two
     -- separate drives along the same route stay two trips.
-    journey_id INTEGER
+    journey_id INTEGER,
+
+    -- The route points this journey already drove on earlier legs (the
+    -- stretch of a leg cancelled for a diversion, and a whole gas-station
+    -- detour), carried forward leg to leg - those legs' paths are forgotten
+    -- once driven, so this is what lets the map draw the whole trip
+    -- (driven_route_prefix() in app.py).
+    journey_route_before JSONB NOT NULL DEFAULT '[]'
 );
 
 

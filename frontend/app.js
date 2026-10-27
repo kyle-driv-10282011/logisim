@@ -212,7 +212,7 @@ async function setTimeMultiplier() {
     updateSimClock();
 }
 
-const tripLayers = new Map();      // vehicle_id -> { marker, routeLine }
+const tripLayers = new Map();      // vehicle_id -> { marker, routeLine, tripId }
 let vehicleModelsById = new Map();         // vehicle_model_id -> vehicle model (from GET /api/vehicle-models)
 let vehiclesById = new Map();      // vehicle_id -> vehicle - current fleet, not sold (from GET /api/vehicles)
 let activeTripsById = new Map();   // vehicle_id -> trip (from the last poll)
@@ -2253,9 +2253,16 @@ async function pollActiveTrips() {
 
         let layer = tripLayers.get(trip.vehicle_id);
 
+        //
+        // The whole journey, not just the leg being driven: after a
+        // gas-station detour the current leg only starts at the station, so
+        // what was already driven (journey_route_before) goes in front of it.
+        //
+        const journeyRoute = trip.journey_route_before.concat(trip.route);
+
         if (!layer) {
 
-            const routeLine = L.polyline(trip.route, {
+            const routeLine = L.polyline(journeyRoute, {
 
                 color: "blue",
 
@@ -2271,9 +2278,20 @@ async function pollActiveTrips() {
 
             marker.on("click", () => selectVehicle(trip.vehicle_id));
 
-            layer = { marker, routeLine };
+            layer = { marker, routeLine, tripId: trip.trip_id };
 
             tripLayers.set(trip.vehicle_id, layer);
+        }
+
+        //
+        // A vehicle stays on the map from one leg to the next (diverting to a
+        // station, resuming after it), so its line is redrawn whenever the leg
+        // changes - otherwise it kept showing whichever leg it was first
+        // drawn for.
+        //
+        if (layer.tripId !== trip.trip_id) {
+            layer.routeLine.setLatLngs(journeyRoute);
+            layer.tripId = trip.trip_id;
         }
 
         layer.marker.setLatLng(trip.position);

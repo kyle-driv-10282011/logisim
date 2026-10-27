@@ -686,13 +686,31 @@ def settle_arrived_vehicles(conn, cur):
             )
 
         if resume_destination_place_id is not None:
+
+            #
+            # Likewise the route the journey has driven: everything before the
+            # detour plus the whole detour, read now - only on this arrival,
+            # not every settle - before the detour's path is forgotten below.
+            #
+            cur.execute(
+                """
+                SELECT t.journey_route_before, p.route
+                FROM trips t JOIN paths p ON p.id = t.path_id
+                WHERE t.id = %s
+                """,
+                (trip_id,)
+            )
+
+            route_before, detour_route = cur.fetchone()
+
             #
             # The resumed leg's trip meter picks up where this detour's
             # ended - everything before the detour plus the detour itself.
             #
             pending_resumes.append((
                 vehicle_id, destination_place_id, resume_destination_place_id,
-                trip_meter_offset_miles + distances_miles[-1], journey_fuel_cost, journey_origin, journey_id, slot_id
+                trip_meter_offset_miles + distances_miles[-1], journey_fuel_cost, journey_origin, journey_id,
+                (route_before or []) + detour_route, slot_id
             ))
 
     #
@@ -737,12 +755,12 @@ def settle_arrived_vehicles(conn, cur):
 
     for job_id, (
         vehicle_id, gas_station_place_id, resume_destination_place_id, trip_meter_offset_miles, journey_fuel_cost,
-        journey_origin, journey_id, _
+        journey_origin, journey_id, journey_route_before, _
     ) in zip(resume_job_ids, pending_resumes):
 
         job_executor.submit(
             _run_resume_trip_job, job_id, vehicle_id, gas_station_place_id, resume_destination_place_id, False,
-            trip_meter_offset_miles, journey_fuel_cost, journey_origin, journey_id
+            trip_meter_offset_miles, journey_fuel_cost, journey_origin, journey_id, journey_route_before
         )
 
     for vehicle_id, trip_id, progress in auto_divert_candidates:
@@ -2592,6 +2610,8 @@ def run_migrations():
     cur.execute("ALTER TABLE trips ADD COLUMN IF NOT EXISTS journey_id INTEGER")
     cur.execute("UPDATE trips SET journey_id = id WHERE journey_id IS NULL")
     cur.execute("ALTER TABLE ledger ADD COLUMN IF NOT EXISTS journey_id INTEGER")
+
+    cur.execute("ALTER TABLE trips ADD COLUMN IF NOT EXISTS journey_route_before JSONB NOT NULL DEFAULT '[]'")
 
     cur.execute("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS slot_id INTEGER")
     cur.execute("ALTER TABLE jobs DROP CONSTRAINT IF EXISTS jobs_slot_id_fkey")
@@ -5789,6 +5809,19 @@ def insert_routed_path(
 
 
 #
+# The part of a leg's route actually driven so far: every route point up to
+# driven_miles, ending exactly at the vehicle's position there. A journey's
+# earlier legs keep this (trips.journey_route_before) since their paths are
+# forgotten once driven, so the map can still draw the whole trip.
+#
+def driven_route_prefix(route, distances_miles, driven_miles, position):
+
+    index = bisect.bisect_right(distances_miles, driven_miles)
+
+    return [list(point) for point in route[:index]] + [list(position)]
+
+
+#
 # Paths are behind-the-scenes and short-lived: one only exists while some
 # vehicle is actually driving it. "Driving it" means a vehicle's latest
 # trip is an uncancelled one on this path that hasn't settled yet (the
@@ -5896,7 +5929,7 @@ def start_diversion_trip(
     origin_place_id, origin_lat, origin_lng,
     destination_place_id, destination_lat, destination_lng,
     starting_fuel_gallons, resume_destination_place_id, auto_refuel, trip_meter_offset_miles=0.0,
-    carried_fuel_cost=0.0, journey_origin=None, journey_id=None
+    carried_fuel_cost=0.0, journey_origin=None, journey_id=None, journey_route_before=None
 ):
 
     #
@@ -5934,11 +5967,11 @@ def start_diversion_trip(
     cur.execute(
         """
         INSERT INTO trips
-        (vehicle_id, path_id, distance_miles, traffic_base_datetime, traffic_bias, zones_snapshot, starting_fuel_gallons, resume_destination_place_id, auto_refuel, trip_meter_offset_miles, fuel_value_dollars, carried_fuel_cost, journey_origin, journey_id)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        (vehicle_id, path_id, distance_miles, traffic_base_datetime, traffic_bias, zones_snapshot, starting_fuel_gallons, resume_destination_place_id, auto_refuel, trip_meter_offset_miles, fuel_value_dollars, carried_fuel_cost, journey_origin, journey_id, journey_route_before)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
-        (vehicle_id, path_id, distances_miles[-1], game_time, 1.0, json.dumps(zones), starting_fuel_gallons, resume_destination_place_id, auto_refuel, trip_meter_offset_miles, fuel_value_dollars, carried_fuel_cost, journey_origin, journey_id)
+        (vehicle_id, path_id, distances_miles[-1], game_time, 1.0, json.dumps(zones), starting_fuel_gallons, resume_destination_place_id, auto_refuel, trip_meter_offset_miles, fuel_value_dollars, carried_fuel_cost, journey_origin, journey_id, json.dumps(journey_route_before or []))
     )
 
     trip_id = cur.fetchone()[0]
@@ -5997,15 +6030,28 @@ def _divert_to_gas_station(
                 COALESCE(t.journey_origin, (
                     SELECT pl.description FROM paths p JOIN places pl ON pl.id = p.origin_place_id WHERE p.id = t.path_id
                 )),
-                COALESCE(t.journey_id, t.id)
+                COALESCE(t.journey_id, t.id),
+                t.journey_route_before
             """,
             (current_trip_id,)
         )
 
         (
             previous_trip_meter_offset_miles, cancelled_path_id, starting_fuel_gallons, roadside_refuel_count,
-            fuel_tank_gallons, fuel_value_dollars, carried_fuel_cost, journey_origin, journey_id
+            fuel_tank_gallons, fuel_value_dollars, carried_fuel_cost, journey_origin, journey_id, route_before
         ) = cur.fetchone()
+
+        #
+        # The cancelled leg's path is about to be forgotten, so the stretch of
+        # it actually driven is kept on the journey for the map.
+        #
+        cur.execute("SELECT route, distances_miles FROM paths WHERE id = %s", (cancelled_path_id,))
+
+        cancelled_route, cancelled_distances_miles = cur.fetchone()
+
+        journey_route_before = (route_before or []) + driven_route_prefix(
+            cancelled_route, cancelled_distances_miles, partial_miles_driven, [lat, lng]
+        )
 
         trip_meter_offset_miles = previous_trip_meter_offset_miles + partial_miles_driven
 
@@ -6075,7 +6121,7 @@ def _divert_to_gas_station(
             origin_place_id, lat, lng,
             gas_station_place_id, station["lat"], station["lng"],
             current_fuel_gallons, resume_destination_place_id, True, trip_meter_offset_miles, journey_fuel_cost,
-            journey_origin, journey_id
+            journey_origin, journey_id, journey_route_before
         )
 
         forget_unused_paths(cur, possibly_unused_path_ids)
@@ -6159,7 +6205,7 @@ def _run_auto_divert_job(
 #
 def _resume_trip_after_refuel(
     vehicle_id, origin_place_id, destination_place_id, auto_refuel, trip_meter_offset_miles=0.0, carried_fuel_cost=0.0,
-    journey_origin=None, journey_id=None
+    journey_origin=None, journey_id=None, journey_route_before=None
 ):
 
     conn = db()
@@ -6178,7 +6224,8 @@ def _resume_trip_after_refuel(
             conn, cur, vehicle_id,
             origin_place_id, origin["lat"], origin["lng"],
             destination_place_id, destination["lat"], destination["lng"],
-            fuel_gallons, None, auto_refuel, trip_meter_offset_miles, carried_fuel_cost, journey_origin, journey_id
+            fuel_gallons, None, auto_refuel, trip_meter_offset_miles, carried_fuel_cost, journey_origin, journey_id,
+            journey_route_before
         )
 
         conn.commit()
@@ -6192,7 +6239,7 @@ def _resume_trip_after_refuel(
 
 def _run_resume_trip_job(
     job_id, vehicle_id, origin_place_id, destination_place_id, auto_refuel, trip_meter_offset_miles=0.0,
-    carried_fuel_cost=0.0, journey_origin=None, journey_id=None
+    carried_fuel_cost=0.0, journey_origin=None, journey_id=None, journey_route_before=None
 ):
 
     update_job(job_id, status="running")
@@ -6200,7 +6247,7 @@ def _run_resume_trip_job(
     try:
         result = _resume_trip_after_refuel(
             vehicle_id, origin_place_id, destination_place_id, auto_refuel, trip_meter_offset_miles, carried_fuel_cost,
-            journey_origin, journey_id
+            journey_origin, journey_id, journey_route_before
         )
     except Exception as e:
         update_job(job_id, status="error", error=getattr(e, "detail", str(e)))
@@ -6912,6 +6959,7 @@ def active_trips(refresh_on: str = "never", every_miles: Optional[float] = None,
             t.starting_fuel_gallons,
             t.roadside_refuel_count,
             t.paused_seconds,
+            t.journey_route_before,
             t.auto_refuel,
             t.resume_destination_place_id,
             t.trip_meter_offset_miles,
@@ -6980,6 +7028,7 @@ def active_trips(refresh_on: str = "never", every_miles: Optional[float] = None,
         starting_fuel_gallons,
         roadside_refuel_count,
         paused_seconds,
+        journey_route_before,
         auto_refuel,
         resume_destination_place_id,
         trip_meter_offset_miles,
@@ -7058,7 +7107,14 @@ def active_trips(refresh_on: str = "never", every_miles: Optional[float] = None,
             # distance_miles stays per-leg since fuel/stranding math and the
             # odometer depend on that.
             #
-            "trip_meter_miles": trip_meter_offset_miles + derived["distance_miles"]
+            "trip_meter_miles": trip_meter_offset_miles + derived["distance_miles"],
+
+            #
+            # What this journey already drove on earlier legs (before a
+            # gas-station detour, and the detour itself) - the map draws it
+            # ahead of route so the whole trip stays on screen.
+            #
+            "journey_route_before": journey_route_before or []
         })
 
         if derived["status"] == "DRIVING":
