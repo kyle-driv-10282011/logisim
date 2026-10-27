@@ -745,8 +745,8 @@
 -->
 <!--
     The new-file intro (showIntroSplash() in fileselect.js): shown once,
-    over the map, right after a new file is started; fades away on its own
-    or on any click/key.
+    over the map, right after a new file is started; stays until START is
+    pressed, then fades away.
 -->
 <div id="intro-splash" class="file-select intro-splash" style="display:none">
     <div class="intro-sun"></div>
@@ -759,6 +759,7 @@
         Extended Full Size Van. You've decided to use it to start your very own
         delivery service.
     </div>
+    <button id="intro-start" class="intro-start">START</button>
 </div>
 
 <div id="file-select" class="file-select">

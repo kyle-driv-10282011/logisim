@@ -214,7 +214,6 @@
     flex-direction: column;
     gap: 28px;
     overflow: hidden;
-    cursor: pointer;
     background:
         repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.12) 0 2px, transparent 2px 4px),
         linear-gradient(180deg, #12002b 0%, #2d0b52 30%, #6a1b74 48%, #d1477a 58%, #ff9a6b 62%, #1a0633 62%, #0b0220 100%);
@@ -301,6 +300,38 @@
     box-shadow: 0 0 24px rgba(255, 79, 216, 0.35);
     text-shadow: 0 0 6px #ff4fd8, 0 0 14px rgba(90, 220, 255, 0.7);
     animation: intro-fade-in 2s ease 0.8s both;
+}
+
+/* Arcade-style, pulsing once it's faded in after the story. */
+.intro-start {
+    position: relative;
+    font-family: inherit;
+    font-size: 18px;
+    letter-spacing: 4px;
+    padding: 14px 34px;
+    color: #fff1a8;
+    background: linear-gradient(180deg, #ff4fd8 0%, #8a2be2 100%);
+    border: 3px solid #fff1a8;
+    border-radius: 6px;
+    box-shadow: 0 0 18px rgba(255, 79, 216, 0.7), 0 5px 0 #3b0a5c;
+    text-shadow: 0 0 8px #ff4fd8;
+    cursor: pointer;
+    animation: intro-fade-in 1.5s ease 1.8s both, intro-start-pulse 1.6s ease-in-out 3.3s infinite;
+}
+
+.intro-start:hover,
+.intro-start:focus-visible {
+    outline: none;
+    filter: brightness(1.15);
+}
+
+.intro-start:active {
+    transform: translateY(4px);
+    box-shadow: 0 0 18px rgba(255, 79, 216, 0.7), 0 1px 0 #3b0a5c;
+}
+
+@keyframes intro-start-pulse {
+    50% { box-shadow: 0 0 34px rgba(255, 79, 216, 1), 0 5px 0 #3b0a5c; }
 }
 
 @keyframes intro-fade-in {

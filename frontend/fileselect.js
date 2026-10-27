@@ -297,26 +297,23 @@ async function startNewFile() {
 
 //
 // The new file's story card, between the file-select screen and the map.
-// The map loads underneath it meanwhile (playFile() already ran), so it's
-// ready by the time the card fades. Any click or key skips ahead.
+// The map loads underneath it meanwhile (playFile() already ran). It stays
+// up until START is pressed (focused, so Enter works too), then fades.
 //
-const INTRO_SPLASH_HOLD_MS = 7000;
 const INTRO_SPLASH_FADE_MS = 1500;
 
 function showIntroSplash() {
 
     const splash = document.getElementById("intro-splash");
+    const start = document.getElementById("intro-start");
 
     splash.style.display = "";
+    start.disabled = false;
+    start.focus();
 
-    let holdTimer = null;
+    start.onclick = () => {
 
-    const fadeAway = () => {
-
-        clearTimeout(holdTimer);
-
-        splash.removeEventListener("click", fadeAway);
-        document.removeEventListener("keydown", fadeAway);
+        start.disabled = true;
 
         splash.classList.add("fading");
 
@@ -325,11 +322,6 @@ function showIntroSplash() {
             splash.classList.remove("fading");
         }, INTRO_SPLASH_FADE_MS);
     };
-
-    holdTimer = setTimeout(fadeAway, INTRO_SPLASH_HOLD_MS);
-
-    splash.addEventListener("click", fadeAway);
-    document.addEventListener("keydown", fadeAway);
 }
 
 
