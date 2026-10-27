@@ -244,6 +244,48 @@ def record_money(
 
 
 #
+# Ledger rows written before the Budget page's location/trip columns
+# existed only have the old one-line description, e.g.
+#   "2026 Chevy Express 1: 15.17 gal at $4.74/gal (Rb'S One Stop, Kaysville)"
+#   "2026 Chevy Express 1: gas refund for the trip to Chicago"
+#   "2026 Chevy Express 1: roadside assistance fee"
+# The location is recoverable from that text, and the description is
+# rewritten to today's style (no vehicle prefix - it has its own column).
+# The trip itself was never recorded and its path is long forgotten, so that
+# stays empty. Only touches rows with no location yet, so it runs once.
+#
+OLD_LEDGER_PURCHASE_PATTERN = re.compile(r"^(?:.*?: )?(?P<what>[0-9.]+ gal at \$[0-9.]+/gal) \((?P<where>.*)\)$")
+OLD_LEDGER_ROADSIDE_PATTERN = re.compile(r"^(?:.*?: )?roadside fuel, (?P<what>[0-9.]+ gal at \$[0-9.]+/gal)", re.IGNORECASE)
+OLD_LEDGER_REFUND_PATTERN = re.compile(r"^(?:.*?: )?gas refund for the trip to (?P<where>.+)$", re.IGNORECASE)
+OLD_LEDGER_FEE_PATTERN = re.compile(r"^(?:.*?: )?roadside assistance fee$", re.IGNORECASE)
+
+
+def backfill_old_ledger_locations(cur):
+
+    cur.execute("SELECT id, description FROM ledger WHERE location IS NULL AND trip IS NULL")
+
+    for ledger_id, description in cur.fetchall():
+
+        location = None
+        new_description = None
+
+        if match := OLD_LEDGER_PURCHASE_PATTERN.match(description):
+            location, new_description = match["where"], f"Gas: {match['what']}"
+        elif match := OLD_LEDGER_ROADSIDE_PATTERN.match(description):
+            location, new_description = "Roadside", f"Roadside gas: {match['what']} (nearest station's price)"
+        elif match := OLD_LEDGER_REFUND_PATTERN.match(description):
+            location, new_description = match["where"], "Gas refund: trip finished"
+        elif OLD_LEDGER_FEE_PATTERN.match(description):
+            location, new_description = "Roadside", "Roadside assistance fee"
+
+        if location is not None:
+            cur.execute(
+                "UPDATE ledger SET location = %s, description = %s WHERE id = %s",
+                (location, new_description, ledger_id)
+            )
+
+
+#
 # "Minneapolis → Chicago" - how a trip reads on the Budget page: where the
 # whole journey started (trips.journey_origin, which carries through a
 # gas-station detour and the resumed leg after it) to where it was going.
@@ -2536,6 +2578,8 @@ def run_migrations():
         WHERE v.id = l.vehicle_id AND l.vehicle_name IS NULL
         """
     )
+
+    backfill_old_ledger_locations(cur)
 
     cur.execute("ALTER TABLE trips ADD COLUMN IF NOT EXISTS journey_origin TEXT")
 
