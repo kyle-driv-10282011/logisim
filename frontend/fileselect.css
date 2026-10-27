@@ -203,6 +203,43 @@
     }
 }
 
+/*
+ * The new-file intro card: the file-select screen's backdrop, its text
+ * fading in, then the whole card fading out to the map (.fading).
+ */
+.intro-splash {
+    z-index: 5100;
+    cursor: pointer;
+    transition: opacity 1.5s ease;
+}
+
+.intro-splash.fading {
+    opacity: 0;
+    pointer-events: none;
+}
+
+.intro-text {
+    max-width: 640px;
+    font-size: 16px;
+    line-height: 2.2;
+    text-align: center;
+    color: #ffd23f;
+    text-shadow: 3px 3px 0 #b3361b;
+    animation: intro-text-in 2s ease both;
+}
+
+@keyframes intro-text-in {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: none; }
+}
+
+@media (max-width: 560px) {
+
+    .intro-text {
+        font-size: 12px;
+    }
+}
+
 /* The "FILE n · NAME" chip in the clock box - back to file select. */
 .current-file {
     display: block;

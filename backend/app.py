@@ -210,6 +210,156 @@ STARTING_BALANCE = 10000
 #
 ROADSIDE_ASSIST_FEE = 75
 
+#
+# Every new file starts with grandpa's van (the intro splash's story): this
+# vehicle model is re-created at startup and on every new file if it's gone
+# missing, and can't be deleted. Matched by year/brand/model like a vehicle
+# model CSV upload, so an upload can still change its stats - only these
+# defaults are used when it has to be re-created.
+#
+STARTER_VEHICLE_MODEL = {
+    "year": 1978,
+    "brand": "Ford",
+    "model": "Econoline",
+    "person_capacity": 2,
+    "cargo_capacity_cuft": 329,
+    "cost": 3000,
+    "mpg": 8,
+    "fuel_tank_gallons": 38,
+    "image": "1978-Ford-Econoline.png"
+}
+
+#
+# It's been around the block a few times.
+#
+STARTER_VEHICLE_MILEAGE = 187342
+
+#
+# Where the van starts, saved as a place directly (no geocode) so starting
+# a file never waits on Nominatim or the proxy.
+#
+STARTER_PLACE = {
+    "description": "Minneapolis",
+    "address": "Minneapolis, Hennepin County, Minnesota, United States",
+    "lat": 44.9773,
+    "lng": -93.2655,
+    "continent": "North America",
+    "country": "United States",
+    "state": "Minnesota",
+    "city": "Minneapolis"
+}
+
+
+def is_starter_vehicle_model(year, brand, model):
+
+    return (
+        year == STARTER_VEHICLE_MODEL["year"]
+        and brand.strip().lower() == STARTER_VEHICLE_MODEL["brand"].lower()
+        and model.strip().lower() == STARTER_VEHICLE_MODEL["model"].lower()
+    )
+
+
+#
+# The starter van's vehicle model id, inserting it from
+# STARTER_VEHICLE_MODEL first if it's missing. Doesn't commit.
+#
+def ensure_starter_vehicle_model(cur):
+
+    starter = STARTER_VEHICLE_MODEL
+
+    cur.execute(
+        """
+        SELECT id FROM vehicle_models
+        WHERE year = %s AND LOWER(brand) = LOWER(%s) AND LOWER(model) = LOWER(%s)
+        ORDER BY id
+        LIMIT 1
+        """,
+        (starter["year"], starter["brand"], starter["model"])
+    )
+
+    existing = cur.fetchone()
+
+    if existing is not None:
+        return existing[0]
+
+    cur.execute(
+        """
+        INSERT INTO vehicle_models
+        (year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, fuel_tank_gallons, image)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """,
+        (
+            starter["year"], starter["brand"], starter["model"], starter["person_capacity"],
+            starter["cargo_capacity_cuft"], starter["cost"], starter["mpg"], starter["fuel_tank_gallons"],
+            starter["image"]
+        )
+    )
+
+    return cur.fetchone()[0]
+
+
+#
+# STARTER_PLACE's id - an already-saved "Minneapolis" (or one at the same
+# spot) is reused rather than duplicated. Doesn't commit.
+#
+def ensure_starter_place(cur):
+
+    saved = find_saved_place(cur, STARTER_PLACE["description"])
+
+    if saved is not None:
+        return saved[0]
+
+    place = STARTER_PLACE
+    lat = round_coord(place["lat"])
+    lng = round_coord(place["lng"])
+
+    cur.execute("SELECT id FROM places WHERE lat = %s AND lng = %s", (lat, lng))
+
+    existing = cur.fetchone()
+
+    if existing is not None:
+        return existing[0]
+
+    cur.execute(
+        """
+        INSERT INTO places (description, address, lat, lng, continent, country, state, city)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """,
+        (
+            place["description"], place["address"], lat, lng,
+            place["continent"], place["country"], place["state"], place["city"]
+        )
+    )
+
+    return cur.fetchone()[0]
+
+
+#
+# A new file's first vehicle: the starter van, free (it was inherited),
+# parked at STARTER_PLACE with a full tank. Doesn't commit.
+#
+def give_starter_vehicle(cur, slot_id):
+
+    vehicle_model_id = ensure_starter_vehicle_model(cur)
+    place_id = ensure_starter_place(cur)
+
+    cur.execute(
+        "SELECT year, brand, model, fuel_tank_gallons FROM vehicle_models WHERE id = %s",
+        (vehicle_model_id,)
+    )
+
+    year, brand, model, fuel_tank_gallons = cur.fetchone()
+
+    cur.execute(
+        """
+        INSERT INTO vehicles (slot_id, name, vehicle_model_id, place_id, starting_mileage, fuel_gallons)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        """,
+        (slot_id, f"{year} {brand} {model} 1", vehicle_model_id, place_id, STARTER_VEHICLE_MILEAGE, fuel_tank_gallons)
+    )
+
 
 #
 # The one way a file's balance changes: a signed amount (negative = spent),
@@ -2668,6 +2818,12 @@ def run_migrations():
 
     forget_unused_places(cur)
 
+    #
+    # The starter van's vehicle model is always in the database (see
+    # STARTER_VEHICLE_MODEL).
+    #
+    ensure_starter_vehicle_model(cur)
+
     conn.commit()
 
     cur.execute("SELECT COUNT(*) FROM places WHERE country IS NULL")
@@ -3485,9 +3641,12 @@ def start_save_slot(slot_id: int, req: StartSaveSlotRequest):
         conn.close()
         raise HTTPException(status_code=409, detail=f"File {slot_id} is already in use - erase it first")
 
+    give_starter_vehicle(cur, slot_id)
+
     #
-    # Commits too - a fresh file starts at the default multiplier with its
-    # own clock beginning now (see ensure_settings_row()).
+    # Commits too (the starter van with it) - a fresh file starts at the
+    # default multiplier with its own clock beginning now (see
+    # ensure_settings_row()).
     #
     ensure_settings_row(conn, cur, slot_id)
 
@@ -4094,6 +4253,15 @@ def delete_vehicle_model(id: int):
 
     conn = db()
     cur = conn.cursor()
+
+    cur.execute("SELECT year, brand, model FROM vehicle_models WHERE id = %s", (id,))
+
+    row = cur.fetchone()
+
+    if row is not None and is_starter_vehicle_model(*row):
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=409, detail="The starter van can't be deleted - every new file starts with one")
 
     try:
 

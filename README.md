@@ -63,6 +63,12 @@ them open. The browser names the file it's playing in an `X-Save-Slot`
 header on every API call (`current_slot()` in `app.py`). An existing
 database's world becomes File 1 ("Player 1") on first startup.
 
+Every new file starts with a free 1978 Ford Econoline van, parked in
+Minneapolis with a full tank (`STARTER_VEHICLE_MODEL` and `STARTER_PLACE` in
+`app.py`). That vehicle model is re-created on startup and on each new file if
+it's missing, and it can't be deleted. A vehicle model CSV upload can still
+change its stats.
+
 ### Gold Doubloons
 
 Each file has a balance in Gold Doubloons, written like dollars

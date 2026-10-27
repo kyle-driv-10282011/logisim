@@ -287,10 +287,49 @@ async function startNewFile() {
         }
 
         playFile({ id: slot.id, name: data.name });
+        showIntroSplash();
 
     } catch (e) {
         setFileSelectMessage("Couldn't reach the server - try again.", true);
     }
+}
+
+
+//
+// The new file's story card, between the file-select screen and the map.
+// The map loads underneath it meanwhile (playFile() already ran), so it's
+// ready by the time the card fades. Any click or key skips ahead.
+//
+const INTRO_SPLASH_HOLD_MS = 7000;
+const INTRO_SPLASH_FADE_MS = 1500;
+
+function showIntroSplash() {
+
+    const splash = document.getElementById("intro-splash");
+
+    splash.style.display = "";
+
+    let holdTimer = null;
+
+    const fadeAway = () => {
+
+        clearTimeout(holdTimer);
+
+        splash.removeEventListener("click", fadeAway);
+        document.removeEventListener("keydown", fadeAway);
+
+        splash.classList.add("fading");
+
+        setTimeout(() => {
+            splash.style.display = "none";
+            splash.classList.remove("fading");
+        }, INTRO_SPLASH_FADE_MS);
+    };
+
+    holdTimer = setTimeout(fadeAway, INTRO_SPLASH_HOLD_MS);
+
+    splash.addEventListener("click", fadeAway);
+    document.addEventListener("keydown", fadeAway);
 }
 
 
