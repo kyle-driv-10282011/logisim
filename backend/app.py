@@ -4805,7 +4805,19 @@ def _run_gas_price_upload_job(job_id, entries):
 
                     brand = entry.get("brand") or entry.get("name")
 
-                    place_id, _, _ = find_or_create_place(cur, place_text)
+                    #
+                    # A row that already carries its coordinates (e.g. one
+                    # from GET /api/gas-prices/export) is restored as-is -
+                    # no geocoding, so a full backup of tens of thousands of
+                    # stations reloads in minutes instead of a day of
+                    # 1-request-per-second Nominatim calls.
+                    #
+                    coords = entry_coordinates(entry)
+
+                    if coords is not None:
+                        place_id = find_or_create_place_from_export(cur, place_text, entry, *coords)
+                    else:
+                        place_id, _, _ = find_or_create_place(cur, place_text)
 
                     upsert_gas_price_row(cur, place_id, price, brand)
 
@@ -4878,12 +4890,141 @@ CSV_HEADER_ALIASES = {
     "description": "description",
     "address": "description",
     "location": "description",
+    "lat": "lat",
+    "latitude": "lat",
+    "lng": "lng",
+    "lon": "lng",
+    "longitude": "lng",
     "city": "city",
     "name": "brand",
     "brand": "brand",
     "price": "price_per_gallon",
     "pricepergallon": "price_per_gallon",
 }
+
+
+#
+# The columns GET /api/gas-prices/export writes, in order - also exactly
+# what the upload reads back (see entry_coordinates() and
+# find_or_create_place_from_export()). The place's own fields are prefixed
+# place_ so they never collide with the upload's own column meanings:
+# "address" is an alias for description there, and "city" means "add every
+# station in this city" rather than "this station's city".
+#
+GAS_PRICE_EXPORT_COLUMNS = [
+    "description", "brand", "price_per_gallon", "lat", "lng", "place_address",
+    "place_continent", "place_country", "place_state", "place_city", "updated",
+]
+
+
+#
+# A CSV header that isn't a known alias arrives normalized (punctuation
+# stripped - see parse_gas_price_csv()), so "place_city" reads back as
+# "placecity"; a JSON upload keeps the key as written. Accept either.
+#
+def export_field(entry, name):
+
+    return entry.get(name) or entry.get(name.replace("_", "")) or None
+
+
+def entry_coordinates(entry):
+
+    try:
+        lat = float(entry.get("lat"))
+        lng = float(entry.get("lng"))
+    except (TypeError, ValueError):
+        return None
+
+    if not (-90 <= lat <= 90 and -180 <= lng <= 180):
+        return None
+
+    return lat, lng
+
+
+#
+# The restore-from-export equivalent of find_or_create_place(): the row
+# already says exactly where the station is and what its place looked like
+# (address and location breakdown), so nothing is geocoded - the same
+# dedup-by-rounded-coordinates check, then the row's own values as-is.
+#
+def find_or_create_place_from_export(cur, description, entry, lat, lng):
+
+    lat = round_coord(lat)
+    lng = round_coord(lng)
+
+    cur.execute("SELECT id FROM places WHERE lat = %s AND lng = %s", (lat, lng))
+
+    existing = cur.fetchone()
+
+    if existing is not None:
+        return existing[0]
+
+    cur.execute(
+        """
+        INSERT INTO places (description, address, lat, lng, continent, country, state, city)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """,
+        (
+            description,
+            export_field(entry, "place_address") or description,
+            lat,
+            lng,
+            export_field(entry, "place_continent"),
+            export_field(entry, "place_country"),
+            export_field(entry, "place_state"),
+            export_field(entry, "place_city"),
+        )
+    )
+
+    return cur.fetchone()[0]
+
+
+#
+# Every gas station, as a flat CSV that POST /api/gas-prices/upload reads
+# straight back (see GAS_PRICE_EXPORT_COLUMNS) - building the station list
+# up from city searches and hand entry is slow, so this is its backup.
+# Shared world data, not per save file.
+#
+@app.get("/api/gas-prices/export")
+def export_gas_prices():
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT p.description, g.brand, g.price_per_gallon, p.lat, p.lng, p.address,
+            p.continent, p.country, p.state, p.city, g.updated
+        FROM gas_prices g
+        JOIN places p ON p.id = g.place_id
+        ORDER BY p.country NULLS LAST, p.state NULLS LAST, p.city NULLS LAST, p.description
+        """
+    )
+
+    rows = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    out = io.StringIO()
+    writer = csv.writer(out)
+
+    writer.writerow(GAS_PRICE_EXPORT_COLUMNS)
+
+    for row in rows:
+        writer.writerow([
+            "" if value is None else (value.isoformat() if isinstance(value, datetime) else value)
+            for value in row
+        ])
+
+    filename = f"logisim-gas-stations-{local_now_naive():%Y-%m-%d}.csv"
+
+    return Response(
+        content=out.getvalue().encode("utf-8"),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
 
 
 def normalize_csv_header_cell(cell):

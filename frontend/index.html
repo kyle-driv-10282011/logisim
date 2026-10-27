@@ -140,6 +140,23 @@
             color: #555;
         }
 
+        /* A download link styled like the app's other buttons. */
+        .config-button {
+            display: block;
+            padding: 4px 8px;
+            font-size: 13px;
+            text-align: center;
+            color: #000;
+            background: #efefef;
+            border: 1px solid #767676;
+            border-radius: 3px;
+            text-decoration: none;
+        }
+
+        .config-button:hover {
+            background: #e3e3e3;
+        }
+
         .config-hint {
             font-size: 11px;
             color: #555;
@@ -790,7 +807,7 @@
         </div>
 
         <div class="panel-form">
-            <label for="gasprice-file-input" style="font-size:11px;color:#555;">Bulk import from CSV/JSON (columns/keys: description or address, price_per_gallon or price, brand or name. CSV header row is optional - if omitted, columns are read in that order. Or use a "city" column instead of description/address to add every real gas station found in that city at the given price - requires a header row)</label>
+            <label for="gasprice-file-input" style="font-size:11px;color:#555;">Bulk import from CSV/JSON (columns/keys: description or address, price_per_gallon or price, brand or name. CSV header row is optional - if omitted, columns are read in that order. Or use a "city" column instead of description/address to add every real gas station found in that city at the given price - requires a header row. A file from Config &rarr; Export all gas stations restores as-is: rows with lat/lng columns skip the address lookup)</label>
             <input id="gasprice-file-input" type="file" accept=".csv,.json,application/json,text/csv">
             <button onclick="withSpinner(this, uploadGasPrices)">Upload</button>
             <div id="gasprice-upload-result" style="font-size:11px;color:#555;"></div>
@@ -818,6 +835,17 @@
                 When the map and vehicle list update on their own. The &#128225; badge on the map
                 pauses or resumes this - it only ever switches between off and the setting here.
                 While off (paused, or set to Never), it still refreshes every 20 minutes.
+            </div>
+        </div>
+
+        <div class="panel-form">
+            <span class="config-label"><b>Gas stations backup</b></span>
+            <a class="config-button" href="/api/gas-prices/export" download>Export all gas stations (CSV)</a>
+            <div class="config-hint">
+                Downloads every gas station - name, brand, price and exact location - as one CSV file.
+                Shared by all save files. To restore it, upload the file under Gas Prices &rarr; Bulk import:
+                stations come back at their saved locations with no address lookups, so even tens of
+                thousands reload in minutes.
             </div>
         </div>
 
