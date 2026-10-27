@@ -1322,7 +1322,7 @@ function renderVehicleList() {
         //
         const displayStatus = trip ? trip.status : vehicle.status;
 
-        const driving = displayStatus === "DRIVING" || displayStatus === "STRANDED";
+        const driving = displayStatus === "DRIVING" || displayStatus === "STRANDED" || displayStatus === "REFUELING";
         const ready = displayStatus === "READY";
 
         item.className = "vehicle-item vehicle-row vehicle-card" +
@@ -1740,9 +1740,15 @@ function vehicleOverlayInset() {
 
 //
 // Centers the vehicle in the part of the map the overlay leaves clear, so
-// following it never parks it underneath.
+// following it never parks it underneath. Only while the overlay is open
+// and expanded - collapsing it stops the map following, leaving it free to
+// pan around, and expanding it again picks the vehicle back up.
 //
 function panToVehicle(latLng) {
+
+    if (vehicleOverlayCollapsed || document.getElementById("vehicle-overlay").style.display === "none") {
+        return;
+    }
 
     const zoom = map.getZoom();
     const offset = vehicleOverlayInset().divideBy(2);
@@ -2097,6 +2103,10 @@ function vehicleDetailHtml(vehicle, trip) {
 
         statusLine = "Arrived";
 
+    } else if (trip.status === "REFUELING") {
+
+        statusLine = `&#9981; Refueling - back on the road to ${trip.resume_destination} shortly`;
+
     } else if (trip.status === "STRANDED") {
 
         statusLine =
@@ -2334,9 +2344,42 @@ async function pollActiveTrips() {
 
     const seen = new Set();
 
+    const previousTripsById = activeTripsById;
+
     activeTripsById = new Map(data.trips.map((trip) => [trip.vehicle_id, trip]));
 
-    for (const trip of data.trips) {
+    //
+    // A gas-station detour that just reached its station has no trip until
+    // the backend's resume job routes the next leg (see
+    // settle_arrived_vehicles() in app.py), which can take a while when
+    // the job pool is busy. Rather than dropping the vehicle off the map
+    // and closing its spotlight for that gap, its last leg stays on as a
+    // REFUELING placeholder at the station until the real next leg shows
+    // up - or until no trip-starting job is left (it failed) or
+    // PENDING_LEG_TIMEOUT_MS passes.
+    //
+    let newPlaceholder = false;
+
+    for (const [vehicleId, previous] of previousTripsById) {
+
+        if (activeTripsById.has(vehicleId) || !data.trip_job_in_flight) {
+            continue;
+        }
+
+        if (previous.status === "REFUELING") {
+
+            if (Date.now() - previous.refuelingSince < PENDING_LEG_TIMEOUT_MS) {
+                activeTripsById.set(vehicleId, previous);
+            }
+
+        } else if (previous.status === "DRIVING" && previous.resume_destination) {
+
+            activeTripsById.set(vehicleId, refuelingPlaceholder(previous));
+            newPlaceholder = true;
+        }
+    }
+
+    for (const trip of activeTripsById.values()) {
 
         seen.add(trip.vehicle_id);
 
@@ -2388,6 +2431,8 @@ async function pollActiveTrips() {
         layer.marker.setTooltipContent(
             trip.status === "ARRIVED"
                 ? `${trip.vehicle_name}: Arrived`
+                : trip.status === "REFUELING"
+                ? `${trip.vehicle_name}: refueling`
                 : trip.status === "STRANDED"
                 ? `${trip.vehicle_name}: Out of fuel - stranded`
                 : `${trip.vehicle_name}: arriving in ${formatHMS(trip.remaining_sim_seconds)}`
@@ -2395,7 +2440,8 @@ async function pollActiveTrips() {
 
         //
         // Keep the map centered on the selected vehicle as it moves, without
-        // touching zoom (a full fitBounds/setView would fight the user's view).
+        // touching zoom (a full fitBounds/setView would fight the user's view)
+        // - unless its overlay is collapsed (see panToVehicle()).
         //
         if (trip.vehicle_id === selectedVehicleId) {
             panToVehicle(trip.position);
@@ -2426,12 +2472,47 @@ async function pollActiveTrips() {
 
     updateTimeMultiplierControlState();
 
-    if (!setsEqual(seen, activeVehicleIds)) {
+    //
+    // A new placeholder keeps the vehicle in the active set, but its detour
+    // did settle (fuel bought, miles added) - so the vehicle list is
+    // re-fetched for that the same as for a change in the set.
+    //
+    if (newPlaceholder || !setsEqual(seen, activeVehicleIds)) {
 
         activeVehicleIds = seen;
 
         loadVehicles();
     }
+}
+
+
+const PENDING_LEG_TIMEOUT_MS = 10 * 60 * 1000;
+
+//
+// The last poll's detour leg, parked at its gas station with a full tank
+// while the next leg is routed. distance_miles goes to 0 since the detour's
+// miles are now in the vehicle's settled total (the odometer adds the
+// two); the trip meter keeps counting the whole journey. trip_id is kept,
+// so the route line isn't redrawn until the real next leg arrives.
+//
+function refuelingPlaceholder(trip) {
+
+    const vehicle = vehiclesById.get(trip.vehicle_id);
+    const detourMiles = trip.distance_miles + (trip.remaining_miles || 0);
+
+    return {
+        ...trip,
+        status: "REFUELING",
+        refuelingSince: Date.now(),
+        position: trip.route[trip.route.length - 1],
+        speed_mph: 0,
+        distance_miles: 0,
+        remaining_miles: null,
+        trip_meter_miles: (trip.trip_meter_miles ?? trip.distance_miles) - trip.distance_miles + detourMiles,
+        fuel_gallons_remaining: vehicle && vehicle.vehicle_model
+            ? vehicle.vehicle_model.fuel_tank_gallons
+            : trip.fuel_gallons_remaining
+    };
 }
 
 

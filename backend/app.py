@@ -7301,4 +7301,10 @@ def active_trips(refresh_on: str = "never", every_miles: Optional[float] = None,
     if trip_job_in_flight and refresh_on != "never":
         next_refresh_seconds = min(next_refresh_seconds or TRIP_JOB_RECHECK_SECONDS, TRIP_JOB_RECHECK_SECONDS)
 
-    return {"trips": trips, "next_refresh_seconds": next_refresh_seconds}
+    #
+    # trip_job_in_flight tells the frontend a vehicle missing from trips may
+    # just be between legs (a detour's next leg still being routed), so it
+    # keeps showing it rather than dropping it (see refuelingPlaceholder()
+    # in app.js).
+    #
+    return {"trips": trips, "next_refresh_seconds": next_refresh_seconds, "trip_job_in_flight": trip_job_in_flight}
