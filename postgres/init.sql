@@ -400,7 +400,12 @@ CREATE TABLE trips (
     -- Where this leg's whole journey started - carried through a
     -- gas-station detour and the resumed leg after it, so the Budget page
     -- labels every leg's charges as the same trip (journey_label() in app.py).
-    journey_origin TEXT
+    journey_origin TEXT,
+
+    -- The id of the journey's first leg, carried the same way - what the
+    -- Budget page's trip filter groups a journey's charges by, so two
+    -- separate drives along the same route stay two trips.
+    journey_id INTEGER
 );
 
 
@@ -428,6 +433,10 @@ CREATE TABLE ledger (
     vehicle_name TEXT,
     location TEXT,
     trip TEXT,
+
+    -- trips.journey_id of the journey this entry belongs to (NULL for one
+    -- that isn't part of a trip, or from before journeys had an id).
+    journey_id INTEGER,
 
     -- The file's balance right after this entry.
     balance_after NUMERIC(14, 2),

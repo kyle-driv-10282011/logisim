@@ -10,12 +10,111 @@ const BUDGET_PAGE_SIZE = 100;
 
 let budgetOldestId = null;
 
+//
+// The dropdown choices (GET /api/ledger/filters): vehicle names, and trips
+// as { key, vehicle, trip, started }. Re-fetched each time the page opens.
+//
+let budgetFilterOptions = { vehicles: [], trips: [] };
 
-function openBudgetPage() {
+
+async function openBudgetPage() {
 
     closeTabMenu();
 
     document.getElementById("budget-page").style.display = "";
+
+    try {
+
+        const response = await apiFetch(API + "/api/ledger/filters");
+
+        if (response.ok) {
+            budgetFilterOptions = await response.json();
+        }
+
+    } catch (e) {
+        // no choices beyond "All" - the table still loads
+    }
+
+    renderBudgetVehicleFilter();
+    renderBudgetTripFilter();
+
+    reloadBudgetRows();
+}
+
+
+function addBudgetOption(select, value, label) {
+
+    const option = document.createElement("option");
+
+    option.value = value;
+    option.textContent = label;
+
+    select.appendChild(option);
+}
+
+
+function renderBudgetVehicleFilter() {
+
+    const select = document.getElementById("budget-vehicle-filter");
+    const previous = select.value;
+
+    select.innerHTML = "";
+
+    addBudgetOption(select, "", "All vehicles");
+
+    for (const vehicle of budgetFilterOptions.vehicles) {
+        addBudgetOption(select, vehicle, vehicle);
+    }
+
+    select.value = budgetFilterOptions.vehicles.includes(previous) ? previous : "";
+}
+
+
+//
+// Only the chosen vehicle's trips once one is picked; every trip (with its
+// vehicle named) otherwise. The date tells repeat drives of the same route
+// apart. A trip that's no longer in the list (a different vehicle was
+// picked) falls back to "All trips".
+//
+function renderBudgetTripFilter() {
+
+    const vehicle = document.getElementById("budget-vehicle-filter").value;
+    const select = document.getElementById("budget-trip-filter");
+    const previous = select.value;
+
+    const trips = budgetFilterOptions.trips.filter((trip) => !vehicle || trip.vehicle === vehicle);
+
+    select.innerHTML = "";
+
+    addBudgetOption(select, "", vehicle ? `All trips (${trips.length})` : "All trips");
+
+    for (const trip of trips) {
+
+        const started = new Date(trip.started).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+
+        addBudgetOption(
+            select,
+            trip.key,
+            vehicle ? `${trip.trip} · ${started}` : `${trip.trip} · ${trip.vehicle} · ${started}`
+        );
+    }
+
+    select.value = trips.some((trip) => trip.key === previous) ? previous : "";
+}
+
+
+function onBudgetVehicleFilterChange() {
+
+    renderBudgetTripFilter();
+    reloadBudgetRows();
+}
+
+
+//
+// Starts the table over from the newest entry that matches the dropdowns.
+//
+function reloadBudgetRows() {
+
     document.getElementById("budget-rows").innerHTML = "";
 
     budgetOldestId = null;
@@ -42,6 +141,17 @@ async function loadBudgetPage() {
 
     if (budgetOldestId !== null) {
         params.set("before_id", budgetOldestId);
+    }
+
+    const vehicle = document.getElementById("budget-vehicle-filter").value;
+    const trip = document.getElementById("budget-trip-filter").value;
+
+    if (vehicle) {
+        params.set("vehicle", vehicle);
+    }
+
+    if (trip) {
+        params.set("trip", trip);
     }
 
     let data;
@@ -75,7 +185,13 @@ async function loadBudgetPage() {
         budgetOldestId = data.entries[data.entries.length - 1].id;
     }
 
-    status.textContent = rows.children.length ? "" : "No transactions yet - gas bought and refunded shows up here.";
+    const filtered = Boolean(vehicle || trip);
+
+    status.textContent = rows.children.length
+        ? ""
+        : filtered
+            ? "No transactions match these filters."
+            : "No transactions yet - gas bought and refunded shows up here.";
     more.style.display = data.has_more ? "" : "none";
 }
 

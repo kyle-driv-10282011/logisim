@@ -705,6 +705,14 @@
             </div>
             <button class="budget-close" onclick="closeBudgetPage()" title="Close (Esc)">&times;</button>
         </div>
+        <div class="budget-filters">
+            <label>Vehicle
+                <select id="budget-vehicle-filter" onchange="onBudgetVehicleFilterChange()"></select>
+            </label>
+            <label>Trip
+                <select id="budget-trip-filter" onchange="reloadBudgetRows()"></select>
+            </label>
+        </div>
         <div class="budget-table-wrap">
             <table class="budget-table">
                 <thead>
