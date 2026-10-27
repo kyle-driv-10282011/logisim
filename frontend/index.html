@@ -849,6 +849,19 @@
             </div>
         </div>
 
+        <div class="panel-form">
+            <span class="config-label"><b>Vehicle models backup</b></span>
+            <a class="config-button" href="/api/vehicle-models/export" download>Export all vehicle models (CSV)</a>
+            <label for="vehicle-model-file-input" class="config-hint">Restore from an export (models with the same year, brand and model are updated, not duplicated):</label>
+            <input id="vehicle-model-file-input" type="file" accept=".csv,text/csv">
+            <button onclick="withSpinner(this, uploadVehicleModels)">Import vehicle models</button>
+            <div id="vehicle-model-upload-result" class="form-result"></div>
+            <div class="config-hint">
+                Shared by all save files. Only each model's image filename is exported - the pictures
+                themselves live in frontend/images/.
+            </div>
+        </div>
+
     </div>
 
 </div>

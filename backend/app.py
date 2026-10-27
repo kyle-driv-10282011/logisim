@@ -3467,6 +3467,167 @@ def create_vehicle_model(req: CreateVehicleModelRequest):
 
 
 
+#
+# Vehicle models as a flat CSV, in the same column order POST
+# /api/vehicle-models/upload reads back - the catalog's backup, shared by
+# every save file. Only the image's filename travels with it: the picture
+# itself lives in frontend/images/.
+#
+VEHICLE_MODEL_EXPORT_COLUMNS = [
+    "year", "brand", "model", "person_capacity", "cargo_capacity_cuft",
+    "cost", "mpg", "fuel_tank_gallons", "image",
+]
+
+
+@app.get("/api/vehicle-models/export")
+def export_vehicle_models():
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute(
+        f"SELECT {', '.join(VEHICLE_MODEL_EXPORT_COLUMNS)} FROM vehicle_models ORDER BY brand, model, year"
+    )
+
+    rows = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    out = io.StringIO()
+    writer = csv.writer(out)
+
+    writer.writerow(VEHICLE_MODEL_EXPORT_COLUMNS)
+
+    for row in rows:
+        writer.writerow(["" if value is None else value for value in row])
+
+    filename = f"logisim-vehicle-models-{local_now_naive():%Y-%m-%d}.csv"
+
+    return Response(
+        content=out.getvalue().encode("utf-8"),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
+
+
+#
+# Restores a vehicle model export (or any CSV with those columns). A row
+# matching an existing model's year + brand + model (case-insensitively)
+# updates that model in place instead of adding a duplicate, so restoring
+# on top of a catalog that already has some of them is safe - and existing
+# vehicles keep pointing at the same model row. Small enough (no geocoding)
+# to run inline rather than as a background job; each row commits on its
+# own so one bad row doesn't cost the rest.
+#
+@app.post("/api/vehicle-models/upload")
+async def upload_vehicle_models(file: UploadFile = File(...)):
+
+    raw = await file.read()
+
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="File must be UTF-8 CSV text")
+
+    rows = list(csv.reader(io.StringIO(text)))
+
+    if not rows:
+        raise HTTPException(status_code=400, detail="File is empty")
+
+    header = [normalize_csv_header_cell(cell) for cell in rows[0]]
+    wanted = {normalize_csv_header_cell(column): column for column in VEHICLE_MODEL_EXPORT_COLUMNS}
+
+    missing = [column for key, column in wanted.items() if key not in header and column != "image"]
+
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing column(s): {', '.join(missing)} - expected a header row like a vehicle model export's"
+        )
+
+    conn = db()
+    cur = conn.cursor()
+
+    created = 0
+    updated = 0
+    errors = []
+
+    for index, row in enumerate(rows[1:], start=2):
+
+        entry = {wanted[key]: value.strip() for key, value in zip(header, row) if key in wanted}
+
+        if not any(entry.values()):
+            continue
+
+        try:
+
+            model = CreateVehicleModelRequest(
+                year=int(entry["year"]),
+                brand=entry["brand"],
+                model=entry["model"],
+                person_capacity=int(float(entry["person_capacity"])),
+                cargo_capacity_cuft=float(entry["cargo_capacity_cuft"]),
+                cost=float(entry["cost"]),
+                mpg=float(entry["mpg"]),
+                fuel_tank_gallons=float(entry["fuel_tank_gallons"]),
+                image=entry.get("image") or None
+            )
+
+            if not model.brand or not model.model:
+                raise ValueError("brand and model can't be empty")
+
+            if model.mpg <= 0 or model.fuel_tank_gallons <= 0:
+                raise ValueError("mpg and fuel_tank_gallons must be positive")
+
+            values = (
+                model.person_capacity, model.cargo_capacity_cuft, model.cost,
+                model.mpg, model.fuel_tank_gallons, model.image
+            )
+
+            cur.execute(
+                """
+                UPDATE vehicle_models
+                SET person_capacity = %s, cargo_capacity_cuft = %s, cost = %s,
+                    mpg = %s, fuel_tank_gallons = %s, image = %s
+                WHERE id = (
+                    SELECT id FROM vehicle_models
+                    WHERE year = %s AND LOWER(brand) = LOWER(%s) AND LOWER(model) = LOWER(%s)
+                    ORDER BY id
+                    LIMIT 1
+                )
+                RETURNING id
+                """,
+                (*values, model.year, model.brand, model.model)
+            )
+
+            if cur.fetchone() is not None:
+                updated += 1
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO vehicle_models
+                    (year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, fuel_tank_gallons, image)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (model.year, model.brand, model.model, *values)
+                )
+                created += 1
+
+            conn.commit()
+
+        except Exception as e:
+
+            conn.rollback()
+
+            errors.append({"row": index, "error": str(e).splitlines()[0]})
+
+    cur.close()
+    conn.close()
+
+    return {"created": created, "updated": updated, "errors": errors}
+
+
 @app.get("/api/vehicle-models")
 def list_vehicle_models():
 

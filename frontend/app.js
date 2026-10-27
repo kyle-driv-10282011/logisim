@@ -651,6 +651,67 @@ async function addVehicleModel() {
 }
 
 
+//
+// Config tab's vehicle model restore (POST /api/vehicle-models/upload) - the
+// other half of its "Export all vehicle models" link. Small enough to run
+// inline on the backend, so the result comes straight back, no job to poll.
+//
+async function uploadVehicleModels() {
+
+    const fileInput = document.getElementById("vehicle-model-file-input");
+    const result = document.getElementById("vehicle-model-upload-result");
+
+    const show = (kind, message) => {
+        result.className = "form-result " + kind;
+        result.textContent = message;
+    };
+
+    if (!fileInput.files.length) {
+        show("error", "Not imported - choose a vehicle model CSV first.");
+        return;
+    }
+
+    const formData = new FormData();
+    formData.append("file", fileInput.files[0]);
+
+    let response;
+    let data;
+
+    try {
+        response = await apiFetch(API + "/api/vehicle-models/upload", { method: "POST", body: formData });
+        data = await response.json();
+    } catch (e) {
+        show("error", "Not imported - couldn't reach the server. Check your connection and try again.");
+        return;
+    }
+
+    if (!response.ok) {
+        show("error", "Not imported - " + (data.detail || "the server couldn't read that file."));
+        return;
+    }
+
+    const parts = [`${data.created} added`, `${data.updated} updated`];
+
+    if (data.errors.length) {
+
+        parts.push(`${data.errors.length} skipped`);
+        console.warn("Vehicle model import errors:", data.errors);
+
+        show(
+            data.created || data.updated ? "success" : "error",
+            `Imported: ${parts.join(", ")}. First problem - row ${data.errors[0].row}: ${data.errors[0].error}`
+        );
+
+    } else {
+        show("success", `Imported: ${parts.join(", ")}.`);
+    }
+
+    fileInput.value = "";
+
+    loadVehicleModels();
+}
+
+
 async function removeVehicleModel(vehicleModelId) {
 
     const vehicleModel = vehicleModelsById.get(vehicleModelId);
