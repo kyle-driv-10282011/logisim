@@ -49,6 +49,20 @@ server). The API is at `https://logisim.kjfries.com/api/...`, same origin
 as the page. A 403 "only available through its HTTPS address" means the
 secret here doesn't match Edge's.
 
+### Save files
+
+Opening the site shows a console-style **Select File** screen with four
+save files that everyone shares. Pick a started file to play it, or an empty
+one to start a new game (you name it). **Erase** wipes a file back to empty.
+The **FILE n · NAME** chip in the clock box goes back to this screen.
+
+Each file has its own vehicles, trips, game clock, time multiplier and
+auto-refuel setting. Vehicle models, gas prices and places are shared by all
+four. All four files keep running on the server whether or not anyone has
+them open. The browser names the file it's playing in an `X-Save-Slot`
+header on every API call (`current_slot()` in `app.py`). An existing
+database's world becomes File 1 ("Player 1") on first startup.
+
 ### Outbound network access
 
 The backend needs to reach two public services over the internet:

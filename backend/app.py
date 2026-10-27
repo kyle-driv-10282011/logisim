@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Header, Depends
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
@@ -199,7 +199,16 @@ def to_local_naive(dt):
     return dt
 
 
-def ensure_settings_row(conn, cur):
+#
+# The shared console-style save files - see the `save_slots` table. Every
+# request that touches a file's own world (vehicles, trips, settings, its
+# jobs) names the file in an X-Save-Slot header (see current_slot()).
+#
+SAVE_SLOT_COUNT = 4
+SAVE_SLOT_NAME_MAX_LENGTH = 16
+
+
+def ensure_settings_row(conn, cur, slot_id):
 
     #
     # Seeded lazily on first use rather than in init.sql, using Python's
@@ -211,16 +220,16 @@ def ensure_settings_row(conn, cur):
     cur.execute(
         """
         INSERT INTO settings (id, time_multiplier, anchor_real_utc, anchor_game_time)
-        VALUES (1, %s, %s, %s)
+        VALUES (%s, %s, %s, %s)
         ON CONFLICT (id) DO NOTHING
         """,
-        (DEFAULT_TIME_MULTIPLIER, datetime.utcnow(), local_now_naive())
+        (slot_id, DEFAULT_TIME_MULTIPLIER, datetime.utcnow(), local_now_naive())
     )
 
     conn.commit()
 
 
-def get_settings(conn, cur):
+def get_settings(conn, cur, slot_id):
 
     #
     # The game clock is derived on every read from an anchor pair, not
@@ -229,9 +238,9 @@ def get_settings(conn, cur):
     # ever since. Comparing against datetime.utcnow() (not local_now_naive())
     # here since anchor_real_utc is always written from datetime.utcnow().
     #
-    ensure_settings_row(conn, cur)
+    ensure_settings_row(conn, cur, slot_id)
 
-    cur.execute("SELECT time_multiplier, anchor_real_utc, anchor_game_time FROM settings WHERE id = 1")
+    cur.execute("SELECT time_multiplier, anchor_real_utc, anchor_game_time FROM settings WHERE id = %s", (slot_id,))
 
     multiplier, anchor_real_utc, anchor_game_time = cur.fetchone()
 
@@ -246,16 +255,92 @@ def get_settings(conn, cur):
 # Kept separate from get_settings() rather than widening its return tuple -
 # that's called from a dozen places that only care about the clock.
 #
-def get_auto_refuel_level(conn, cur):
+def get_auto_refuel_level(conn, cur, slot_id):
 
-    ensure_settings_row(conn, cur)
+    ensure_settings_row(conn, cur, slot_id)
 
-    cur.execute("SELECT auto_refuel_level FROM settings WHERE id = 1")
+    cur.execute("SELECT auto_refuel_level FROM settings WHERE id = %s", (slot_id,))
 
     return cur.fetchone()[0]
 
 
-def settle_arrived_vehicles(conn, cur, time_multiplier):
+#
+# Which save file a vehicle belongs to - what every vehicle-scoped job
+# (drive, divert, refuel, resume) uses to pick that file's own game clock
+# and time multiplier, since those run with no request (and so no
+# X-Save-Slot header) behind them.
+#
+def vehicle_slot_id(cur, vehicle_id):
+
+    cur.execute("SELECT slot_id FROM vehicles WHERE id = %s", (vehicle_id,))
+
+    row = cur.fetchone()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Vehicle not found")
+
+    return row[0]
+
+
+#
+# Every /api/vehicles/{id}/... endpoint checks the vehicle is in the file
+# the request is playing - a vehicle in another file is simply "not found",
+# never acted on from here.
+#
+def require_vehicle_in_slot(cur, vehicle_id, slot_id):
+
+    if vehicle_slot_id(cur, vehicle_id) != slot_id:
+        raise HTTPException(status_code=404, detail="Vehicle not found")
+
+
+#
+# The same check on its own connection - for the top of an endpoint, before
+# it opens its own, so a refusal never leaves a connection half-used.
+#
+def assert_vehicle_in_slot(vehicle_id, slot_id):
+
+    conn = db()
+    cur = conn.cursor()
+
+    try:
+        require_vehicle_in_slot(cur, vehicle_id, slot_id)
+    finally:
+        cur.close()
+        conn.close()
+
+
+#
+# The file a request is playing, from the X-Save-Slot header the frontend
+# sends on every call once a file is picked on its file-select screen. Used
+# as a FastAPI dependency on every endpoint that touches one file's world.
+#
+def current_slot(x_save_slot: Optional[str] = Header(None)):
+
+    try:
+        slot_id = int(x_save_slot)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Pick a save file first")
+
+    if not 1 <= slot_id <= SAVE_SLOT_COUNT:
+        raise HTTPException(status_code=400, detail=f"Save file must be 1-{SAVE_SLOT_COUNT}")
+
+    conn = db()
+    cur = conn.cursor()
+
+    try:
+        cur.execute("SELECT 1 FROM save_slots WHERE id = %s", (slot_id,))
+        started = cur.fetchone() is not None
+    finally:
+        cur.close()
+        conn.close()
+
+    if not started:
+        raise HTTPException(status_code=409, detail=f"File {slot_id} has no game - start one from the file select screen")
+
+    return slot_id
+
+
+def settle_arrived_vehicles(conn, cur):
 
     #
     # A vehicle's place only updates once its most recent trip has actually
@@ -284,8 +369,10 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
             p.distances_miles, t.realized_seconds, t.realized_duration_seconds,
             t.starting_fuel_gallons, t.roadside_refuel_count, t.paused_seconds,
             vm.mpg, vm.fuel_tank_gallons, EXTRACT(EPOCH FROM (NOW() - t.started_at)),
-            t.auto_divert_claimed_at, t.trip_meter_offset_miles, t.path_id
+            t.auto_divert_claimed_at, t.trip_meter_offset_miles, t.path_id,
+            s.time_multiplier, s.auto_refuel_level, v.slot_id
         FROM vehicles v
+        JOIN settings s ON s.id = v.slot_id
         JOIN trips t ON t.id = (
             SELECT t2.id FROM trips t2
             WHERE t2.vehicle_id = v.id
@@ -318,13 +405,17 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
     auto_divert_candidates = []
     arrived_path_ids = []
 
-    auto_refuel_level = get_auto_refuel_level(conn, cur)
-
+    #
+    # Every save file runs all the time, each at its own time multiplier and
+    # auto-refuel level - so both come per row, from the vehicle's file's
+    # settings, rather than once for the whole call.
+    #
     for (
         vehicle_id, trip_id, destination_place_id, resume_destination_place_id, auto_refuel,
         distances_miles, realized_seconds, realized_duration_seconds,
         starting_fuel_gallons, roadside_refuel_count, paused_seconds,
-        mpg, fuel_tank_gallons, elapsed_real_seconds, auto_divert_claimed_at, trip_meter_offset_miles, path_id
+        mpg, fuel_tank_gallons, elapsed_real_seconds, auto_divert_claimed_at, trip_meter_offset_miles, path_id,
+        time_multiplier, auto_refuel_level, slot_id
     ) in rows:
 
         progress = resolve_trip_progress(
@@ -391,7 +482,7 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
             #
             pending_resumes.append((
                 vehicle_id, destination_place_id, resume_destination_place_id,
-                trip_meter_offset_miles + distances_miles[-1]
+                trip_meter_offset_miles + distances_miles[-1], slot_id
             ))
 
     #
@@ -428,11 +519,13 @@ def settle_arrived_vehicles(conn, cur, time_multiplier):
     # (next_refresh_seconds), so the resumed leg never showed up and the
     # vehicle looked READY while actually driving.
     #
-    resume_job_ids = [create_job("resume_trip_after_refuel", cur=cur) for _ in pending_resumes]
+    resume_job_ids = [
+        create_job("resume_trip_after_refuel", cur=cur, slot_id=resume[-1]) for resume in pending_resumes
+    ]
 
     conn.commit()
 
-    for job_id, (vehicle_id, gas_station_place_id, resume_destination_place_id, trip_meter_offset_miles) in zip(
+    for job_id, (vehicle_id, gas_station_place_id, resume_destination_place_id, trip_meter_offset_miles, _) in zip(
         resume_job_ids, pending_resumes
     ):
 
@@ -649,7 +742,7 @@ def maybe_auto_divert_to_gas_station(conn, cur, vehicle_id, trip_id, progress):
 
     lat, lng = interpolate_position_at_distance(route, distances_miles, progress["distance_miles"])
 
-    job_id = create_job("auto_divert_to_gas_station")
+    job_id = create_job("auto_divert_to_gas_station", slot_id=vehicle_slot_id(cur, vehicle_id))
 
     job_executor.submit(
         _run_auto_divert_job, job_id, vehicle_id, trip_id, lat, lng,
@@ -2169,6 +2262,67 @@ def run_migrations():
     cur.execute("ALTER TABLE trips ADD COLUMN IF NOT EXISTS trip_meter_offset_miles DOUBLE PRECISION NOT NULL DEFAULT 0")
 
     #
+    # Save files (see the `save_slots` table). Whatever world already exists
+    # - its settings row and every vehicle - becomes File 1, so nothing in
+    # play is lost; Files 2-4 start empty. settings goes from one fixed row
+    # (id = 1) to one row per file, keyed by the file's id.
+    #
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS save_slots (
+            id INTEGER PRIMARY KEY CHECK (id BETWEEN 1 AND 4),
+            name TEXT NOT NULL,
+            created TIMESTAMP DEFAULT NOW()
+        )
+        """
+    )
+
+    cur.execute(
+        """
+        INSERT INTO save_slots (id, name)
+        SELECT 1, 'Player 1'
+        WHERE EXISTS (SELECT 1 FROM settings) OR EXISTS (SELECT 1 FROM vehicles)
+        ON CONFLICT (id) DO NOTHING
+        """
+    )
+
+    #
+    # Every started file needs its settings row - settle_arrived_vehicles()
+    # joins on it, so a vehicle in a file without one would never settle.
+    #
+    cur.execute(
+        """
+        INSERT INTO settings (id, time_multiplier, anchor_real_utc, anchor_game_time)
+        SELECT ss.id, %s, %s, %s FROM save_slots ss
+        ON CONFLICT (id) DO NOTHING
+        """,
+        (DEFAULT_TIME_MULTIPLIER, datetime.utcnow(), local_now_naive())
+    )
+
+    cur.execute("ALTER TABLE settings DROP CONSTRAINT IF EXISTS settings_single_row")
+    cur.execute("ALTER TABLE settings DROP CONSTRAINT IF EXISTS settings_id_fkey")
+    cur.execute(
+        "ALTER TABLE settings ADD CONSTRAINT settings_id_fkey "
+        "FOREIGN KEY (id) REFERENCES save_slots(id) ON DELETE CASCADE"
+    )
+
+    cur.execute("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS slot_id INTEGER")
+    cur.execute("UPDATE vehicles SET slot_id = 1 WHERE slot_id IS NULL")
+    cur.execute("ALTER TABLE vehicles ALTER COLUMN slot_id SET NOT NULL")
+    cur.execute("ALTER TABLE vehicles DROP CONSTRAINT IF EXISTS vehicles_slot_id_fkey")
+    cur.execute(
+        "ALTER TABLE vehicles ADD CONSTRAINT vehicles_slot_id_fkey "
+        "FOREIGN KEY (slot_id) REFERENCES save_slots(id) ON DELETE CASCADE"
+    )
+
+    cur.execute("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS slot_id INTEGER")
+    cur.execute("ALTER TABLE jobs DROP CONSTRAINT IF EXISTS jobs_slot_id_fkey")
+    cur.execute(
+        "ALTER TABLE jobs ADD CONSTRAINT jobs_slot_id_fkey "
+        "FOREIGN KEY (slot_id) REFERENCES save_slots(id) ON DELETE CASCADE"
+    )
+
+    #
     # Paths are ephemeral now - one only exists while a trip is driving it
     # (see forget_unused_paths()). A trip keeps its own copy of the path's
     # length so the odometer outlives the path, and deleting a path nulls
@@ -2276,8 +2430,7 @@ def _settle_ticker():
 
             try:
                 cur = conn.cursor()
-                time_multiplier, _ = get_settings(conn, cur)
-                settle_arrived_vehicles(conn, cur, time_multiplier)
+                settle_arrived_vehicles(conn, cur)
                 cur.close()
             finally:
                 conn.close()
@@ -2298,13 +2451,17 @@ def start_settle_ticker():
 # whatever made it necessary (see settle_arrived_vehicles()). The caller
 # commits, then submits to job_executor.
 #
-def create_job(job_type, total=0, cur=None):
+#
+# slot_id ties a vehicle job to its save file (see jobs.slot_id); None for a
+# shared-world job every file's Background Jobs tab shows.
+#
+def create_job(job_type, total=0, cur=None, slot_id=None):
 
     if cur is not None:
 
         cur.execute(
-            "INSERT INTO jobs (job_type, progress_total) VALUES (%s, %s) RETURNING id",
-            (job_type, total)
+            "INSERT INTO jobs (job_type, progress_total, slot_id) VALUES (%s, %s, %s) RETURNING id",
+            (job_type, total, slot_id)
         )
 
         return cur.fetchone()[0]
@@ -2313,8 +2470,8 @@ def create_job(job_type, total=0, cur=None):
     cur = conn.cursor()
 
     cur.execute(
-        "INSERT INTO jobs (job_type, progress_total) VALUES (%s, %s) RETURNING id",
-        (job_type, total)
+        "INSERT INTO jobs (job_type, progress_total, slot_id) VALUES (%s, %s, %s) RETURNING id",
+        (job_type, total, slot_id)
     )
 
     job_id = cur.fetchone()[0]
@@ -2362,11 +2519,17 @@ def update_job(job_id, **fields):
 # run at once.
 #
 @app.get("/api/jobs")
-def list_jobs():
+def list_jobs(slot: int = Depends(current_slot)):
 
     conn = db()
     cur = conn.cursor()
 
+    #
+    # The counts stay pool-wide - every save file shares job_executor's
+    # workers, so "running"/"queued" describe the whole pool - but the list
+    # is this file's own jobs plus shared-world ones (slot_id NULL: gas
+    # price uploads, place backfill).
+    #
     cur.execute("SELECT status, COUNT(*) FROM jobs GROUP BY status")
     counts = dict(cur.fetchall())
 
@@ -2374,9 +2537,11 @@ def list_jobs():
         """
         SELECT id, job_type, status, progress_current, progress_total, error, created, updated
         FROM jobs
+        WHERE slot_id = %s OR slot_id IS NULL
         ORDER BY created DESC
         LIMIT 50
-        """
+        """,
+        (slot,)
     )
 
     rows = cur.fetchall()
@@ -2902,14 +3067,179 @@ def settings_dict(time_multiplier, game_time, auto_refuel_level):
 
 
 
-@app.get("/api/settings")
-def read_settings():
+class StartSaveSlotRequest(BaseModel):
+
+    name: str
+
+
+#
+# The file-select screen: all four save files, started or not, with enough
+# of each one's state for its file card (name, fleet size, how many are on
+# the road, total miles, and where its own game clock is). Not slot-scoped
+# itself - it's what a slot gets picked from.
+#
+@app.get("/api/slots")
+def list_save_slots():
 
     conn = db()
     cur = conn.cursor()
 
-    time_multiplier, game_time = get_settings(conn, cur)
-    auto_refuel_level = get_auto_refuel_level(conn, cur)
+    cur.execute(
+        """
+        SELECT
+            ss.id, ss.name, ss.created, s.time_multiplier,
+            (SELECT COUNT(*) FROM vehicles v WHERE v.slot_id = ss.id AND NOT v.sold),
+            (
+                SELECT COUNT(DISTINCT t.vehicle_id)
+                FROM trips t
+                JOIN vehicles v ON v.id = t.vehicle_id
+                WHERE v.slot_id = ss.id
+                AND t.cancelled_at IS NULL
+                AND (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * s.time_multiplier - t.paused_seconds)
+                    < t.realized_duration_seconds
+            ),
+            (
+                SELECT COALESCE(SUM(v.starting_mileage), 0)
+                    + COALESCE((
+                        SELECT SUM(COALESCE(t.distance_miles, 0))
+                        FROM trips t
+                        JOIN vehicles v2 ON v2.id = t.vehicle_id
+                        WHERE v2.slot_id = ss.id
+                        AND NOT v2.sold
+                        AND t.cancelled_at IS NULL
+                        AND (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * s.time_multiplier - t.paused_seconds)
+                            >= t.realized_duration_seconds
+                    ), 0)
+                FROM vehicles v
+                WHERE v.slot_id = ss.id AND NOT v.sold
+            )
+        FROM save_slots ss
+        JOIN settings s ON s.id = ss.id
+        """
+    )
+
+    started = {row[0]: row for row in cur.fetchall()}
+
+    slots = []
+
+    for slot_id in range(1, SAVE_SLOT_COUNT + 1):
+
+        row = started.get(slot_id)
+
+        if row is None:
+            slots.append({"id": slot_id, "started": False})
+            continue
+
+        _, game_time = get_settings(conn, cur, slot_id)
+
+        slots.append({
+            "id": slot_id,
+            "started": True,
+            "name": row[1],
+            "created": row[2].replace(tzinfo=ZoneInfo("UTC")) if row[2] else None,
+            "time_multiplier": row[3],
+            "vehicles": row[4],
+            "driving": row[5],
+            "total_miles": float(row[6]),
+            "game_time": game_time.isoformat()
+        })
+
+    cur.close()
+    conn.close()
+
+    return slots
+
+
+@app.post("/api/slots/{slot_id}")
+def start_save_slot(slot_id: int, req: StartSaveSlotRequest):
+
+    if not 1 <= slot_id <= SAVE_SLOT_COUNT:
+        raise HTTPException(status_code=404, detail="No such save file")
+
+    name = req.name.strip()
+
+    if not name:
+        raise HTTPException(status_code=400, detail="Enter a name for the file")
+
+    if len(name) > SAVE_SLOT_NAME_MAX_LENGTH:
+        raise HTTPException(status_code=400, detail=f"Names can be at most {SAVE_SLOT_NAME_MAX_LENGTH} characters")
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute(
+        "INSERT INTO save_slots (id, name) VALUES (%s, %s) ON CONFLICT (id) DO NOTHING RETURNING id",
+        (slot_id, name)
+    )
+
+    created = cur.fetchone() is not None
+
+    if not created:
+        conn.rollback()
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=409, detail=f"File {slot_id} is already in use - erase it first")
+
+    #
+    # Commits too - a fresh file starts at the default multiplier with its
+    # own clock beginning now (see ensure_settings_row()).
+    #
+    ensure_settings_row(conn, cur, slot_id)
+
+    cur.close()
+    conn.close()
+
+    return {"id": slot_id, "name": name}
+
+
+#
+# "Erase file": the save_slots row cascades to the file's settings, vehicles
+# and (through them) trips and jobs. The paths those trips were driving and
+# the places only those vehicles were sitting at are forgotten the same way
+# an arrival forgets them (forget_unused_paths()/forget_unused_places()).
+#
+@app.delete("/api/slots/{slot_id}")
+def erase_save_slot(slot_id: int):
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute(
+        "SELECT DISTINCT t.path_id FROM trips t JOIN vehicles v ON v.id = t.vehicle_id WHERE v.slot_id = %s",
+        (slot_id,)
+    )
+    path_ids = [row[0] for row in cur.fetchall()]
+
+    cur.execute("SELECT DISTINCT place_id FROM vehicles WHERE slot_id = %s", (slot_id,))
+    place_ids = [row[0] for row in cur.fetchall()]
+
+    cur.execute("DELETE FROM save_slots WHERE id = %s RETURNING id", (slot_id,))
+
+    erased = cur.fetchone() is not None
+
+    if erased:
+        forget_unused_paths(cur, path_ids)
+        forget_unused_places(cur, place_ids)
+
+    conn.commit()
+
+    cur.close()
+    conn.close()
+
+    if not erased:
+        raise HTTPException(status_code=404, detail=f"File {slot_id} is already empty")
+
+    return {"erased": slot_id}
+
+
+@app.get("/api/settings")
+def read_settings(slot: int = Depends(current_slot)):
+
+    conn = db()
+    cur = conn.cursor()
+
+    time_multiplier, game_time = get_settings(conn, cur, slot)
+    auto_refuel_level = get_auto_refuel_level(conn, cur, slot)
 
     cur.close()
     conn.close()
@@ -2919,7 +3249,7 @@ def read_settings():
 
 
 @app.put("/api/settings")
-def update_settings(req: UpdateSettingsRequest):
+def update_settings(req: UpdateSettingsRequest, slot: int = Depends(current_slot)):
 
     if req.time_multiplier is not None and req.time_multiplier <= 0:
         raise HTTPException(status_code=400, detail="time_multiplier must be positive")
@@ -2934,14 +3264,14 @@ def update_settings(req: UpdateSettingsRequest):
     cur = conn.cursor()
 
     if req.auto_refuel_level is not None:
-        ensure_settings_row(conn, cur)
-        cur.execute("UPDATE settings SET auto_refuel_level = %s WHERE id = 1", (req.auto_refuel_level,))
+        ensure_settings_row(conn, cur, slot)
+        cur.execute("UPDATE settings SET auto_refuel_level = %s WHERE id = %s", (req.auto_refuel_level, slot))
         conn.commit()
 
     if req.time_multiplier is None:
 
-        time_multiplier, game_time = get_settings(conn, cur)
-        auto_refuel_level = get_auto_refuel_level(conn, cur)
+        time_multiplier, game_time = get_settings(conn, cur, slot)
+        auto_refuel_level = get_auto_refuel_level(conn, cur, slot)
 
         cur.close()
         conn.close()
@@ -2953,7 +3283,7 @@ def update_settings(req: UpdateSettingsRequest):
     # before switching - so changing the multiplier speeds up/slows down
     # the clock from here, rather than jumping it to a different value.
     #
-    time_multiplier, game_time = get_settings(conn, cur)
+    time_multiplier, game_time = get_settings(conn, cur, slot)
 
     #
     # Changing the multiplier mid-trip would retroactively rescale a
@@ -2966,11 +3296,13 @@ def update_settings(req: UpdateSettingsRequest):
         """
         SELECT 1
         FROM trips t
-        WHERE t.cancelled_at IS NULL
+        JOIN vehicles v ON v.id = t.vehicle_id
+        WHERE v.slot_id = %s
+        AND t.cancelled_at IS NULL
         AND (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) < t.realized_duration_seconds
         LIMIT 1
         """,
-        (time_multiplier,)
+        (slot, time_multiplier)
     )
 
     if cur.fetchone() is not None:
@@ -2985,14 +3317,14 @@ def update_settings(req: UpdateSettingsRequest):
         """
         UPDATE settings
         SET time_multiplier = %s, anchor_real_utc = %s, anchor_game_time = %s
-        WHERE id = 1
+        WHERE id = %s
         """,
-        (req.time_multiplier, datetime.utcnow(), game_time)
+        (req.time_multiplier, datetime.utcnow(), game_time, slot)
     )
 
     conn.commit()
 
-    auto_refuel_level = get_auto_refuel_level(conn, cur)
+    auto_refuel_level = get_auto_refuel_level(conn, cur, slot)
 
     cur.close()
     conn.close()
@@ -3002,7 +3334,7 @@ def update_settings(req: UpdateSettingsRequest):
 
 
 @app.post("/api/vehicles")
-def create_vehicle(req: CreateVehicleRequest):
+def create_vehicle(req: CreateVehicleRequest, slot: int = Depends(current_slot)):
 
     conn = db()
     cur = conn.cursor()
@@ -3027,9 +3359,13 @@ def create_vehicle(req: CreateVehicleRequest):
     # "2026 Chevy Express 1" then "... 2" for the next one on that same
     # vehicle model. Counts every vehicle ever created on this vehicle model (sold ones
     # included) so numbers stay unique across "My Vehicles" and "All
-    # Vehicles" rather than getting reused after a sale.
+    # Vehicles" rather than getting reused after a sale - within this save
+    # file, so each file's fleet numbers from 1 on its own.
     #
-    cur.execute("SELECT COUNT(*) FROM vehicles WHERE vehicle_model_id=%s", (req.vehicle_model_id,))
+    cur.execute(
+        "SELECT COUNT(*) FROM vehicles WHERE vehicle_model_id=%s AND slot_id=%s",
+        (req.vehicle_model_id, slot)
+    )
 
     vehicle_number = cur.fetchone()[0] + 1
 
@@ -3045,11 +3381,11 @@ def create_vehicle(req: CreateVehicleRequest):
 
     cur.execute(
         """
-        INSERT INTO vehicles (name, vehicle_model_id, place_id, starting_mileage, fuel_gallons)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO vehicles (slot_id, name, vehicle_model_id, place_id, starting_mileage, fuel_gallons)
+        VALUES (%s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
-        (name, req.vehicle_model_id, place_id, req.starting_mileage, fuel_gallons)
+        (slot, name, req.vehicle_model_id, place_id, req.starting_mileage, fuel_gallons)
     )
 
     vehicle_id = cur.fetchone()[0]
@@ -3236,14 +3572,14 @@ def fetch_live_trip_progress(cur, vehicle_ids, time_multiplier):
 
 
 @app.get("/api/vehicles")
-def list_vehicles(include_sold: bool = False):
+def list_vehicles(include_sold: bool = False, slot: int = Depends(current_slot)):
 
     conn = db()
     cur = conn.cursor()
 
-    time_multiplier, _ = get_settings(conn, cur)
+    time_multiplier, _ = get_settings(conn, cur, slot)
 
-    settle_arrived_vehicles(conn, cur, time_multiplier)
+    settle_arrived_vehicles(conn, cur)
 
     #
     # "My Vehicles" (the current fleet, include_sold=False - the default)
@@ -3316,10 +3652,11 @@ def list_vehicles(include_sold: bool = False):
             ORDER BY t.started_at DESC
             LIMIT 1
         ) latest_trip ON true
-        {"" if include_sold else "WHERE v.sold = FALSE"}
+        WHERE v.slot_id = %s
+        {"" if include_sold else "AND v.sold = FALSE"}
         ORDER BY v.id
         """,
-        (time_multiplier, time_multiplier)
+        (time_multiplier, time_multiplier, slot)
     )
 
     rows = cur.fetchall()
@@ -3404,7 +3741,9 @@ def list_vehicles(include_sold: bool = False):
 
 
 @app.post("/api/vehicles/{id}/sell")
-def sell_vehicle(id: int):
+def sell_vehicle(id: int, slot: int = Depends(current_slot)):
+
+    assert_vehicle_in_slot(id, slot)
 
     conn = db()
     cur = conn.cursor()
@@ -3423,7 +3762,7 @@ def sell_vehicle(id: int):
         conn.close()
         raise HTTPException(status_code=409, detail="Vehicle already sold")
 
-    time_multiplier, _ = get_settings(conn, cur)
+    time_multiplier, _ = get_settings(conn, cur, slot)
 
     cur.execute(
         """
@@ -3469,14 +3808,16 @@ def sell_vehicle(id: int):
 # going anywhere yet.
 #
 @app.post("/api/vehicles/{id}/refuel")
-def refuel_vehicle(id: int):
+def refuel_vehicle(id: int, slot: int = Depends(current_slot)):
+
+    assert_vehicle_in_slot(id, slot)
 
     conn = db()
     cur = conn.cursor()
 
-    time_multiplier, _ = get_settings(conn, cur)
+    time_multiplier, _ = get_settings(conn, cur, slot)
 
-    settle_arrived_vehicles(conn, cur, time_multiplier)
+    settle_arrived_vehicles(conn, cur)
 
     cur.execute("SELECT sold, place_id, vehicle_model_id FROM vehicles WHERE id=%s", (id,))
 
@@ -3540,7 +3881,7 @@ def refuel_vehicle(id: int):
     cur.close()
     conn.close()
 
-    job_id = create_job("drive_to_refuel")
+    job_id = create_job("drive_to_refuel", slot_id=slot)
 
     job_executor.submit(_run_resume_trip_job, job_id, id, place_id, station["place_id"], True)
 
@@ -3557,14 +3898,16 @@ def refuel_vehicle(id: int):
 # paused_seconds/roadside_refuel_count handling).
 #
 @app.post("/api/vehicles/{id}/roadside-refuel")
-def roadside_refuel_vehicle(id: int):
+def roadside_refuel_vehicle(id: int, slot: int = Depends(current_slot)):
+
+    assert_vehicle_in_slot(id, slot)
 
     conn = db()
     cur = conn.cursor()
 
-    time_multiplier, _ = get_settings(conn, cur)
+    time_multiplier, _ = get_settings(conn, cur, slot)
 
-    settle_arrived_vehicles(conn, cur, time_multiplier)
+    settle_arrived_vehicles(conn, cur)
 
     cur.execute("SELECT sold FROM vehicles WHERE id=%s", (id,))
 
@@ -3728,14 +4071,16 @@ def fetch_active_trip_for_diversion(cur, vehicle_id, time_multiplier):
 # that's a perfectly normal thing for this to report, not an error.
 #
 @app.get("/api/vehicles/{id}/gas-station-ahead")
-def gas_station_ahead(id: int):
+def gas_station_ahead(id: int, slot: int = Depends(current_slot)):
+
+    assert_vehicle_in_slot(id, slot)
 
     conn = db()
     cur = conn.cursor()
 
-    time_multiplier, _ = get_settings(conn, cur)
+    time_multiplier, _ = get_settings(conn, cur, slot)
 
-    settle_arrived_vehicles(conn, cur, time_multiplier)
+    settle_arrived_vehicles(conn, cur)
 
     context = fetch_active_trip_for_diversion(cur, id, time_multiplier)
 
@@ -3774,14 +4119,16 @@ def gas_station_ahead(id: int):
 # operation - this only validates and hands off.
 #
 @app.post("/api/vehicles/{id}/divert-to-gas-station", status_code=202)
-def divert_to_gas_station(id: int, req: DivertToGasStationRequest):
+def divert_to_gas_station(id: int, req: DivertToGasStationRequest, slot: int = Depends(current_slot)):
+
+    assert_vehicle_in_slot(id, slot)
 
     conn = db()
     cur = conn.cursor()
 
-    time_multiplier, _ = get_settings(conn, cur)
+    time_multiplier, _ = get_settings(conn, cur, slot)
 
-    settle_arrived_vehicles(conn, cur, time_multiplier)
+    settle_arrived_vehicles(conn, cur)
 
     cur.execute("SELECT sold FROM vehicles WHERE id=%s", (id,))
 
@@ -3835,7 +4182,7 @@ def divert_to_gas_station(id: int, req: DivertToGasStationRequest):
     cur.close()
     conn.close()
 
-    job_id = create_job("divert_to_gas_station")
+    job_id = create_job("divert_to_gas_station", slot_id=slot)
 
     job_executor.submit(
         _run_divert_job, job_id, id, context["trip_id"], lat, lng,
@@ -3857,7 +4204,9 @@ def divert_to_gas_station(id: int, req: DivertToGasStationRequest):
 
 
 @app.delete("/api/vehicles/{id}")
-def delete_vehicle(id: int):
+def delete_vehicle(id: int, slot: int = Depends(current_slot)):
+
+    assert_vehicle_in_slot(id, slot)
 
     #
     # Permanently erases the row (cascades its trips) - distinct from
@@ -3898,12 +4247,14 @@ def delete_vehicle(id: int):
 
 
 @app.get("/api/vehicles/{id}/city")
-def vehicle_city(id: int):
+def vehicle_city(id: int, slot: int = Depends(current_slot)):
+
+    assert_vehicle_in_slot(id, slot)
 
     conn = db()
     cur = conn.cursor()
 
-    time_multiplier, _ = get_settings(conn, cur)
+    time_multiplier, _ = get_settings(conn, cur, slot)
 
     #
     # Settles any trip that's genuinely arrived first - same as
@@ -3912,7 +4263,7 @@ def vehicle_city(id: int):
     # trip's true fuel-aware status that decides whether it's "on a trip",
     # not a raw elapsed-time comparison (see active_trips()'s own comment).
     #
-    settle_arrived_vehicles(conn, cur, time_multiplier)
+    settle_arrived_vehicles(conn, cur)
 
     cur.execute(
         """
@@ -4017,7 +4368,9 @@ def vehicle_city(id: int):
 # so this is a plain join - no fresh geocoding call needed.
 #
 @app.get("/api/vehicles/{id}/address")
-def vehicle_address(id: int):
+def vehicle_address(id: int, slot: int = Depends(current_slot)):
+
+    assert_vehicle_in_slot(id, slot)
 
     conn = db()
     cur = conn.cursor()
@@ -4782,7 +5135,7 @@ def start_diversion_trip(
 
     cur.execute("UPDATE vehicles SET place_id = %s WHERE id = %s", (origin_place_id, vehicle_id))
 
-    _, game_time = get_settings(conn, cur)
+    _, game_time = get_settings(conn, cur, vehicle_slot_id(cur, vehicle_id))
 
     zones = fetch_zones_for_paths(cur, [path_id]).get(path_id, [])
 
@@ -5096,14 +5449,16 @@ def _run_drive_job(job_id, vehicle_id, destination):
 
 
 @app.post("/api/vehicles/{id}/drive", status_code=202)
-def drive_vehicle(id: int, req: DriveRequest):
+def drive_vehicle(id: int, req: DriveRequest, slot: int = Depends(current_slot)):
+
+    assert_vehicle_in_slot(id, slot)
 
     destination = req.destination.strip()
 
     if not destination:
         raise HTTPException(status_code=400, detail="Enter a destination")
 
-    job_id = create_job("drive_to_destination")
+    job_id = create_job("drive_to_destination", slot_id=slot)
 
     job_executor.submit(_run_drive_job, job_id, id, destination)
 
@@ -5385,7 +5740,14 @@ def start_trip_on_path(vehicle_id, path_id, traffic_bias=1.0, simulated_datetime
     conn = db()
     cur = conn.cursor()
 
-    time_multiplier, game_time = get_settings(conn, cur)
+    try:
+        slot_id = vehicle_slot_id(cur, vehicle_id)
+    except HTTPException:
+        cur.close()
+        conn.close()
+        raise
+
+    time_multiplier, game_time = get_settings(conn, cur, slot_id)
 
     #
     # Settle before reading place_id below - otherwise a vehicle whose
@@ -5393,7 +5755,7 @@ def start_trip_on_path(vehicle_id, path_id, traffic_bias=1.0, simulated_datetime
     # /api/vehicles hasn't been polled yet) would still show its old,
     # pre-arrival location here.
     #
-    settle_arrived_vehicles(conn, cur, time_multiplier)
+    settle_arrived_vehicles(conn, cur)
 
     cur.execute("SELECT sold, place_id, fuel_gallons FROM vehicles WHERE id=%s", (vehicle_id,))
 
@@ -5535,7 +5897,9 @@ def start_trip_on_path(vehicle_id, path_id, traffic_bias=1.0, simulated_datetime
 
 
 @app.post("/api/trips")
-def start_trip(req: StartTripRequest):
+def start_trip(req: StartTripRequest, slot: int = Depends(current_slot)):
+
+    assert_vehicle_in_slot(req.vehicle_id, slot)
 
     return start_trip_on_path(req.vehicle_id, req.path_id, req.traffic_bias, req.simulated_datetime)
 
@@ -5656,7 +6020,7 @@ def seconds_until_refresh_event(
 
 
 @app.get("/api/trips/active")
-def active_trips(refresh_on: str = "never", every_miles: Optional[float] = None):
+def active_trips(refresh_on: str = "never", every_miles: Optional[float] = None, slot: int = Depends(current_slot)):
 
     if refresh_on not in REFRESH_MODES:
         raise HTTPException(status_code=400, detail=f"refresh_on must be one of {', '.join(REFRESH_MODES)}")
@@ -5664,14 +6028,14 @@ def active_trips(refresh_on: str = "never", every_miles: Optional[float] = None)
     conn = db()
     cur = conn.cursor()
 
-    time_multiplier, _ = get_settings(conn, cur)
+    time_multiplier, _ = get_settings(conn, cur, slot)
 
     #
     # Settles any trip that's genuinely arrived before this query runs -
     # see this function's own WHERE clause comment below for why the query
     # itself no longer tries to guess "still active" from elapsed time.
     #
-    settle_arrived_vehicles(conn, cur, time_multiplier)
+    settle_arrived_vehicles(conn, cur)
 
     #
     # A completed trip keeps cancelled_at NULL too (only a diversion ever
@@ -5713,8 +6077,10 @@ def active_trips(refresh_on: str = "never", every_miles: Optional[float] = None)
         LEFT JOIN paths p ON p.id = t.path_id
         JOIN vehicle_models vs ON vs.id = v.vehicle_model_id
         WHERE t.cancelled_at IS NULL
+        AND v.slot_id = %s
         ORDER BY t.vehicle_id, t.started_at DESC
-        """
+        """,
+        (slot,)
     )
 
     rows = cur.fetchall()
@@ -5732,8 +6098,13 @@ def active_trips(refresh_on: str = "never", every_miles: Optional[float] = None)
     # shortly instead of waiting on the next event of whatever's driving.
     #
     cur.execute(
-        "SELECT EXISTS (SELECT 1 FROM jobs WHERE status IN ('pending', 'running') AND job_type = ANY(%s))",
-        (list(TRIP_STARTING_JOB_TYPES),)
+        """
+        SELECT EXISTS (
+            SELECT 1 FROM jobs
+            WHERE status IN ('pending', 'running') AND job_type = ANY(%s) AND slot_id = %s
+        )
+        """,
+        (list(TRIP_STARTING_JOB_TYPES), slot)
     )
 
     trip_job_in_flight = cur.fetchone()[0]

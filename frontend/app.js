@@ -4,6 +4,26 @@
 //
 const API = "";
 
+//
+// The save file being played (1-4), picked on the file-select screen
+// (fileselect.js) before anything else loads. Every API call names it in an
+// X-Save-Slot header - the backend scopes vehicles, trips, settings and the
+// file's own jobs to it (current_slot() in app.py). Shared-world calls (gas
+// prices, vehicle models) just ignore it.
+//
+let currentSlotId = null;
+
+function apiFetch(url, options = {}) {
+
+    const headers = new Headers(options.headers || {});
+
+    if (currentSlotId !== null) {
+        headers.set("X-Save-Slot", String(currentSlotId));
+    }
+
+    return fetch(url, { ...options, headers });
+}
+
 let map;
 
 //
@@ -34,7 +54,7 @@ function parseGameTime(iso) {
 
 async function loadSettings() {
 
-    const response = await fetch(API + "/api/settings");
+    const response = await apiFetch(API + "/api/settings");
     const settings = await response.json();
 
     gameClockAnchor = {
@@ -78,7 +98,7 @@ async function setAutoRefuel(checkbox) {
 
     try {
 
-        const response = await fetch(API + "/api/settings", {
+        const response = await apiFetch(API + "/api/settings", {
 
             method: "PUT",
 
@@ -138,7 +158,7 @@ async function setTimeMultiplier() {
         return;
     }
 
-    const response = await fetch(API + "/api/settings", {
+    const response = await apiFetch(API + "/api/settings", {
 
         method: "PUT",
 
@@ -300,7 +320,7 @@ async function pollJob(jobId, onProgress) {
 
     for (;;) {
 
-        const response = await fetch(API + "/api/jobs/" + jobId);
+        const response = await apiFetch(API + "/api/jobs/" + jobId);
         const job = await response.json();
 
         if (!response.ok) {
@@ -350,7 +370,7 @@ function prettyJobType(jobType) {
 
 async function loadJobs() {
 
-    const response = await fetch(API + "/api/jobs");
+    const response = await apiFetch(API + "/api/jobs");
     const data = await response.json();
 
     renderJobsSummary(data);
@@ -504,7 +524,7 @@ function vehicleModelLabel(vehicleModel) {
 
 async function loadVehicleModels() {
 
-    const response = await fetch(API + "/api/vehicle-models");
+    const response = await apiFetch(API + "/api/vehicle-models");
     const vehicleModels = await response.json();
 
     vehicleModelsById = new Map(vehicleModels.map((vehicleModel) => [vehicleModel.id, vehicleModel]));
@@ -588,7 +608,7 @@ function selectVehicleModel(vehicleModelId) {
 
 async function addVehicleModel() {
 
-    const response = await fetch(API + "/api/vehicle-models", {
+    const response = await apiFetch(API + "/api/vehicle-models", {
 
         method: "POST",
 
@@ -639,7 +659,7 @@ async function removeVehicleModel(vehicleModelId) {
         return;
     }
 
-    const response = await fetch(API + "/api/vehicle-models/" + vehicleModelId, { method: "DELETE" });
+    const response = await apiFetch(API + "/api/vehicle-models/" + vehicleModelId, { method: "DELETE" });
 
     if (!response.ok) {
 
@@ -699,7 +719,7 @@ function hexToRgb(hex) {
 
 async function loadGasPrices() {
 
-    const response = await fetch(API + "/api/gas-prices");
+    const response = await apiFetch(API + "/api/gas-prices");
     const gasPrices = await response.json();
 
     gasPricesByPlaceId = new Map(gasPrices.map((gasPrice) => [gasPrice.place_id, gasPrice]));
@@ -936,7 +956,7 @@ async function addGasPrice() {
 
     showGasPriceResult("pending", `Looking up "${description}"...`);
 
-    const submit = (confirmLocation) => fetch(API + "/api/gas-prices", {
+    const submit = (confirmLocation) => apiFetch(API + "/api/gas-prices", {
 
         method: "POST",
 
@@ -1083,7 +1103,7 @@ async function removeGasPrice(placeId) {
         return;
     }
 
-    const response = await fetch(API + "/api/gas-prices/" + placeId, { method: "DELETE" });
+    const response = await apiFetch(API + "/api/gas-prices/" + placeId, { method: "DELETE" });
 
     if (!response.ok) {
 
@@ -1114,7 +1134,7 @@ async function uploadGasPrices() {
     const formData = new FormData();
     formData.append("file", fileInput.files[0]);
 
-    const response = await fetch(API + "/api/gas-prices/upload", {
+    const response = await apiFetch(API + "/api/gas-prices/upload", {
 
         method: "POST",
 
@@ -1159,7 +1179,7 @@ async function uploadGasPrices() {
 
 async function loadVehicles() {
 
-    const response = await fetch(API + "/api/vehicles");
+    const response = await apiFetch(API + "/api/vehicles");
     const vehicles = await response.json();
 
     vehiclesById = new Map(vehicles.map((vehicle) => [vehicle.id, vehicle]));
@@ -1366,7 +1386,7 @@ async function refuelVehicle(vehicleId) {
 
     try {
 
-        const response = await fetch(API + "/api/vehicles/" + vehicleId + "/refuel", { method: "POST" });
+        const response = await apiFetch(API + "/api/vehicles/" + vehicleId + "/refuel", { method: "POST" });
 
         const data = await response.json();
 
@@ -1397,7 +1417,7 @@ async function sellVehicle(vehicleId) {
         return;
     }
 
-    const response = await fetch(API + "/api/vehicles/" + vehicleId + "/sell", { method: "POST" });
+    const response = await apiFetch(API + "/api/vehicles/" + vehicleId + "/sell", { method: "POST" });
 
     if (!response.ok) {
 
@@ -1471,7 +1491,7 @@ async function driveToDestination() {
 
     const input = document.getElementById("drive-destination");
 
-    const response = await fetch(API + "/api/vehicles/" + vehicleId + "/drive", {
+    const response = await apiFetch(API + "/api/vehicles/" + vehicleId + "/drive", {
 
         method: "POST",
 
@@ -1569,7 +1589,7 @@ async function fetchCurrentCity() {
         return;
     }
 
-    const response = await fetch(API + "/api/vehicles/" + vehicleId + "/city");
+    const response = await apiFetch(API + "/api/vehicles/" + vehicleId + "/city");
 
     if (!response.ok) {
         return;
@@ -1604,7 +1624,7 @@ async function divertToNearestGasStation(vehicleId) {
 
     try {
 
-        const response = await fetch(API + "/api/vehicles/" + vehicleId + "/gas-station-ahead");
+        const response = await apiFetch(API + "/api/vehicles/" + vehicleId + "/gas-station-ahead");
 
         if (!response.ok) {
             alert("Could not look up nearby gas stations");
@@ -2007,7 +2027,7 @@ async function divertToGasStation(vehicleId, gasStationPlaceId) {
 
     try {
 
-        const response = await fetch(API + "/api/vehicles/" + vehicleId + "/divert-to-gas-station", {
+        const response = await apiFetch(API + "/api/vehicles/" + vehicleId + "/divert-to-gas-station", {
 
             method: "POST",
 
@@ -2057,7 +2077,7 @@ async function roadsideRefuel(vehicleId) {
         return;
     }
 
-    const response = await fetch(API + "/api/vehicles/" + vehicleId + "/roadside-refuel", { method: "POST" });
+    const response = await apiFetch(API + "/api/vehicles/" + vehicleId + "/roadside-refuel", { method: "POST" });
 
     if (!response.ok) {
 
@@ -2084,7 +2104,7 @@ async function addVehicle() {
         return;
     }
 
-    const response = await fetch(API + "/api/vehicles", {
+    const response = await apiFetch(API + "/api/vehicles", {
 
         method: "POST",
 
@@ -2125,7 +2145,7 @@ async function pollActiveTrips() {
         params.set("every_miles", refreshOption.everyMiles);
     }
 
-    const response = await fetch(API + "/api/trips/active?" + params);
+    const response = await apiFetch(API + "/api/trips/active?" + params);
     const data = await response.json();
 
     scheduleNextRefresh(data.next_refresh_seconds);
@@ -2304,16 +2324,6 @@ function updateSimClock() {
 // A failed first load replaces the vehicle list's loading placeholder
 // (see index.html) with an error instead of leaving it spinning.
 //
-loadVehicleModels()
-    .then(loadVehicles)
-    .catch(() => {
-        document.getElementById("vehicle-list").innerHTML =
-            '<div class="list-loading-error">Could not load vehicles - refresh to try again.</div>';
-    })
-    .finally(loadGasPrices);
-loadJobs();
-
-loadSettings();
 
 //
 // Live updates are event-driven rather than a fixed-rate poll: each GET
@@ -2542,10 +2552,40 @@ renderRefreshIntervalControl();
 renderLiveUpdatesToggle();
 
 //
-// The first load always happens, badge on or off - with it off (or set to
-// Never) the next one is just the 20-minute fallback.
-// Jobs and settings already loaded above, so only trips are fetched here.
+// Loads the chosen save file's world - called once by the file-select
+// screen (fileselect.js) after a file is picked or started. Picking a
+// different file later reloads the page instead of re-calling this, so
+// nothing from the previous file's map layers or state can leak across.
 //
-pollActiveTrips().catch(() => scheduleNextRefresh(REFRESH_RETRY_SECONDS));
+function startGame(slotId, slotName) {
 
-setInterval(updateSimClock, 1000);
+    currentSlotId = slotId;
+
+    document.getElementById("current-file-label").textContent = `FILE ${slotId} · ${slotName}`;
+
+    //
+    // The gas price list is several MB once bulk-imported, so it waits for
+    // the vehicle list rather than competing with it for bandwidth and
+    // parse time. A failed first load replaces the vehicle list's loading
+    // placeholder (see index.html) with an error instead of leaving it
+    // spinning.
+    //
+    loadVehicleModels()
+        .then(loadVehicles)
+        .catch(() => {
+            document.getElementById("vehicle-list").innerHTML =
+                '<div class="list-loading-error">Could not load vehicles - refresh to try again.</div>';
+        })
+        .finally(loadGasPrices);
+
+    loadJobs();
+    loadSettings();
+
+    //
+    // The first load always happens, badge on or off - with it off (or set
+    // to Never) the next one is just the 20-minute fallback.
+    //
+    pollActiveTrips().catch(() => scheduleNextRefresh(REFRESH_RETRY_SECONDS));
+
+    setInterval(updateSimClock, 1000);
+}

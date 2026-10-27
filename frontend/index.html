@@ -8,6 +8,8 @@
       rel="stylesheet" />
 
     <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="fileselect.css">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap">
 
     <style>
         #app {
@@ -649,11 +651,29 @@
 
 <body>
 
+<!--
+    Shown on every load until a save file is picked (fileselect.js) - the
+    rest of the page loads nothing until then.
+-->
+<div id="file-select" class="file-select">
+    <div class="fs-screen">
+        <div class="fs-title">LOGISIM</div>
+        <div class="fs-subtitle">SELECT FILE</div>
+        <div id="fs-files" class="fs-files"></div>
+        <div class="fs-actions">
+            <button id="fs-erase-button" class="fs-button">ERASE</button>
+        </div>
+        <div id="fs-message" class="fs-message"></div>
+        <div class="fs-hint">ARROWS: CHOOSE &middot; ENTER: SELECT &middot; ESC: BACK</div>
+    </div>
+</div>
+
 <div id="app">
 
 <div id="main">
     <div id="map"></div>
     <div id="sim-clock">
+        <button id="current-file-label" class="current-file" onclick="returnToFileSelect()" title="Back to file select"></button>
         <div id="sim-clock-text"></div>
         <div id="time-multiplier-control">
             <label for="time-multiplier-input">Time x</label>
@@ -814,6 +834,7 @@
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="app.js"></script>
+<script src="fileselect.js"></script>
 
 </body>
 </html>

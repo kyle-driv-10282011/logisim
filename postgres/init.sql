@@ -1,6 +1,24 @@
+-- The shared, console-style save files (1-4) everyone picks from on the
+-- frontend's file-select screen. A row exists only for a started file:
+-- erasing one deletes the row, which cascades to its settings, vehicles and
+-- (through them) trips. Vehicle models, gas prices and places are shared
+-- world data, not per file.
+CREATE TABLE save_slots (
+
+    id INTEGER PRIMARY KEY CHECK (id BETWEEN 1 AND 4),
+
+    -- Entered when the file is started (file-select screen).
+    name TEXT NOT NULL,
+
+    created TIMESTAMP DEFAULT NOW()
+);
+
+
+-- One row per started save file (id = save_slots.id): each file has its own
+-- game clock, time multiplier and auto-refuel perk, all running at once.
 CREATE TABLE settings (
 
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY REFERENCES save_slots(id) ON DELETE CASCADE,
 
     -- How fast game time runs relative to real time (e.g. 60 = one real
     -- second is one game minute). Replaces the old hardcoded
@@ -25,9 +43,7 @@ CREATE TABLE settings (
     -- can grow into an upgradeable level later - 0 = off, 1 = divert to the
     -- nearest reachable gas station when low and unable to finish the trip.
     -- See AUTO_REFUEL_* and maybe_auto_divert_to_gas_station() in app.py.
-    auto_refuel_level INTEGER NOT NULL DEFAULT 0,
-
-    CONSTRAINT settings_single_row CHECK (id = 1)
+    auto_refuel_level INTEGER NOT NULL DEFAULT 0
 );
 
 
@@ -129,6 +145,10 @@ CREATE TABLE gas_prices (
 CREATE TABLE vehicles (
 
     id SERIAL PRIMARY KEY,
+
+    -- Which save file this vehicle belongs to - every vehicle (and so every
+    -- trip and path) lives in exactly one, and is invisible from the others.
+    slot_id INTEGER NOT NULL REFERENCES save_slots(id) ON DELETE CASCADE,
 
     name TEXT NOT NULL,
 
@@ -235,6 +255,11 @@ CREATE TABLE jobs (
     -- returns this row's id immediately for the frontend to poll via
     -- GET /api/jobs/{id}.
     job_type TEXT NOT NULL,
+
+    -- The save file a vehicle job (drive, divert, refuel...) belongs to, so
+    -- each file's Background Jobs tab shows its own; NULL for shared-world
+    -- jobs (gas price uploads, place backfill), shown in every file.
+    slot_id INTEGER REFERENCES save_slots(id) ON DELETE CASCADE,
 
     status TEXT NOT NULL DEFAULT 'pending', -- pending, running, done, error
 
