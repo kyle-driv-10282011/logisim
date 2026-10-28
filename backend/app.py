@@ -3854,13 +3854,23 @@ def ledger_trip_filter(trip):
     return None, trip[1:]
 
 
+LEDGER_DIRECTIONS = ("both", "in", "out")
+
+
 @app.get("/api/ledger")
 def list_ledger(
     limit: int = 50, before_id: Optional[int] = None, vehicle: Optional[str] = None, trip: Optional[str] = None,
-    slot: int = Depends(current_slot)
+    direction: str = "both", slot: int = Depends(current_slot)
 ):
 
     limit = max(1, min(limit, 500))
+
+    #
+    # The Budget page's Additions / Subtractions / Both toggle: money in
+    # (refunds), money out (charges), or everything.
+    #
+    if direction not in LEDGER_DIRECTIONS:
+        raise HTTPException(status_code=400, detail=f"direction must be one of {', '.join(LEDGER_DIRECTIONS)}")
 
     journey_id, trip_label = ledger_trip_filter(trip)
 
@@ -3881,12 +3891,13 @@ def list_ledger(
         AND (%s::text IS NULL OR vehicle_name = %s::text)
         AND (%s::int IS NULL OR journey_id = %s::int)
         AND (%s::text IS NULL OR (journey_id IS NULL AND trip = %s::text))
+        AND (%s = 'both' OR (%s = 'in' AND amount > 0) OR (%s = 'out' AND amount < 0))
         ORDER BY id DESC
         LIMIT %s
         """,
         (
             slot, before_id, before_id, vehicle, vehicle, journey_id, journey_id, trip_label, trip_label,
-            limit + 1
+            direction, direction, direction, limit + 1
         )
     )
 

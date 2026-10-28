@@ -156,3 +156,30 @@
     padding: 3px 4px;
     font-size: 13px;
 }
+
+/* Additions / Subtractions / Both - one segmented control, one pressed. */
+.budget-direction {
+    display: inline-flex;
+    margin-left: auto;
+    border: 1px solid #bbb;
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.budget-direction button {
+    padding: 4px 10px;
+    font-size: 12px;
+    background: white;
+    border: none;
+    border-right: 1px solid #bbb;
+    cursor: pointer;
+}
+
+.budget-direction button:last-child {
+    border-right: none;
+}
+
+.budget-direction button.active {
+    color: white;
+    background: #3388ff;
+}

@@ -81,6 +81,46 @@
             font-size: 12px;
         }
 
+        /* Config -> View: one row per view, each with a little preview swatch. */
+        .view-choices {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        #vehicle-panel .view-choice {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+            cursor: pointer;
+        }
+
+        #vehicle-panel .view-choice input {
+            width: auto;
+            margin: 0;
+        }
+
+        .view-swatch {
+            width: 28px;
+            height: 14px;
+            border-radius: 3px;
+            border: 1px solid #999;
+            flex-shrink: 0;
+        }
+
+        .view-swatch-bw {
+            background: linear-gradient(90deg, #111 50%, #fff 50%);
+        }
+
+        .view-swatch-blue {
+            background: linear-gradient(90deg, #3388ff 50%, #fff 50%);
+        }
+
+        .view-swatch-80s {
+            background: linear-gradient(90deg, #ff4fd8 0%, #8a2be2 50%, #2de2e6 100%);
+        }
+
         #refresh-interval-slider {
             width: 100%;
             margin: 0;
@@ -833,8 +873,30 @@
         }
     </style>
 
-    <!-- After the block above, so the 80s theme wins where both set something. -->
-    <link rel="stylesheet" href="theme80s.css">
+    <!--
+        The views (Config -> View, setView() in app.js), after the block
+        above so they win where both set something. Blue & white is the
+        page's own look with neither enabled. The script applies the saved
+        choice before first paint.
+    -->
+    <link id="theme-80s-css" rel="stylesheet" href="theme80s.css">
+    <link id="theme-bw-css" rel="stylesheet" href="themebw.css">
+    <script>
+        (function () {
+            var view = "80s";
+            try {
+                view = localStorage.getItem("logisim-view") || "80s";
+            } catch (e) {
+                // the default
+            }
+            if (["bw", "blue", "80s"].indexOf(view) < 0) {
+                view = "80s";
+            }
+            document.documentElement.dataset.view = view;
+            document.getElementById("theme-80s-css").disabled = view !== "80s";
+            document.getElementById("theme-bw-css").disabled = view !== "bw";
+        })();
+    </script>
 </head>
 
 <body>
@@ -912,6 +974,11 @@
             <label>Trip
                 <select id="budget-trip-filter" onchange="reloadBudgetRows()"></select>
             </label>
+            <div class="budget-direction" id="budget-direction" role="group" aria-label="Show">
+                <button data-direction="in" aria-pressed="false">+ Additions</button>
+                <button data-direction="out" aria-pressed="false">&minus; Subtractions</button>
+                <button data-direction="both" aria-pressed="true" class="active">Both</button>
+            </div>
         </div>
         <div class="budget-table-wrap">
             <table class="budget-table">
@@ -1109,6 +1176,29 @@
 
     <div class="tab-content" id="tab-config">
 
+        <div class="panel-form">
+            <span class="config-label"><b>View</b></span>
+            <div class="view-choices" role="radiogroup" aria-label="View">
+                <label class="view-choice">
+                    <input type="radio" name="view-choice" value="bw" onchange="setView(this.value)">
+                    <span class="view-swatch view-swatch-bw"></span>
+                    Black &amp; White
+                </label>
+                <label class="view-choice">
+                    <input type="radio" name="view-choice" value="blue" onchange="setView(this.value)">
+                    <span class="view-swatch view-swatch-blue"></span>
+                    Blue &amp; White
+                </label>
+                <label class="view-choice">
+                    <input type="radio" name="view-choice" value="80s" onchange="setView(this.value)">
+                    <span class="view-swatch view-swatch-80s"></span>
+                    80's
+                </label>
+            </div>
+            <div class="config-hint">
+                Just for this browser - everyone picks their own.
+            </div>
+        </div>
 
         <div class="panel-form">
             <label for="refresh-interval-slider" class="config-label">

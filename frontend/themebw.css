@@ -1,0 +1,91 @@
+/*
+ * The black & white view (Config -> View): the page's own blue & white
+ * look with every color drained out. A grayscale filter covers what can't
+ * be restyled one by one - map tiles, route lines, markers, vehicle
+ * pictures, gauges - and the accents that would only turn mid-grey (the
+ * blue menu bar, selected card, spotlight edge) are made true black so it
+ * reads crisp rather than washed out. The file-select screen and intro
+ * splash keep their own look.
+ */
+
+#app,
+.budget-page,
+.admin-dialog {
+    filter: grayscale(1);
+}
+
+body {
+    color: #111;
+    background: white;
+}
+
+.tab-menu-toggle {
+    color: white;
+    background: #111;
+    border-color: #111;
+}
+
+.tab-button.active {
+    color: #111;
+    background: #e6e6e6;
+}
+
+.tab-menu-separator {
+    border-top-color: #111;
+}
+
+.vehicle-item.selected {
+    border-color: #111;
+    background: #eee;
+}
+
+#vehicle-overlay {
+    border: 2px solid #111;
+}
+
+#sim-clock,
+#gasprice-overlay-toggle,
+#live-updates-toggle {
+    border: 1px solid #111;
+}
+
+#gasprice-overlay-toggle.active,
+#live-updates-toggle.active {
+    background: #111;
+}
+
+.current-file {
+    color: white;
+    background: #111;
+    border-color: #111;
+}
+
+.current-file:hover {
+    background: #444;
+}
+
+.admin-indicator {
+    background: #111;
+}
+
+.status-DRIVING,
+.status-STRANDED,
+.status-REFUELING,
+.status-READY,
+.status-SOLD {
+    color: white;
+    background: #111;
+}
+
+.status-READY,
+.status-SOLD {
+    background: #777;
+}
+
+.budget-direction button.active {
+    background: #111;
+}
+
+#map .leaflet-tile-pane {
+    filter: contrast(1.1);
+}

@@ -52,8 +52,15 @@ secret here doesn't match Edge's.
 ### Roles: user and admin
 
 Everyone plays as a **user**: the file-select screen (start a new game in an
-empty file), **My Vehicles**, **Budget**, the clock box settings, the refresh
-slider in Config and the gas station map overlay.
+empty file), **My Vehicles**, **Budget**, the clock box settings, Config's
+refresh slider and **View**, and the gas station map overlay.
+
+**Config → View** picks the game screen's look for this browser only:
+**Black & White**, **Blue & White** (the original look) or **80's** (the
+default). It's saved in `localStorage`, and each view is a stylesheet
+(`themebw.css`, `theme80s.css`, or neither for blue & white) plus the
+map's route and marker styles (`MAP_STYLES` in `app.js`). The file-select
+screen keeps its own look in every view.
 
 **Admin** manages what every save file shares: **Vehicle Models** (add,
 delete, import, export), **Gas Prices** (add, delete, bulk import, export),

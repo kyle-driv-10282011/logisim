@@ -261,9 +261,9 @@ let gasPriceOverlayVisible = false; // toggled by the gas pump icon floating ove
 map = L.map("map", { preferCanvas: true }).setView([44.977, -93.265], 6);
 
 //
-// OpenStreetMap tiles, turned into a dark neon map by theme80s.css (an
-// inverted, violet-tinted filter on the tile pane) - routes and markers
-// glow on top of it.
+// OpenStreetMap tiles. The 80's view turns them into a dark neon map
+// (theme80s.css filters the tile pane), the black & white view greys
+// them (themebw.css); blue & white shows them as they are.
 //
 L.tileLayer(
     "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
@@ -274,10 +274,19 @@ L.tileLayer(
 ).addTo(map);
 
 //
-// A driving vehicle's marker: a pulsing neon dot (.neon-vehicle-marker in
-// theme80s.css) instead of Leaflet's default blue pin.
+// The map's own pieces for each view (Config -> View, see setView()) -
+// canvas paths and Leaflet markers can't be restyled by a stylesheet:
 //
-const vehicleMarkerIcon = L.divIcon({
+//   routeGlow / routeCore: the route line, drawn twice - a wide faint glow
+//     under a bright core in the 80's view, the glow hidden otherwise.
+//   vehicleIcon: a driving vehicle's marker - a pulsing neon dot
+//     (.neon-vehicle-marker in theme80s.css) or Leaflet's own pin.
+//   resting: the dot under a selected parked vehicle.
+//
+// Black & white uses blue & white's - themebw.css greys the whole page,
+// map included.
+//
+const neonVehicleIcon = L.divIcon({
     className: "",
     html: '<div class="neon-vehicle-marker"></div>',
     iconSize: [18, 18],
@@ -285,12 +294,29 @@ const vehicleMarkerIcon = L.divIcon({
     tooltipAnchor: [0, -2]
 });
 
-//
-// Route lines: a wide faint pink glow under a bright core, since a canvas
-// path can't take a CSS glow.
-//
-const ROUTE_GLOW_STYLE = { color: "#ff4fd8", weight: 12, opacity: 0.25 };
-const ROUTE_CORE_STYLE = { color: "#ff4fd8", weight: 4, opacity: 0.95 };
+const PLAIN_MAP_STYLE = {
+    routeGlow: { color: "blue", weight: 12, opacity: 0 },
+    routeCore: { color: "blue", weight: 5, opacity: 1 },
+    vehicleIcon: new L.Icon.Default(),
+    resting: { color: "#3388ff", weight: 2, fillColor: "#3388ff" }
+};
+
+const MAP_STYLES = {
+    "80s": {
+        routeGlow: { color: "#ff4fd8", weight: 12, opacity: 0.25 },
+        routeCore: { color: "#ff4fd8", weight: 4, opacity: 0.95 },
+        vehicleIcon: neonVehicleIcon,
+        resting: { color: "#fff1a8", weight: 3, fillColor: "#2de2e6" }
+    },
+    blue: PLAIN_MAP_STYLE,
+    bw: PLAIN_MAP_STYLE
+};
+
+
+function mapStyle() {
+
+    return MAP_STYLES[currentView()] || MAP_STYLES["80s"];
+}
 
 
 //
@@ -305,10 +331,8 @@ function showRestingVehicleMarker(vehicle) {
     restingVehicleMarker = L.circleMarker([vehicle.current_lat, vehicle.current_lng], {
 
         radius: 8,
-        color: "#fff1a8",
-        weight: 3,
-        fillColor: "#2de2e6",
-        fillOpacity: 1
+        fillOpacity: 1,
+        ...mapStyle().resting
 
     }).addTo(map);
 
@@ -2448,10 +2472,12 @@ async function pollActiveTrips() {
 
         if (!layer) {
 
-            const routeGlow = L.polyline(journeyRoute, { ...ROUTE_GLOW_STYLE, interactive: false }).addTo(map);
-            const routeLine = L.polyline(journeyRoute, ROUTE_CORE_STYLE).addTo(map);
+            const style = mapStyle();
 
-            const marker = L.marker(trip.position, { icon: vehicleMarkerIcon }).addTo(map);
+            const routeGlow = L.polyline(journeyRoute, { ...style.routeGlow, interactive: false }).addTo(map);
+            const routeLine = L.polyline(journeyRoute, style.routeCore).addTo(map);
+
+            const marker = L.marker(trip.position, { icon: style.vehicleIcon }).addTo(map);
 
             marker.bindTooltip(
                 "", { permanent: true, direction: "top", offset: [0, -10] }
@@ -2830,6 +2856,70 @@ function renderRefreshIntervalControl() {
     document.getElementById("refresh-interval-slider").value = refreshIndex;
     document.getElementById("refresh-interval-value").textContent = REFRESH_OPTIONS[refreshIndex].label;
 }
+
+//
+// Config -> View: black & white, blue & white (the app's original look) or
+// 80's (the default). A per-browser preference like the refresh setting -
+// each person picks their own. The stylesheet half is switched by enabling
+// one of index.html's theme <link>s (an inline script there applies the
+// saved choice before first paint); the map half is restyled here.
+//
+const VIEW_STORAGE_KEY = "logisim-view";
+const VIEWS = ["bw", "blue", "80s"];
+
+function currentView() {
+
+    return document.documentElement.dataset.view || "80s";
+}
+
+
+function setView(view) {
+
+    if (!VIEWS.includes(view)) {
+        return;
+    }
+
+    try {
+        localStorage.setItem(VIEW_STORAGE_KEY, view);
+    } catch (e) {
+        // just won't be remembered next time
+    }
+
+    document.documentElement.dataset.view = view;
+    document.getElementById("theme-80s-css").disabled = view !== "80s";
+    document.getElementById("theme-bw-css").disabled = view !== "bw";
+
+    renderViewChoice();
+    restyleMap();
+}
+
+
+function renderViewChoice() {
+
+    for (const input of document.querySelectorAll('input[name="view-choice"]')) {
+        input.checked = input.value === currentView();
+    }
+}
+
+
+function restyleMap() {
+
+    const style = mapStyle();
+
+    for (const layer of tripLayers.values()) {
+        layer.routeGlow.setStyle(style.routeGlow);
+        layer.routeLine.setStyle(style.routeCore);
+        layer.marker.setIcon(style.vehicleIcon);
+    }
+
+    if (restingVehicleMarker) {
+        restingVehicleMarker.setStyle(style.resting);
+    }
+}
+
+
+renderViewChoice();
+
 
 function renderRefreshIntervalTicks() {
 

@@ -16,6 +16,33 @@ let budgetOldestId = null;
 //
 let budgetFilterOptions = { vehicles: [], trips: [] };
 
+//
+// The Additions / Subtractions / Both toggle: "in" (refunds), "out"
+// (charges) or "both" - filtered by the backend, so "Load older" pages
+// through only the matching entries.
+//
+let budgetDirection = "both";
+
+for (const button of document.querySelectorAll("#budget-direction button")) {
+    button.onclick = () => setBudgetDirection(button.dataset.direction);
+}
+
+
+function setBudgetDirection(direction) {
+
+    budgetDirection = direction;
+
+    for (const button of document.querySelectorAll("#budget-direction button")) {
+
+        const active = button.dataset.direction === direction;
+
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-pressed", String(active));
+    }
+
+    reloadBudgetRows();
+}
+
 
 async function openBudgetPage() {
 
@@ -154,6 +181,10 @@ async function loadBudgetPage() {
         params.set("trip", trip);
     }
 
+    if (budgetDirection !== "both") {
+        params.set("direction", budgetDirection);
+    }
+
     let data;
 
     try {
@@ -185,7 +216,7 @@ async function loadBudgetPage() {
         budgetOldestId = data.entries[data.entries.length - 1].id;
     }
 
-    const filtered = Boolean(vehicle || trip);
+    const filtered = Boolean(vehicle || trip || budgetDirection !== "both");
 
     status.textContent = rows.children.length
         ? ""

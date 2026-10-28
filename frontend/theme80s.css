@@ -115,8 +115,16 @@ body {
     accent-color: var(--neon-pink);
 }
 
-#auto-refuel-control input {
+#auto-refuel-control input,
+#vehicle-panel input[type="radio"] {
     accent-color: var(--neon-pink);
+}
+
+#vehicle-panel input[type="radio"] {
+    padding: 0;
+    border: none;
+    background: none;
+    box-shadow: none;
 }
 
 #vehicle-panel button,
@@ -647,6 +655,48 @@ body {
 
 .budget-table tbody tr:hover {
     background: rgba(45, 226, 230, 0.06);
+}
+
+/* Additions / Subtractions / Both: unpressed segments dim, the pressed one lit. */
+.budget-page .budget-direction {
+    border: 2px solid var(--neon-pink);
+    box-shadow: 0 0 8px rgba(255, 79, 216, 0.35);
+}
+
+.budget-page .budget-direction button:not(.budget-close) {
+    font-size: 8px;
+    padding: 7px 10px;
+    color: var(--neon-muted);
+    background: var(--neon-panel);
+    border: none;
+    border-right: 1px solid var(--neon-line);
+    border-radius: 0;
+    box-shadow: none;
+}
+
+.budget-page .budget-direction button:not(.budget-close):last-child {
+    border-right: none;
+}
+
+.budget-page .budget-direction button:not(.budget-close):hover:not(.active) {
+    color: var(--neon-cyan);
+    background: var(--neon-panel-2);
+    box-shadow: none;
+}
+
+.budget-page .budget-direction button.active:not(.budget-close) {
+    color: #0b0220;
+    background: linear-gradient(180deg, var(--neon-pink), #8a2be2);
+    box-shadow: none;
+}
+
+.budget-page .budget-direction button.active[data-direction="in"] {
+    background: var(--neon-green);
+}
+
+.budget-page .budget-direction button.active[data-direction="out"] {
+    color: white;
+    background: var(--neon-red);
 }
 
 /* ---------- Admin password prompt ---------- */
