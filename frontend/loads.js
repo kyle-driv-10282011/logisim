@@ -278,3 +278,233 @@ function activeLoadSummary(load) {
         ? `${what} - heading to pickup in ${load.origin}, ${due}`
         : `${what} - delivering to ${load.destination}, ${due}`;
 }
+
+
+// ---------- The Loads page: every load in this save file ----------
+
+//
+// Full screen like Budget (tab menu -> Loads): on the board, in progress,
+// delivered, expired and failed, newest first (GET /api/loads), filtered by
+// status and vehicle, a page at a time. An available load can be taken
+// straight from here by any parked vehicle that fits it - wherever its
+// pickup is (the deadline allows for the drive there).
+//
+const LOAD_STATUS_LABELS = {
+    available: "On the board",
+    accepted: "To pickup",
+    loaded: "Aboard",
+    delivered: "Delivered",
+    expired: "Expired",
+    failed: "Failed",
+};
+
+const LOADS_PAGE_SIZE = 100;
+
+let loadsPageOldestId = null;
+
+
+function openLoadsPage() {
+
+    closeTabMenu();
+
+    const select = document.getElementById("loads-vehicle-filter");
+    const previous = select.value;
+
+    select.innerHTML = `<option value="">All vehicles</option>`;
+
+    for (const vehicle of vehiclesById.values()) {
+        select.insertAdjacentHTML("beforeend", `<option value="${vehicle.id}">${escapeLoadText(vehicle.name)}</option>`);
+    }
+
+    select.value = vehiclesById.has(Number(previous)) ? previous : "";
+
+    document.getElementById("loads-page").style.display = "";
+
+    reloadLoadsPage();
+}
+
+
+function closeLoadsPage() {
+
+    document.getElementById("loads-page").style.display = "none";
+}
+
+
+function reloadLoadsPage() {
+
+    document.getElementById("loads-rows").innerHTML = "";
+    loadsPageOldestId = null;
+
+    fetchLoadsPage();
+}
+
+
+async function fetchLoadsPage() {
+
+    const status = document.getElementById("loads-status");
+    const more = document.getElementById("loads-load-more");
+    const params = new URLSearchParams({ limit: LOADS_PAGE_SIZE });
+    const statusFilter = document.getElementById("loads-status-filter").value;
+    const vehicleFilter = document.getElementById("loads-vehicle-filter").value;
+
+    if (statusFilter) {
+        params.set("status", statusFilter);
+    }
+
+    if (vehicleFilter) {
+        params.set("vehicle_id", vehicleFilter);
+    }
+
+    if (loadsPageOldestId !== null) {
+        params.set("before_id", loadsPageOldestId);
+    }
+
+    status.textContent = "Loading...";
+    more.style.display = "none";
+
+    let data;
+
+    try {
+
+        const response = await apiFetch(API + "/api/loads?" + params);
+
+        data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(data.detail);
+        }
+
+    } catch (e) {
+        status.textContent = "Couldn't load the loads - try again.";
+        return;
+    }
+
+    renderLoadsSummary(data);
+
+    const rows = document.getElementById("loads-rows");
+
+    for (const load of data.loads) {
+        rows.appendChild(loadsPageRow(load));
+    }
+
+    if (data.loads.length) {
+        loadsPageOldestId = data.loads[data.loads.length - 1].id;
+    }
+
+    status.textContent = rows.children.length
+        ? ""
+        : statusFilter || vehicleFilter
+            ? "No loads match these filters."
+            : "No loads yet - select a parked vehicle in My Vehicles to see its load board.";
+    more.style.display = data.has_more ? "" : "none";
+}
+
+
+function renderLoadsSummary(data) {
+
+    const counts = data.counts;
+
+    document.getElementById("loads-summary").textContent =
+        `${counts.available} on the board · ${counts.in_progress} in progress · ` +
+        `${counts.delivered} delivered (${formatDoubloons(data.earned)} earned)` +
+        (counts.expired ? ` · ${counts.expired} expired` : "") +
+        (counts.failed ? ` · ${counts.failed} failed` : "");
+
+    //
+    // Each status filter shows how many it would list.
+    //
+    for (const option of document.querySelectorAll("#loads-status-filter option")) {
+        if (option.value) {
+            const label = option.textContent.replace(/ \(\d+\)$/, "");
+            option.textContent = `${label} (${counts[option.value]})`;
+        }
+    }
+}
+
+
+//
+// Mirrors load_capacity() in app.py: freight up to the cargo space,
+// passengers up to the seats less the driver's.
+//
+function vehicleCanTakeLoad(vehicle, load) {
+
+    const vehicleModel = vehicle.vehicle_model;
+
+    if (!vehicleModel || vehicle.status !== "READY" || vehicle.load || driveInFlightVehicleId === vehicle.id) {
+        return false;
+    }
+
+    return load.kind === "passengers"
+        ? load.quantity <= Math.max(0, vehicleModel.person_capacity - 1)
+        : load.quantity <= vehicleModel.cargo_capacity_cuft;
+}
+
+
+function loadsPageRow(load) {
+
+    const row = document.createElement("tr");
+
+    let when = "";
+
+    if (load.status === "available") {
+        when = `Offer ends ${formatGameDateTime(load.expires_game_time)}`;
+    } else if (load.status === "accepted" || load.status === "loaded") {
+        when = `Due ${formatGameDateTime(load.deliver_by_game_time)}`;
+    } else if (load.status === "delivered") {
+        const late = load.delivered_game_time > load.deliver_by_game_time;
+        when = `Delivered ${formatGameDateTime(load.delivered_game_time)}${late ? " (late)" : ""}`;
+    } else if (load.status === "expired") {
+        when = `Ended ${formatGameDateTime(load.expires_game_time)}`;
+    }
+
+    const pay = load.status === "delivered"
+        ? formatDoubloons(load.paid) + (load.paid < load.pay ? ` <span class="loads-of">of ${formatDoubloons(load.pay)}</span>` : "")
+        : formatDoubloons(load.pay);
+
+    row.innerHTML =
+        `<td><span class="load-status load-status-${load.status}">${LOAD_STATUS_LABELS[load.status] || load.status}</span></td>` +
+        `<td>${escapeLoadText(load.cargo)}<div class="budget-detail">${loadQuantity(load)}</div></td>` +
+        `<td>${escapeLoadText(load.origin)} &rarr; ${escapeLoadText(load.destination)}` +
+        `<div class="budget-detail">~${Math.round(load.estimated_miles)} mi</div></td>` +
+        `<td>${load.vehicle_name ? escapeLoadText(load.vehicle_name) : "&mdash;"}</td>` +
+        `<td>${when || "&mdash;"}</td>` +
+        `<td class="budget-cost">${pay}</td>` +
+        `<td class="loads-action"></td>`;
+
+    if (load.status === "available") {
+
+        const vehicles = [...vehiclesById.values()].filter((vehicle) => vehicleCanTakeLoad(vehicle, load));
+        const cell = row.querySelector(".loads-action");
+
+        if (!vehicles.length) {
+
+            cell.innerHTML = `<span class="budget-detail">No parked vehicle fits</span>`;
+
+        } else {
+
+            cell.innerHTML =
+                `<select class="loads-vehicle">` +
+                vehicles.map((vehicle) => `<option value="${vehicle.id}">${escapeLoadText(vehicle.name)}</option>`).join("") +
+                `</select>` +
+                `<button class="loads-accept">Accept</button>`;
+
+            const accept = cell.querySelector(".loads-accept");
+
+            accept.onclick = () => withSpinner(accept, async () => {
+                const vehicleId = Number(cell.querySelector(".loads-vehicle").value);
+                closeLoadsPage();
+                await acceptLoad(vehicleId, load);
+            });
+        }
+    }
+
+    return row;
+}
+
+
+document.addEventListener("keydown", (event) => {
+
+    if (event.key === "Escape" && document.getElementById("loads-page").style.display !== "none") {
+        closeLoadsPage();
+    }
+});

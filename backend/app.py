@@ -8001,6 +8001,112 @@ def vehicle_load_board(id: int, slot: int = Depends(current_slot)):
 
 
 #
+# The Loads page (loads.js): every load in this save file - on the board,
+# in progress, delivered, expired, failed - newest first, filtered by
+# status (LOAD_STATUS_FILTERS) and/or vehicle, a page at a time
+# (before_id, like the ledger). Also each status's count and what
+# deliveries have earned in total, for the page's summary line.
+#
+LOAD_STATUS_FILTERS = {
+    "available": ("available",),
+    "in_progress": ("accepted", "loaded"),
+    "delivered": ("delivered",),
+    "expired": ("expired",),
+    "failed": ("failed",),
+}
+
+
+@app.get("/api/loads")
+def list_loads(
+    status: Optional[str] = None, vehicle_id: Optional[int] = None, limit: int = 100,
+    before_id: Optional[int] = None, slot: int = Depends(current_slot)
+):
+
+    if status is not None and status not in LOAD_STATUS_FILTERS:
+        raise HTTPException(status_code=400, detail=f"status must be one of {', '.join(LOAD_STATUS_FILTERS)}")
+
+    limit = max(1, min(limit, 500))
+
+    conn = db()
+    cur = conn.cursor()
+
+    try:
+
+        _, game_now = get_settings(conn, cur, slot)
+
+        cur.execute(
+            "UPDATE loads SET status = 'expired' WHERE slot_id = %s AND status = 'available' AND expires_game_time < %s",
+            (slot, game_now)
+        )
+
+        conn.commit()
+
+        statuses = list(LOAD_STATUS_FILTERS[status]) if status else None
+
+        cur.execute(
+            f"""
+            SELECT {LOAD_COLUMNS}, picked_up_game_time, delivered_game_time, paid,
+                (SELECT v.name FROM vehicles v WHERE v.id = loads.vehicle_id)
+            FROM loads
+            WHERE slot_id = %s
+            AND (%s::text[] IS NULL OR status = ANY(%s::text[]))
+            AND (%s::int IS NULL OR vehicle_id = %s::int)
+            AND (%s::int IS NULL OR id < %s::int)
+            ORDER BY id DESC
+            LIMIT %s
+            """,
+            (slot, statuses, statuses, vehicle_id, vehicle_id, before_id, before_id, limit + 1)
+        )
+
+        rows = cur.fetchall()
+
+        cur.execute(
+            """
+            SELECT status, COUNT(*), COALESCE(SUM(paid), 0)
+            FROM loads WHERE slot_id = %s
+            GROUP BY status
+            """,
+            (slot,)
+        )
+
+        counts = {}
+        earned = 0.0
+
+        for row_status, count, paid in cur.fetchall():
+            counts[row_status] = count
+            earned += float(paid)
+
+    finally:
+        cur.close()
+        conn.close()
+
+    loads = []
+
+    for row in rows[:limit]:
+        loads.append({
+            **load_dict(row),
+            "picked_up_game_time": row[21].isoformat() if row[21] else None,
+            "delivered_game_time": row[22].isoformat() if row[22] else None,
+            "paid": float(row[23]) if row[23] is not None else None,
+            "vehicle_name": row[24],
+        })
+
+    return {
+        "game_time": game_now.isoformat(),
+        "loads": loads,
+        "has_more": len(rows) > limit,
+        "counts": {
+            "available": counts.get("available", 0),
+            "in_progress": counts.get("accepted", 0) + counts.get("loaded", 0),
+            "delivered": counts.get("delivered", 0),
+            "expired": counts.get("expired", 0),
+            "failed": counts.get("failed", 0),
+        },
+        "earned": round(earned, 2),
+    }
+
+
+#
 # A load's city as a place a trip can drive to - saved directly from the
 # bundled coordinates (no geocode), and reused if that city's already a
 # place.

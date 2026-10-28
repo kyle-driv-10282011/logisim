@@ -1135,6 +1135,55 @@
 </div>
 
 <!--
+    The Loads page (loads.js): every load in this save file, full screen
+    like Budget and themed by the same classes.
+-->
+<div id="loads-page" class="budget-page loads-page" style="display:none">
+    <div class="budget-sheet">
+        <div class="budget-header">
+            <div>
+                <div class="budget-title">Loads</div>
+                <div class="budget-subtitle" id="loads-summary"></div>
+            </div>
+            <button class="budget-close" onclick="closeLoadsPage()" title="Close (Esc)">&times;</button>
+        </div>
+        <div class="budget-filters">
+            <label>Status
+                <select id="loads-status-filter" onchange="reloadLoadsPage()">
+                    <option value="">All</option>
+                    <option value="available">On the board</option>
+                    <option value="in_progress">In progress</option>
+                    <option value="delivered">Delivered</option>
+                    <option value="expired">Expired</option>
+                    <option value="failed">Failed</option>
+                </select>
+            </label>
+            <label>Vehicle
+                <select id="loads-vehicle-filter" onchange="reloadLoadsPage()"></select>
+            </label>
+        </div>
+        <div class="budget-table-wrap">
+            <table class="budget-table loads-table">
+                <thead>
+                    <tr>
+                        <th>Status</th>
+                        <th>Load</th>
+                        <th>Route</th>
+                        <th>Vehicle</th>
+                        <th>When</th>
+                        <th class="budget-cost">Pay</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody id="loads-rows"></tbody>
+            </table>
+            <div id="loads-status" class="budget-status"></div>
+            <button id="loads-load-more" class="budget-load-more" onclick="withSpinner(this, fetchLoadsPage)" style="display:none">Load older</button>
+        </div>
+    </div>
+</div>
+
+<!--
     Full-width page over the map, opened from the tab menu's "Budget" entry
     (budget.js) - every Gold Doubloon charged or refunded in this file.
 -->
@@ -1222,6 +1271,7 @@
             <button class="tab-button active" id="tab-button-myvehicles" onclick="withSpinner(this, () => showTab('myvehicles'))">My Vehicles</button>
             <button class="tab-button" id="tab-button-config" onclick="withSpinner(this, () => showTab('config'))">Config</button>
             <button class="tab-button" id="tab-button-budget" onclick="openBudgetPage()">Budget</button>
+            <button class="tab-button" id="tab-button-loads" onclick="openLoadsPage()">Loads</button>
             <!-- Admin-only (admin.js): asks for the password when opened. -->
             <div class="tab-menu-separator" role="separator"></div>
             <button class="tab-button admin-tab" id="tab-button-vehiclemodels" onclick="openVehicleModelsPage()">Vehicle Models <span class="admin-lock" title="Admin only - asks for the password">&#128274;</span></button>

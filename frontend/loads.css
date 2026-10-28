@@ -107,3 +107,81 @@
     font-size: 11px;
     color: #2b6a3a;
 }
+
+/*
+ * The Loads page: full screen like Budget (whose classes style the rest),
+ * with a status chip per load and Accept in the last column.
+ */
+#loads-page {
+    padding: 0;
+    overflow: hidden;
+}
+
+#loads-page .budget-sheet {
+    display: flex;
+    flex-direction: column;
+    width: 100vw;
+    max-width: none;
+    height: 100vh;
+    align-self: stretch;
+    border-radius: 0;
+}
+
+#loads-page .budget-table-wrap {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+}
+
+#loads-page .budget-table th {
+    z-index: 1;
+}
+
+.load-status {
+    display: inline-block;
+    padding: 2px 7px;
+    font-size: 11px;
+    font-weight: bold;
+    white-space: nowrap;
+    color: white;
+    border-radius: 10px;
+    background: #888;
+}
+
+.load-status-available {
+    background: #1971c2;
+}
+
+.load-status-accepted,
+.load-status-loaded {
+    background: #e8890c;
+}
+
+.load-status-delivered {
+    background: #2a8f2a;
+}
+
+.load-status-expired {
+    background: #999;
+}
+
+.load-status-failed {
+    background: #c92a2a;
+}
+
+.loads-of {
+    font-weight: normal;
+    font-size: 11px;
+    color: #777;
+}
+
+.loads-action {
+    white-space: nowrap;
+    text-align: right;
+}
+
+.loads-action select {
+    max-width: 180px;
+    margin-right: 6px;
+    font-size: 12px;
+}

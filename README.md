@@ -151,6 +151,13 @@ roadside fuel all work along the way. Delivering after the deadline pays
 75%, and later than the whole time allowed pays 40%. A vehicle with a load
 can't be sold, refueled by hand, or given another load until it delivers.
 
+The **Loads** page (tab menu → Loads) lists every load in the save file:
+on the board, in progress, delivered (with what it paid, marked if late),
+expired and failed. It's newest first, filterable by status and vehicle,
+with a summary of counts and total earnings (`GET /api/loads`). An
+available load can be accepted from here by any parked vehicle that fits
+it, wherever its pickup is. The deadline allows for the drive there.
+
 - **Cities:** every US city and town of 10,000+ people, Hawaii aside,
   bundled in `backend/data/us_cities.csv` (4,297 rows). It's from
   [GeoNames](https://www.geonames.org)' `cities5000` list, licensed

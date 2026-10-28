@@ -877,6 +877,43 @@ body {
     color: var(--neon-cyan);
 }
 
+.load-status {
+    font-family: var(--pixel-font);
+    font-size: 7px;
+    font-weight: normal;
+    letter-spacing: 1px;
+    padding: 4px 6px;
+    border-radius: 3px;
+    color: #0b0220;
+}
+
+.load-status-available {
+    background: var(--neon-cyan);
+}
+
+.load-status-accepted,
+.load-status-loaded {
+    background: var(--neon-orange);
+}
+
+.load-status-delivered {
+    background: var(--neon-green);
+}
+
+.load-status-expired {
+    background: #5b4a7a;
+    color: var(--neon-text);
+}
+
+.load-status-failed {
+    background: var(--neon-red);
+    color: white;
+}
+
+.loads-of {
+    color: var(--neon-muted);
+}
+
 /* ---------- Admin password prompt ---------- */
 
 .admin-dialog {
