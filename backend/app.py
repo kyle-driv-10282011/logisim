@@ -9,6 +9,8 @@ from zoneinfo import ZoneInfo
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
 from psycopg2.extras import Json
+from PIL import Image, ImageOps, UnidentifiedImageError
+from urllib.parse import quote, urlparse
 import psycopg2
 import requests
 import json
@@ -17,11 +19,13 @@ import csv
 import hashlib
 import hmac
 import io
+import ipaddress
 import logging
 import math
 import os
 import random
 import re
+import socket
 import threading
 import time
 import uuid
@@ -2816,6 +2820,18 @@ def run_migrations():
 
     cur.execute("ALTER TABLE trips ADD COLUMN IF NOT EXISTS journey_route_before JSONB NOT NULL DEFAULT '[]'")
 
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS vehicle_model_images (
+            vehicle_model_id INTEGER PRIMARY KEY REFERENCES vehicle_models(id) ON DELETE CASCADE,
+            content_type TEXT NOT NULL,
+            data BYTEA NOT NULL,
+            sha256 TEXT NOT NULL,
+            updated TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+        """
+    )
+
     cur.execute("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS slot_id INTEGER")
     cur.execute("ALTER TABLE jobs DROP CONSTRAINT IF EXISTS jobs_slot_id_fkey")
     cur.execute(
@@ -3160,12 +3176,27 @@ def vehicle_model_dict(row):
 
         "image": row[8],
 
-        "fuel_tank_gallons": row[9]
+        "fuel_tank_gallons": row[9],
+
+        #
+        # Where the picture is: an uploaded one (vehicle_model_images, see
+        # normalize_vehicle_image()) wins, versioned by its hash so browsers
+        # can cache it forever; otherwise a built-in file under
+        # frontend/images/ - a path relative to the page either way.
+        #
+        "image_url": (
+            f"api/vehicle-models/{row[0]}/image?v={row[10][:12]}" if row[10]
+            else f"images/{quote(row[8])}" if row[8]
+            else None
+        ),
+
+        "has_uploaded_image": row[10] is not None
     }
 
 
 VEHICLE_MODEL_COLUMNS = """
-    id, year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, image, fuel_tank_gallons
+    id, year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, image, fuel_tank_gallons,
+    (SELECT i.sha256 FROM vehicle_model_images i WHERE i.vehicle_model_id = vehicle_models.id)
 """
 
 
@@ -4123,14 +4154,25 @@ def create_vehicle(req: CreateVehicleRequest, slot: int = Depends(current_slot))
 
 
 
-@app.post("/api/vehicle-models")
-def create_vehicle_model(req: CreateVehicleModelRequest, _admin: None = Depends(require_admin)):
+def validate_vehicle_model(req):
+
+    if not req.brand.strip() or not req.model.strip():
+        raise HTTPException(status_code=400, detail="Brand and model can't be empty")
 
     if req.mpg <= 0:
         raise HTTPException(status_code=400, detail="mpg must be positive")
 
     if req.fuel_tank_gallons <= 0:
         raise HTTPException(status_code=400, detail="fuel_tank_gallons must be positive")
+
+    if req.person_capacity < 0 or req.cargo_capacity_cuft < 0 or req.cost < 0:
+        raise HTTPException(status_code=400, detail="Capacity and cost can't be negative")
+
+
+@app.post("/api/vehicle-models")
+def create_vehicle_model(req: CreateVehicleModelRequest, _admin: None = Depends(require_admin)):
+
+    validate_vehicle_model(req)
 
     conn = db()
     cur = conn.cursor()
@@ -4159,10 +4201,268 @@ def create_vehicle_model(req: CreateVehicleModelRequest, _admin: None = Depends(
 
     conn.commit()
 
+    vehicle_model = fetch_vehicle_models_by_id(cur, [vehicle_model_id])[vehicle_model_id]
+
     cur.close()
     conn.close()
 
-    return {**req.model_dump(), "id": vehicle_model_id}
+    return vehicle_model
+
+
+#
+# Edits every field of a vehicle model in place (the Vehicle Models page's
+# editor). Vehicles already built on it pick the change up straight away -
+# they look their model up by id. The starter van keeps its year, brand and
+# model, since that's how it's recognized (see STARTER_VEHICLE_MODEL).
+#
+@app.put("/api/vehicle-models/{id}")
+def update_vehicle_model(id: int, req: CreateVehicleModelRequest, _admin: None = Depends(require_admin)):
+
+    validate_vehicle_model(req)
+
+    conn = db()
+    cur = conn.cursor()
+
+    try:
+
+        cur.execute("SELECT year, brand, model FROM vehicle_models WHERE id = %s", (id,))
+
+        row = cur.fetchone()
+
+        if row is None:
+            raise HTTPException(status_code=404, detail="Vehicle model not found")
+
+        if is_starter_vehicle_model(*row) and not is_starter_vehicle_model(req.year, req.brand, req.model):
+            raise HTTPException(
+                status_code=409,
+                detail="The starter van's year, brand and model can't change - every new file starts with one"
+            )
+
+        cur.execute(
+            """
+            UPDATE vehicle_models
+            SET year = %s, brand = %s, model = %s, person_capacity = %s, cargo_capacity_cuft = %s,
+                cost = %s, mpg = %s, image = %s, fuel_tank_gallons = %s
+            WHERE id = %s
+            """,
+            (
+                req.year, req.brand.strip(), req.model.strip(), req.person_capacity, req.cargo_capacity_cuft,
+                req.cost, req.mpg, req.image or None, req.fuel_tank_gallons, id
+            )
+        )
+
+        conn.commit()
+
+        return fetch_vehicle_models_by_id(cur, [id])[id]
+
+    finally:
+        cur.close()
+        conn.close()
+
+
+#
+# Uploaded and URL-fetched vehicle pictures live in Postgres
+# (vehicle_model_images), not on disk: the frontend's nginx serves only
+# what was baked into its image, the backend has no volume of its own, and
+# this way they're in every database backup and go when their model does.
+# Each one is re-encoded here before it's stored - checked to really be an
+# image, turned upright, shrunk to fit VEHICLE_IMAGE_MAX_SIDE and saved as
+# WebP - so whatever comes in, what's stored is small and safe to serve.
+#
+VEHICLE_IMAGE_MAX_BYTES = 10 * 1024 * 1024
+VEHICLE_IMAGE_MAX_SIDE = 800
+VEHICLE_IMAGE_FETCH_TIMEOUT_SECONDS = (5, 20)
+
+#
+# Refuses images that would decode to more pixels than this (a tiny file
+# can claim to be enormous) instead of Pillow's default warning.
+#
+Image.MAX_IMAGE_PIXELS = 40_000_000
+
+
+def normalize_vehicle_image(data):
+
+    if len(data) > VEHICLE_IMAGE_MAX_BYTES:
+        raise HTTPException(status_code=413, detail=f"Images can be at most {VEHICLE_IMAGE_MAX_BYTES // (1024 * 1024)} MB")
+
+    try:
+        image = Image.open(io.BytesIO(data))
+        image.load()
+    except (UnidentifiedImageError, Image.DecompressionBombError, OSError, ValueError):
+        raise HTTPException(status_code=400, detail="That isn't an image Logisim can read - try a PNG, JPEG, WebP or GIF")
+
+    image = ImageOps.exif_transpose(image)
+
+    if image.mode not in ("RGB", "RGBA"):
+        image = image.convert("RGBA")
+
+    image.thumbnail((VEHICLE_IMAGE_MAX_SIDE, VEHICLE_IMAGE_MAX_SIDE), Image.LANCZOS)
+
+    out = io.BytesIO()
+    image.save(out, "WEBP", quality=85, method=6)
+
+    return out.getvalue()
+
+
+#
+# Only http(s), and never a private, loopback or link-local address - the
+# backend makes this request from inside the server's network, so a URL
+# mustn't be a way to reach things there. When the host can't be resolved
+# here but a proxy is configured, the proxy does the resolving (and its
+# own policing), so that's let through.
+#
+def fetch_vehicle_image_url(url):
+
+    parsed = urlparse(url.strip())
+
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise HTTPException(status_code=400, detail="Enter an http:// or https:// image URL")
+
+    try:
+        addresses = {info[4][0] for info in socket.getaddrinfo(parsed.hostname, None)}
+    except socket.gaierror:
+        if not (os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")):
+            raise HTTPException(status_code=400, detail=f"Couldn't find {parsed.hostname}")
+        addresses = set()
+
+    for address in addresses:
+
+        ip = ipaddress.ip_address(address.split("%")[0])
+
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+            raise HTTPException(status_code=400, detail="That URL points inside the server's network")
+
+    try:
+
+        with requests.get(
+            url.strip(),
+            stream=True,
+            timeout=VEHICLE_IMAGE_FETCH_TIMEOUT_SECONDS,
+            headers={"User-Agent": "Logisim vehicle image fetch"}
+        ) as response:
+
+            if response.status_code != 200:
+                raise HTTPException(status_code=400, detail=f"That URL answered {response.status_code}, not an image")
+
+            data = b""
+
+            for chunk in response.iter_content(64 * 1024):
+
+                data += chunk
+
+                if len(data) > VEHICLE_IMAGE_MAX_BYTES:
+                    raise HTTPException(
+                        status_code=413, detail=f"Images can be at most {VEHICLE_IMAGE_MAX_BYTES // (1024 * 1024)} MB"
+                    )
+
+    except requests.RequestException:
+        raise HTTPException(status_code=400, detail="Couldn't download that URL")
+
+    return data
+
+
+class VehicleImageUrlRequest(BaseModel):
+    url: str
+
+
+#
+# The editor's "From URL" preview: fetches and normalizes the image without
+# storing it, so the admin sees exactly what would be saved. Saving then
+# uploads those same bytes (PUT .../image), so the URL is only fetched once.
+#
+@app.post("/api/vehicle-models/image-preview")
+def preview_vehicle_image_url(req: VehicleImageUrlRequest, _admin: None = Depends(require_admin)):
+
+    return Response(normalize_vehicle_image(fetch_vehicle_image_url(req.url)), media_type="image/webp")
+
+
+@app.put("/api/vehicle-models/{id}/image")
+async def upload_vehicle_model_image(id: int, file: UploadFile = File(...), _admin: None = Depends(require_admin)):
+
+    data = normalize_vehicle_image(await file.read(VEHICLE_IMAGE_MAX_BYTES + 1))
+
+    conn = db()
+    cur = conn.cursor()
+
+    try:
+
+        cur.execute("SELECT 1 FROM vehicle_models WHERE id = %s", (id,))
+
+        if cur.fetchone() is None:
+            raise HTTPException(status_code=404, detail="Vehicle model not found")
+
+        cur.execute(
+            """
+            INSERT INTO vehicle_model_images (vehicle_model_id, content_type, data, sha256)
+            VALUES (%s, 'image/webp', %s, %s)
+            ON CONFLICT (vehicle_model_id) DO UPDATE
+            SET content_type = EXCLUDED.content_type, data = EXCLUDED.data, sha256 = EXCLUDED.sha256, updated = NOW()
+            """,
+            (id, psycopg2.Binary(data), hashlib.sha256(data).hexdigest())
+        )
+
+        conn.commit()
+
+        return fetch_vehicle_models_by_id(cur, [id])[id]
+
+    finally:
+        cur.close()
+        conn.close()
+
+
+#
+# Back to the built-in picture (the image filename), if it has one.
+#
+@app.delete("/api/vehicle-models/{id}/image")
+def delete_vehicle_model_image(id: int, _admin: None = Depends(require_admin)):
+
+    conn = db()
+    cur = conn.cursor()
+
+    try:
+
+        cur.execute("DELETE FROM vehicle_model_images WHERE vehicle_model_id = %s", (id,))
+
+        conn.commit()
+
+        vehicle_model = fetch_vehicle_models_by_id(cur, [id]).get(id)
+
+        if vehicle_model is None:
+            raise HTTPException(status_code=404, detail="Vehicle model not found")
+
+        return vehicle_model
+
+    finally:
+        cur.close()
+        conn.close()
+
+
+#
+# For everyone - every vehicle card shows its model's picture. image_url
+# carries the hash (?v=), so a new picture is a new URL and this one can be
+# cached for good.
+#
+@app.get("/api/vehicle-models/{id}/image")
+def get_vehicle_model_image(id: int):
+
+    conn = db()
+    cur = conn.cursor()
+
+    try:
+        cur.execute("SELECT content_type, data FROM vehicle_model_images WHERE vehicle_model_id = %s", (id,))
+        row = cur.fetchone()
+    finally:
+        cur.close()
+        conn.close()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="No uploaded image for that vehicle model")
+
+    return Response(
+        bytes(row[1]),
+        media_type=row[0],
+        headers={"Cache-Control": "public, max-age=31536000, immutable"}
+    )
 
 
 

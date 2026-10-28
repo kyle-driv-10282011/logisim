@@ -6,9 +6,9 @@
 // token from POST /api/admin/elevate, which apiFetch() sends along as
 // X-Admin-Token.
 //
-// Admin is scoped to the one tab that was unlocked: the admin tabs
-// (Vehicle Models, Gas Prices, Background Jobs, each with its own backup
-// and restore) stay listed with a lock (.admin-locked, see index.html), ask for the password
+// Admin is scoped to the one area that was unlocked: the admin entries
+// (the Vehicle Models page, the Gas Prices and Background Jobs tabs) stay
+// listed with a lock (.admin-locked, see index.html), ask for the password
 // when opened, and lock again as soon as another tab is shown (showTab()
 // calls relockAdminUnless()). The token is only kept in memory, so a
 // reload locks everything too.
@@ -91,6 +91,10 @@ function applyAdminState() {
 
         if (activeTab && activeTab.classList.contains("admin-tab")) {
             showTab("myvehicles");
+        }
+
+        if (vehicleModelsPageOpen) {
+            closeVehicleModelsPage(false);
         }
     }
 }

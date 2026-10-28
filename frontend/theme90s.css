@@ -58,7 +58,6 @@ body {
 #refresh-interval-ticks,
 #time-multiplier-control,
 #auto-refuel-control,
-#tab-vehiclemodels label,
 #vehicle-panel [style*="color:#555"] {
     color: #222 !important;
 }
@@ -68,6 +67,7 @@ body {
 #vehicle-panel select,
 #sim-clock input,
 .budget-page select,
+.budget-page input:not([type="file"]),
 .admin-dialog-box input {
     font-family: var(--w95-font);
     font-size: 12px;
@@ -616,6 +616,75 @@ body {
     color: #000;
     background: var(--w95-light);
     box-shadow: var(--w95-pressed);
+}
+
+/* ---------- Vehicle Models page ---------- */
+
+.models-grid {
+    padding: 8px;
+    background: var(--w95-white);
+    box-shadow: var(--w95-sunken);
+}
+
+.model-card {
+    background: var(--w95-face);
+    border: none;
+    border-radius: 0;
+    box-shadow: var(--w95-raised);
+}
+
+.model-card-image,
+.model-image-preview {
+    background: var(--w95-teal);
+    border: none;
+    border-radius: 0;
+    box-shadow: var(--w95-sunken);
+}
+
+.model-card-stats,
+.models-footnote,
+.model-editor-fields label,
+.model-editor-note,
+.model-image-caption,
+.model-image-drop span {
+    color: #222;
+}
+
+.model-card-noimage,
+.model-image-preview.empty::after {
+    color: var(--w95-white);
+}
+
+.model-card-cost {
+    color: #008000;
+}
+
+.model-card-starter {
+    border-radius: 0;
+    color: #000;
+    background: #ffff00;
+    border: 1px solid #000;
+}
+
+.model-image-tab.active {
+    font-weight: normal;
+}
+
+.budget-page .model-image-tab:not(.budget-close).active {
+    background: var(--w95-light);
+    box-shadow: var(--w95-pressed);
+}
+
+.model-image-drop {
+    border: 1px dashed #000;
+    border-radius: 0;
+    background: var(--w95-white);
+}
+
+.model-image-drop:hover,
+.model-image-drop.dragging {
+    border-color: var(--w95-navy);
+    background: #e8e8ff;
 }
 
 /* ---------- Admin password prompt: a dialog box ---------- */

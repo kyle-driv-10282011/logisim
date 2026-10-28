@@ -64,14 +64,12 @@ map's route and marker styles (`MAP_STYLES` in `app.js`). The file-select
 screen keeps its own look in every view.
 
 **Admin** manages what every save file shares: **Vehicle Models** (add,
-delete, import, export), **Gas Prices** (add, delete, bulk import, export),
-**Background Jobs**, and erasing files. It isn't a login. Admin tabs are
-listed for everyone with a 🔒. Opening one asks for the instance's
-`ADMIN_PASSWORD` (set in `.env`), and switching to another tab locks it again.
-Each admin tab has its own backup and restore at the bottom: **Export all
-vehicle models (CSV)** and **Import vehicle models** under Vehicle Models, and
-**Export all gas stations (CSV)** under Gas Prices, which restores through its
-**Bulk import**. Leave `ADMIN_PASSWORD` empty to turn admin off.
+edit, delete, pictures, import, export), **Gas Prices** (add, delete, bulk
+import, export), **Background Jobs**, and erasing files. It isn't a login.
+The admin entries are listed for everyone with a 🔒. Opening one asks for the
+instance's `ADMIN_PASSWORD` (set in `.env`). Switching to another tab, or
+closing the Vehicle Models page, locks it again. Gas Prices has **Export all
+gas stations (CSV)**, which restores through its **Bulk import**. Leave `ADMIN_PASSWORD` empty to turn admin off.
 
 **ERASE SELECTED FILE** on the file-select screen erases the file under the
 cursor. It asks for the admin password every time, as the confirmation. The
@@ -894,7 +892,12 @@ All endpoints are on the `backend` service, reached through nginx at
 | `POST /api/vehicles/{id}/divert-to-gas-station` | Detour a `DRIVING` vehicle to a chosen station now. Body: `{gas_station_place_id}`. Automatically resumes to its original destination once refueled there. 202, returns a `job_id` to poll (`GET /api/jobs/{id}`) — see [Divert to gas station](#divert-to-gas-station) |
 | `POST /api/vehicle-models`       | Create a hauling-vehicle-model catalog entry. Body: `{year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, image?}` |
 | `GET /api/vehicle-models`        | List all vehicle models |
+| `PUT /api/vehicle-models/{id}`   | Admin. Edit every field of a vehicle model. The starter van keeps its year, brand and model (409) |
 | `DELETE /api/vehicle-models/{id}`| Delete a vehicle model. 409 if any vehicle still references it |
+| `PUT /api/vehicle-models/{id}/image` | Admin. Upload a picture (multipart `file`, up to 10 MB). It's re-encoded as WebP, fit to 800px and stored in `vehicle_model_images` |
+| `DELETE /api/vehicle-models/{id}/image` | Admin. Drop the uploaded picture, falling back to the built-in `image` file if one is set |
+| `GET /api/vehicle-models/{id}/image` | The uploaded picture, cached for good (the `image_url` the list returns carries `?v=<hash>`) |
+| `POST /api/vehicle-models/image-preview` | Admin. Body: `{url}`. The backend downloads the image (http(s) only, never a private address), normalizes it and returns the WebP without storing it. The page then uploads those bytes |
 | `GET /api/vehicles/{id}/city`   | Nearest place name to the vehicle's current position, if driving |
 | `GET /api/vehicles/{id}/address`| A settled vehicle's place's saved `address` — used to prefill the Paths tab's Origin field (see [Vehicle location](#vehicle-location)) |
 | `POST /api/places`              | Resolve a free-text description or address to a saved place (or return the existing match — see [`places`](#places)). Body: `{description}`. 400 if it doesn't resolve |
@@ -924,13 +927,16 @@ Plain JS + Leaflet, no build step, a single page (`frontend/app.js`,
 `frontend/index.html`). Seven tabs, collapsed into a dropdown menu in the
 side panel since they don't all fit as a row:
 
-- **Vehicle Models** — the hauling-vehicle-model catalog. Create vehicle models
-  (year/brand/model/person capacity/cargo capacity/cost/MPG/image) and
-  delete unused ones (409 if any vehicle still references one). A vehicle
-  model's `image` is just a filename resolved against `frontend/images/` (e.g.
-  dropping in `frontend/images/2026-Chevy-Express.png` and setting
-  `image` to `2026-Chevy-Express.png`) — nginx serves that directory
-  alongside the rest of the static frontend, no separate upload endpoint.
+- **Vehicle Models** (admin 🔒) — a full-width page, like Budget, with a
+  card per vehicle model. **+ New model** and **Edit** open an editor for
+  every field and the picture. A picture can be uploaded (drag and drop or
+  browse), fetched from a URL (the server downloads it and keeps its own
+  copy), or a built-in file under `frontend/images/`. Uploaded and fetched
+  pictures are stored in Postgres (`vehicle_model_images`), re-encoded as
+  WebP and fit to 800px, so they're in every database backup and go when
+  their model does. An uploaded picture wins over a built-in `image`
+  filename. **Export CSV** and **Import CSV** carry the built-in filenames
+  only. The starter van can't be deleted or renamed.
 - **Places** — the saved-places bank (see [`places`](#places)). Add one
   directly, or just let it fill in from vehicle/path locations as they're
   typed elsewhere. A row of filter chips above the list — one row per

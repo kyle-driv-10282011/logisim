@@ -83,6 +83,25 @@ CREATE TABLE vehicle_models (
 );
 
 
+-- Uploaded / URL-fetched pictures for vehicle models (the Vehicle Models
+-- page), re-encoded as WebP by normalize_vehicle_image() in app.py and
+-- served by GET /api/vehicle-models/{id}/image. One per model; it wins over
+-- vehicle_models.image (a built-in file) while it exists.
+CREATE TABLE vehicle_model_images (
+
+    vehicle_model_id INTEGER PRIMARY KEY REFERENCES vehicle_models(id) ON DELETE CASCADE,
+
+    content_type TEXT NOT NULL,
+
+    data BYTEA NOT NULL,
+
+    -- Versions the image URL (?v=) so browsers can cache it for good.
+    sha256 TEXT NOT NULL,
+
+    updated TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+
 CREATE TABLE places (
 
     id SERIAL PRIMARY KEY,

@@ -237,7 +237,6 @@ let activeTripsById = new Map();   // vehicle_id -> trip (from the last poll)
 let activeVehicleIds = new Set();  // vehicle ids seen on the last poll
 let selectedVehicleId = null;      // vehicle id followed in the In Route tab
 let selectedTripVehicleId = null;  // vehicle id chosen (in the Vehicles tab) to start a trip
-let selectedVehicleModelId = null;         // vehicle model id highlighted in the Vehicle Models tab (purely visual, no map focus)
 
 
 let restingVehicleMarker = null;   // dot marking a clicked non-driving vehicle's resting location
@@ -556,7 +555,6 @@ function formatHMS(totalSeconds) {
 // tab/tab-button element ids showTab() below already toggles "active" on.
 //
 const TAB_LABELS = {
-    vehiclemodels: "Vehicle Models",
     myvehicles: "My Vehicles",
     paths: "Paths",
     gasprices: "Gas Prices",
@@ -600,7 +598,7 @@ function showTab(tab) {
     //
     relockAdminUnless(tab);
 
-    for (const name of ["vehiclemodels", "myvehicles", "gasprices", "jobs", "config"]) {
+    for (const name of ["myvehicles", "gasprices", "jobs", "config"]) {
 
         document.getElementById(`tab-${name}`).classList.toggle("active", name === tab);
         document.getElementById(`tab-button-${name}`).classList.toggle("active", name === tab);
@@ -622,14 +620,13 @@ function showTab(tab) {
 
 
 //
-// Vehicle models are served by the backend as a filename (e.g. "2026-Chevy-Express.png"),
-// not a URL - the frontend is what knows it's serving frontend/images/ at its
-// own origin (same host/port index.html was loaded from), so this is a plain
-// relative path rather than going through the API host/port.
+// A vehicle model's picture, as a path relative to this page: an uploaded
+// one served by the backend, or a built-in file under frontend/images/ -
+// the backend works out which (image_url in vehicle_model_dict()).
 //
-function vehicleModelImageUrl(filename) {
+function vehicleModelImageUrl(vehicleModel) {
 
-    return filename ? `images/${encodeURIComponent(filename)}` : null;
+    return vehicleModel.image_url || null;
 }
 
 
@@ -668,189 +665,7 @@ async function loadVehicleModels() {
     }
 
     renderVehicleList();
-    renderVehicleModelList();
-}
-
-
-function renderVehicleModelList() {
-
-    const list = document.getElementById("vehicle-model-list");
-
-    list.innerHTML = "";
-
-    for (const vehicleModel of vehicleModelsById.values()) {
-
-        const item = document.createElement("div");
-
-        item.className = "vehicle-item list-row" + (vehicleModel.id === selectedVehicleModelId ? " selected" : "");
-        item.onclick = () => selectVehicleModel(vehicleModel.id);
-
-        const imageUrl = vehicleModelImageUrl(vehicleModel.image);
-
-        item.innerHTML =
-            `<span class="list-item-label">` +
-            (imageUrl ? `<img class="list-item-thumb" src="${imageUrl}">` : "") +
-            `<span>${vehicleModelLabel(vehicleModel)}` +
-            `<div class="list-item-details">` +
-            `${vehicleModel.person_capacity} people &middot; ${vehicleModel.cargo_capacity_cuft} cu ft &middot; ` +
-            `$${Math.round(vehicleModel.cost).toLocaleString()} &middot; ${vehicleModel.mpg} mpg &middot; ` +
-            `${vehicleModel.fuel_tank_gallons} gal tank` +
-            `</div></span></span>` +
-            `<button class="remove-vehicle-model-button" data-id="${vehicleModel.id}">Delete</button>`;
-
-        list.appendChild(item);
-    }
-
-    for (const button of list.querySelectorAll(".remove-vehicle-model-button")) {
-
-        button.onclick = (event) => {
-            event.stopPropagation();
-            withSpinner(button, () => removeVehicleModel(Number(button.dataset.id)));
-        };
-    }
-}
-
-
-//
-// Clicking a vehicle model just highlights it (click again to clear) - purely
-// a visual focus, not tied to the map (a vehicle model has no location).
-//
-function selectVehicleModel(vehicleModelId) {
-
-    selectedVehicleModelId = selectedVehicleModelId === vehicleModelId ? null : vehicleModelId;
-
-    renderVehicleModelList();
-}
-
-
-async function addVehicleModel() {
-
-    const response = await apiFetch(API + "/api/vehicle-models", {
-
-        method: "POST",
-
-        headers: {
-            "Content-Type": "application/json"
-        },
-
-        body: JSON.stringify({
-
-            year: Number(document.getElementById("vehicle-model-year").value),
-
-            brand: document.getElementById("vehicle-model-brand").value,
-
-            model: document.getElementById("vehicle-model-model").value,
-
-            person_capacity: Number(document.getElementById("vehicle-model-person-capacity").value),
-
-            cargo_capacity_cuft: Number(document.getElementById("vehicle-model-cargo-capacity").value),
-
-            cost: Number(document.getElementById("vehicle-model-cost").value),
-
-            mpg: Number(document.getElementById("vehicle-model-mpg").value),
-
-            fuel_tank_gallons: Number(document.getElementById("vehicle-model-fuel-tank").value),
-
-            image: document.getElementById("vehicle-model-image").value || null
-
-        })
-
-    });
-
-    const data = await response.json();
-
-    if (!response.ok) {
-        alert(data.detail || "Could not add vehicle model");
-        return;
-    }
-
-    loadVehicleModels();
-}
-
-
-//
-// Config tab's vehicle model restore (POST /api/vehicle-models/upload) - the
-// other half of its "Export all vehicle models" link. Small enough to run
-// inline on the backend, so the result comes straight back, no job to poll.
-//
-async function uploadVehicleModels() {
-
-    const fileInput = document.getElementById("vehicle-model-file-input");
-    const result = document.getElementById("vehicle-model-upload-result");
-
-    const show = (kind, message) => {
-        result.className = "form-result " + kind;
-        result.textContent = message;
-    };
-
-    if (!fileInput.files.length) {
-        show("error", "Not imported - choose a vehicle model CSV first.");
-        return;
-    }
-
-    const formData = new FormData();
-    formData.append("file", fileInput.files[0]);
-
-    let response;
-    let data;
-
-    try {
-        response = await apiFetch(API + "/api/vehicle-models/upload", { method: "POST", body: formData });
-        data = await response.json();
-    } catch (e) {
-        show("error", "Not imported - couldn't reach the server. Check your connection and try again.");
-        return;
-    }
-
-    if (!response.ok) {
-        show("error", "Not imported - " + (data.detail || "the server couldn't read that file."));
-        return;
-    }
-
-    const parts = [`${data.created} added`, `${data.updated} updated`];
-
-    if (data.errors.length) {
-
-        parts.push(`${data.errors.length} skipped`);
-        console.warn("Vehicle model import errors:", data.errors);
-
-        show(
-            data.created || data.updated ? "success" : "error",
-            `Imported: ${parts.join(", ")}. First problem - row ${data.errors[0].row}: ${data.errors[0].error}`
-        );
-
-    } else {
-        show("success", `Imported: ${parts.join(", ")}.`);
-    }
-
-    fileInput.value = "";
-
-    loadVehicleModels();
-}
-
-
-async function removeVehicleModel(vehicleModelId) {
-
-    const vehicleModel = vehicleModelsById.get(vehicleModelId);
-
-    if (!confirm(`Delete vehicle model "${vehicleModel ? vehicleModelLabel(vehicleModel) : vehicleModelId}"?`)) {
-        return;
-    }
-
-    const response = await apiFetch(API + "/api/vehicle-models/" + vehicleModelId, { method: "DELETE" });
-
-    if (!response.ok) {
-
-        const data = await response.json();
-        alert(data.detail || "Could not delete vehicle model");
-        return;
-    }
-
-    if (selectedVehicleModelId === vehicleModelId) {
-        selectedVehicleModelId = null;
-    }
-
-    loadVehicleModels();
+    renderVehicleModelsPage();
 }
 
 
@@ -1429,7 +1244,7 @@ function renderVehicleList() {
             item.onclick = () => selectTripVehicle(vehicle.id);
         }
 
-        const imageUrl = vehicle.vehicle_model ? vehicleModelImageUrl(vehicle.vehicle_model.image) : null;
+        const imageUrl = vehicle.vehicle_model ? vehicleModelImageUrl(vehicle.vehicle_model) : null;
 
         //
         // A driving/stranded vehicle's fuel gauge comes from the live trip

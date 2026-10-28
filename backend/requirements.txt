@@ -5,4 +5,4 @@ sqlalchemy
 requests
 geopy
 tzdata
-python-multipart
+python-multipartPillow

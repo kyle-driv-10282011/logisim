@@ -11,6 +11,7 @@
     <link rel="stylesheet" href="styles.css">
     <link rel="stylesheet" href="fileselect.css">
     <link rel="stylesheet" href="budget.css">
+    <link rel="stylesheet" href="vehiclemodels.css">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Share+Tech+Mono&display=swap">
 
     <style>
@@ -821,13 +822,6 @@
             font-size: 14px;
         }
 
-        #tab-vehiclemodels label {
-            display: block;
-            font-size: 11px;
-            color: #555;
-            margin-top: 6px;
-        }
-
         #gasprice-legend {
             font-size: 11px;
             color: #555;
@@ -961,6 +955,108 @@
 </div>
 
 <!--
+    The Vehicle Models page (vehiclemodels.js, admin): full width over the
+    map like Budget, and themed by the same budget-page/budget-sheet
+    classes. The editor opens over it.
+-->
+<div id="models-page" class="budget-page models-page" style="display:none">
+    <div class="budget-sheet models-sheet">
+        <div class="budget-header">
+            <div>
+                <div class="budget-title">Vehicle Models</div>
+                <div class="budget-subtitle" id="models-count"></div>
+            </div>
+            <button class="budget-close" onclick="closeVehicleModelsPage()" title="Close and lock (Esc)">&times;</button>
+        </div>
+
+        <div class="models-toolbar">
+            <button onclick="openModelEditor()">+ New model</button>
+            <span class="models-toolbar-spacer"></span>
+            <a class="config-button" data-admin-href="/api/vehicle-models/export" download>Export CSV</a>
+            <label class="models-import">
+                <input id="vehicle-model-file-input" type="file" accept=".csv,text/csv">
+            </label>
+            <button onclick="withSpinner(this, uploadVehicleModels)">Import CSV</button>
+        </div>
+        <div id="models-result" class="form-result"></div>
+
+        <div id="models-grid" class="models-grid"></div>
+
+        <div class="models-footnote">
+            Import updates models with the same year, brand and model instead of duplicating them.
+            The CSV carries built-in image filenames only - uploaded pictures stay with their model.
+        </div>
+    </div>
+</div>
+
+<div id="model-editor" class="budget-page model-editor" style="display:none">
+    <form class="budget-sheet model-editor-sheet" onsubmit="event.preventDefault(); withSpinner(this.querySelector('[type=submit]'), saveModelEditor)">
+        <div class="budget-header">
+            <div class="budget-title" id="model-editor-title"></div>
+            <button type="button" class="budget-close" onclick="closeModelEditor()" title="Cancel (Esc)">&times;</button>
+        </div>
+
+        <div class="model-editor-body">
+            <div class="model-editor-fields">
+                <label>Year <input id="model-field-year" type="number" min="1886" max="2100" required></label>
+                <label>Brand <input id="model-field-brand" autocomplete="off" required></label>
+                <label>Model <input id="model-field-model" autocomplete="off" required></label>
+                <label>People <input id="model-field-people" type="number" min="0" step="1" required></label>
+                <label>Cargo (cu ft) <input id="model-field-cargo" type="number" min="0" step="0.1" required></label>
+                <label>Cost ($) <input id="model-field-cost" type="number" min="0" step="0.01" required></label>
+                <label>MPG <input id="model-field-mpg" type="number" min="0.1" step="0.1" required></label>
+                <label>Fuel tank (gal) <input id="model-field-tank" type="number" min="0.1" step="0.1" required></label>
+                <div class="model-editor-note" id="model-editor-starter-note">
+                    The starter van keeps its year, brand and model - every new file starts with one.
+                </div>
+            </div>
+
+            <div class="model-editor-image">
+                <div id="model-image-preview" class="model-image-preview empty"></div>
+                <div class="model-image-caption-row">
+                    <span id="model-image-caption" class="model-image-caption"></span>
+                    <button type="button" id="model-image-remove" class="model-image-remove" onclick="removeModelEditorImage()">Remove</button>
+                </div>
+
+                <div class="model-image-tabs" role="tablist">
+                    <button type="button" class="model-image-tab" data-source="upload">Upload</button>
+                    <button type="button" class="model-image-tab" data-source="url">From URL</button>
+                    <button type="button" class="model-image-tab" data-source="file">Built-in file</button>
+                </div>
+
+                <div class="model-image-pane" data-source="upload">
+                    <div id="model-image-drop" class="model-image-drop">
+                        Drop an image here, or click to choose one
+                        <span>PNG, JPEG, WebP or GIF, up to 10 MB - resized to 800px</span>
+                    </div>
+                    <input id="model-image-input" type="file" accept="image/*" hidden>
+                </div>
+
+                <div class="model-image-pane" data-source="url">
+                    <div class="model-image-url-row">
+                        <input id="model-image-url" type="url" placeholder="https://example.com/van.png" autocomplete="off">
+                        <button type="button" id="model-image-fetch" onclick="withSpinner(this, fetchModelImageUrl)">Fetch</button>
+                    </div>
+                    <div class="model-editor-note">The server downloads it and keeps its own copy.</div>
+                </div>
+
+                <div class="model-image-pane" data-source="file">
+                    <input id="model-field-image-file" autocomplete="off" placeholder="1978-Ford-Econoline.png">
+                    <div class="model-editor-note">A file already in frontend/images/. An uploaded picture wins over it.</div>
+                </div>
+            </div>
+        </div>
+
+        <div id="model-editor-error" class="admin-dialog-error"></div>
+
+        <div class="model-editor-actions">
+            <button type="button" onclick="closeModelEditor()">Cancel</button>
+            <button type="submit">Save</button>
+        </div>
+    </form>
+</div>
+
+<!--
     Full-width page over the map, opened from the tab menu's "Budget" entry
     (budget.js) - every Gold Doubloon charged or refunded in this file.
 -->
@@ -1050,64 +1146,12 @@
             <button class="tab-button" id="tab-button-budget" onclick="openBudgetPage()">Budget</button>
             <!-- Admin-only (admin.js): asks for the password when opened. -->
             <div class="tab-menu-separator" role="separator"></div>
-            <button class="tab-button admin-tab" id="tab-button-vehiclemodels" onclick="openAdminTab('vehiclemodels')">Vehicle Models <span class="admin-lock" title="Admin only - asks for the password">&#128274;</span></button>
+            <button class="tab-button admin-tab" id="tab-button-vehiclemodels" onclick="openVehicleModelsPage()">Vehicle Models <span class="admin-lock" title="Admin only - asks for the password">&#128274;</span></button>
             <button class="tab-button admin-tab" id="tab-button-gasprices" onclick="openAdminTab('gasprices')">Gas Prices <span class="admin-lock" title="Admin only - asks for the password">&#128274;</span></button>
             <button class="tab-button admin-tab" id="tab-button-jobs" onclick="openAdminTab('jobs')">Background Jobs <span class="admin-lock" title="Admin only - asks for the password">&#128274;</span></button>
         </div>
     </div>
 
-
-    <div class="tab-content" id="tab-vehiclemodels">
-
-        <b>Vehicle Models</b>
-
-        <div id="vehicle-model-list"></div>
-
-        <div class="panel-form">
-            <label for="vehicle-model-year">Year</label>
-            <input autocomplete="off" id="vehicle-model-year" type="number" placeholder="Year" value="2026">
-
-            <label for="vehicle-model-brand">Brand</label>
-            <input autocomplete="off" id="vehicle-model-brand" placeholder="Brand" value="Chevy">
-
-            <label for="vehicle-model-model">Model</label>
-            <input autocomplete="off" id="vehicle-model-model" placeholder="Model" value="Express">
-
-            <label for="vehicle-model-person-capacity">Person capacity</label>
-            <input autocomplete="off" id="vehicle-model-person-capacity" type="number" min="1" placeholder="Person capacity" value="2">
-
-            <label for="vehicle-model-cargo-capacity">Cargo capacity (cu ft)</label>
-            <input autocomplete="off" id="vehicle-model-cargo-capacity" type="number" min="0" step="0.1" placeholder="Cargo capacity (cu ft)" value="240">
-
-            <label for="vehicle-model-cost">Cost ($)</label>
-            <input autocomplete="off" id="vehicle-model-cost" type="number" min="0" step="0.01" placeholder="Cost ($)" value="45000">
-
-            <label for="vehicle-model-mpg">MPG</label>
-            <input autocomplete="off" id="vehicle-model-mpg" type="number" min="0" step="0.1" placeholder="MPG" value="18">
-
-            <label for="vehicle-model-fuel-tank">Fuel tank (gallons)</label>
-            <input autocomplete="off" id="vehicle-model-fuel-tank" type="number" min="0" step="0.1" placeholder="Fuel tank (gallons)" value="20">
-
-            <label for="vehicle-model-image">Image filename (frontend/images/...)</label>
-            <input autocomplete="off" id="vehicle-model-image" placeholder="Image filename (frontend/images/...)" value="2026-Chevy-Express.png">
-
-            <button onclick="withSpinner(this, addVehicleModel)">Add Vehicle Model</button>
-        </div>
-
-        <div class="panel-form">
-            <span class="config-label"><b>Vehicle models backup</b></span>
-            <a class="config-button" data-admin-href="/api/vehicle-models/export" download>Export all vehicle models (CSV)</a>
-            <label for="vehicle-model-file-input" class="config-hint">Restore from an export (models with the same year, brand and model are updated, not duplicated):</label>
-            <input id="vehicle-model-file-input" type="file" accept=".csv,text/csv">
-            <button onclick="withSpinner(this, uploadVehicleModels)">Import vehicle models</button>
-            <div id="vehicle-model-upload-result" class="form-result"></div>
-            <div class="config-hint">
-                Shared by all save files. Only each model's image filename is exported - the pictures
-                themselves live in frontend/images/.
-            </div>
-        </div>
-
-    </div>
 
     <div class="tab-content active" id="tab-myvehicles">
 
@@ -1239,6 +1283,7 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="app.js"></script>
 <script src="budget.js"></script>
+<script src="vehiclemodels.js"></script>
 <script src="fileselect.js"></script>
 <script src="admin.js"></script>
 

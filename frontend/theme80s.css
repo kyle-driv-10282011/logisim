@@ -56,7 +56,6 @@ body {
 }
 
 .config-label,
-#tab-vehiclemodels label,
 #vehicle-panel label {
     color: var(--neon-muted);
 }
@@ -78,6 +77,7 @@ body {
 #vehicle-panel select,
 #sim-clock input,
 .budget-page select,
+.budget-page input,
 .admin-dialog-box input {
     font-family: var(--mono-font);
     font-size: 13px;
@@ -93,6 +93,7 @@ body {
 #vehicle-panel select:focus,
 #sim-clock input:focus,
 .budget-page select:focus,
+.budget-page input:focus,
 .admin-dialog-box input:focus {
     border-color: var(--neon-cyan);
     box-shadow: 0 0 6px rgba(45, 226, 230, 0.6);
@@ -697,6 +698,95 @@ body {
 .budget-page .budget-direction button.active[data-direction="out"] {
     color: white;
     background: var(--neon-red);
+}
+
+/* ---------- Vehicle Models page ---------- */
+
+.model-card {
+    background: rgba(26, 6, 51, 0.85);
+    border: 1px solid var(--neon-line);
+    border-radius: 8px;
+}
+
+.model-card:hover {
+    border-color: var(--neon-pink);
+    box-shadow: 0 0 14px rgba(255, 79, 216, 0.4);
+}
+
+.model-card-image,
+.model-image-preview {
+    background:
+        linear-gradient(180deg, #2d0b52 0%, #6a1b74 60%, #d1477a 100%);
+    border-color: var(--neon-line);
+}
+
+.model-card-image img,
+.model-image-preview img {
+    filter: drop-shadow(0 0 10px rgba(255, 120, 200, 0.55));
+}
+
+.model-card-name {
+    font-family: var(--pixel-font);
+    font-size: 9px;
+    font-weight: normal;
+    line-height: 1.6;
+    color: var(--neon-cream);
+}
+
+.model-card-stats,
+.models-footnote,
+.models-empty,
+.model-editor-fields label,
+.model-editor-note,
+.model-image-caption,
+.model-image-drop span,
+.model-card-noimage,
+.model-image-preview.empty::after {
+    color: var(--neon-muted);
+}
+
+.model-card-cost {
+    font-family: var(--pixel-font);
+    font-size: 10px;
+    font-weight: normal;
+    color: var(--neon-yellow);
+}
+
+.model-card-starter {
+    font-family: var(--pixel-font);
+    font-size: 7px;
+    font-weight: normal;
+    color: #0b0220;
+    background: var(--neon-yellow);
+    box-shadow: 0 0 8px rgba(255, 210, 63, 0.7);
+}
+
+.budget-page .model-delete-button:not(.budget-close) {
+    border-color: var(--neon-red);
+    box-shadow: 0 3px 0 #0b0220, 0 0 8px rgba(255, 77, 109, 0.35);
+}
+
+.budget-page .model-image-tab:not(.budget-close) {
+    color: var(--neon-muted);
+    border-color: var(--neon-line);
+    box-shadow: none;
+}
+
+.budget-page .model-image-tab.active:not(.budget-close) {
+    color: #0b0220;
+    background: linear-gradient(180deg, var(--neon-cyan), #1d9fa3);
+    border-color: var(--neon-cyan);
+}
+
+.model-image-drop {
+    color: var(--neon-text);
+    border-color: var(--neon-line);
+}
+
+.model-image-drop:hover,
+.model-image-drop.dragging {
+    border-color: var(--neon-cyan);
+    background: rgba(45, 226, 230, 0.08);
 }
 
 /* ---------- Admin password prompt ---------- */

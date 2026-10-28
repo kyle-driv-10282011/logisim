@@ -1,0 +1,286 @@
+/*
+ * The Vehicle Models page and its editor (vehiclemodels.js). The overlay,
+ * sheet, header and close button reuse Budget's classes (budget.css), so
+ * every view (Config -> View) styles them the same way; this is what's
+ * particular to the models grid and the editor.
+ */
+
+.models-page {
+    z-index: 4000;
+}
+
+.models-sheet {
+    max-width: 1200px;
+}
+
+.models-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+}
+
+.models-toolbar-spacer {
+    flex: 1;
+}
+
+.models-toolbar .config-button {
+    display: inline-block;
+}
+
+.models-import input {
+    max-width: 220px;
+    font-size: 12px;
+}
+
+#models-result {
+    margin-bottom: 10px;
+}
+
+.models-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 14px;
+}
+
+.models-empty {
+    padding: 30px 10px;
+    color: #777;
+    font-size: 13px;
+}
+
+.model-card {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    overflow: hidden;
+    background: white;
+}
+
+/* A fixed 16:9 frame so every card lines up, whatever the picture's shape. */
+.model-card-image {
+    position: relative;
+    aspect-ratio: 16 / 9;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #f3f3f3;
+}
+
+.model-card-image img {
+    max-width: 92%;
+    max-height: 88%;
+    object-fit: contain;
+}
+
+.model-card-noimage {
+    font-size: 12px;
+    color: #999;
+}
+
+.model-card-starter {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    padding: 2px 6px;
+    font-size: 10px;
+    font-weight: bold;
+    letter-spacing: 1px;
+    color: white;
+    background: #8a2be2;
+    border-radius: 3px;
+}
+
+.model-card-body {
+    flex: 1;
+    padding: 10px 12px 6px;
+}
+
+.model-card-name {
+    font-weight: bold;
+    font-size: 14px;
+    margin-bottom: 6px;
+}
+
+.model-card-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    font-size: 12px;
+    color: #555;
+}
+
+.model-card-cost {
+    margin-top: 6px;
+    font-size: 13px;
+    font-weight: bold;
+    color: #8a6d00;
+}
+
+.model-card-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+    padding: 8px 12px 12px;
+}
+
+.models-footnote {
+    margin-top: 14px;
+    font-size: 11px;
+    color: #777;
+}
+
+/* ---------- Editor ---------- */
+
+.model-editor {
+    z-index: 4100;
+    align-items: flex-start;
+}
+
+.model-editor-sheet {
+    max-width: 780px;
+}
+
+.model-editor-body {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+    gap: 20px;
+}
+
+@media (max-width: 700px) {
+
+    .model-editor-body {
+        grid-template-columns: 1fr;
+    }
+}
+
+.model-editor-fields {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px 10px;
+    align-content: start;
+}
+
+.model-editor-fields label {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    font-size: 12px;
+    color: #555;
+}
+
+.model-editor-fields label:nth-child(-n + 3) {
+    grid-column: span 2;
+}
+
+.model-editor-fields input,
+.model-editor-image input:not([type="file"]) {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 5px 6px;
+    font-size: 13px;
+}
+
+.model-editor-fields input:disabled {
+    opacity: 0.6;
+}
+
+.model-editor-note {
+    grid-column: span 2;
+    font-size: 11px;
+    color: #777;
+}
+
+.model-image-preview {
+    aspect-ratio: 16 / 9;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #f3f3f3;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+}
+
+.model-image-preview img {
+    max-width: 94%;
+    max-height: 90%;
+    object-fit: contain;
+}
+
+.model-image-preview.empty::after {
+    content: "No picture";
+    font-size: 12px;
+    color: #999;
+}
+
+.model-image-caption-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-height: 28px;
+    margin: 4px 0 8px;
+}
+
+.model-image-caption {
+    font-size: 11px;
+    color: #777;
+    overflow-wrap: anywhere;
+}
+
+.model-image-tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 8px;
+}
+
+.model-image-tab.active {
+    font-weight: bold;
+}
+
+.model-image-drop {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 22px 12px;
+    font-size: 13px;
+    text-align: center;
+    border: 2px dashed #bbb;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.model-image-drop span {
+    font-size: 11px;
+    color: #777;
+}
+
+.model-image-drop:hover,
+.model-image-drop.dragging {
+    border-color: #3388ff;
+    background: rgba(51, 136, 255, 0.06);
+}
+
+.model-image-url-row {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 4px;
+}
+
+.model-image-url-row input {
+    flex: 1;
+}
+
+.model-image-pane .model-editor-note {
+    margin-top: 4px;
+}
+
+.model-editor-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 12px;
+}
