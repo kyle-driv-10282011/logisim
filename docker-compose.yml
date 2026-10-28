@@ -55,6 +55,10 @@ services:
       HTTPS_PROXY: ${HTTPS_PROXY:-}
       NO_PROXY: ${NO_PROXY:-}
 
+      # Unlocks the admin role (gas stations, vehicle models, background
+      # jobs, erasing files). Empty means nobody can elevate.
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+
     depends_on:
       - postgres
 

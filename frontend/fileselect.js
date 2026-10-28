@@ -38,8 +38,11 @@ async function showFileSelect() {
 
     document.addEventListener("keydown", handleFileSelectKey);
 
+    //
+    // Admin-only (admin.js) - the button is hidden otherwise.
+    //
     document.getElementById("fs-erase-button").onclick = () => {
-        setFileSelectMode(fileSelectMode === "erase" ? "select" : "erase");
+        setFileSelectMode(fileSelectMode === "erase" || !isAdmin() ? "select" : "erase");
     };
 
     await refreshFileSelect();
@@ -331,7 +334,10 @@ async function eraseFileUnderCursor() {
 
     try {
 
-        const response = await fetch(API + "/api/slots/" + slot.id, { method: "DELETE" });
+        //
+        // apiFetch() for the admin token - erasing a file is admin-only.
+        //
+        const response = await apiFetch(API + "/api/slots/" + slot.id, { method: "DELETE" });
 
         if (!response.ok) {
             const data = await response.json();

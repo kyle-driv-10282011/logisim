@@ -42,7 +42,25 @@ function apiFetch(url, options = {}) {
         headers.set("X-Save-Slot", String(currentSlotId));
     }
 
-    return fetch(url, { ...options, headers });
+    //
+    // Admin mode (admin.js). The backend answers 403 only for "admin
+    // required", so a 403 on an elevated request means it has lapsed
+    // (expired, or the password changed) - drop back to user.
+    //
+    const token = adminToken();
+
+    if (token) {
+        headers.set("X-Admin-Token", token);
+    }
+
+    return fetch(url, { ...options, headers }).then((response) => {
+
+        if (response.status === 403 && token) {
+            setAdminSession(null);
+        }
+
+        return response;
+    });
 }
 
 let map;
@@ -392,6 +410,14 @@ function prettyJobType(jobType) {
 
 
 async function loadJobs() {
+
+    //
+    // Background jobs are admin-only (admin.js) - and per file, so there's
+    // nothing to list before one is picked.
+    //
+    if (!isAdmin() || currentSlotId === null) {
+        return;
+    }
 
     const response = await apiFetch(API + "/api/jobs");
     const data = await response.json();

@@ -49,6 +49,26 @@ server). The API is at `https://logisim.kjfries.com/api/...`, same origin
 as the page. A 403 "only available through its HTTPS address" means the
 secret here doesn't match Edge's.
 
+### Roles: user and admin
+
+Everyone plays as a **user**: the file-select screen (start a new game in an
+empty file), **My Vehicles**, **Budget**, the clock box settings, the refresh
+slider in Config and the gas station map overlay.
+
+**Admin** manages what every save file shares: **Vehicle Models** (add,
+delete, import, export), **Gas Prices** (add, delete, bulk import, export),
+**Background Jobs**, and **Erase** on the file-select screen. It isn't a
+login. Anyone who knows the instance's `ADMIN_PASSWORD` (set in `.env`) can
+elevate from **Admin mode** in the tab menu or **ADMIN** on the file-select
+screen. Leave `ADMIN_PASSWORD` empty to turn admin off.
+
+Elevating returns a signed token that lasts 12 hours. The browser keeps it
+until the tab closes and sends it as an `X-Admin-Token` header, or as
+`?admin_token=` on export download links. Changing the password revokes every
+token. On the backend, admin-only endpoints take `Depends(require_admin)` in
+`app.py`. On the frontend, admin-only UI has the `admin-only` class, which is
+hidden unless the page is elevated (`admin.js`).
+
 ### Save files
 
 Opening the site shows a console-style **Select File** screen with four

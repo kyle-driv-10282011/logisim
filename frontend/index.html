@@ -441,6 +441,79 @@
             background: #c92a2a;
         }
 
+        /* Admin-only UI (admin.js) - hidden until the page is elevated. */
+        body:not(.admin) .admin-only {
+            display: none !important;
+        }
+
+        .tab-menu-list .tab-button-admin {
+            color: #8a2be2;
+        }
+
+        .admin-indicator {
+            display: inline-block;
+            margin-bottom: 4px;
+            padding: 1px 6px;
+            font-size: 10px;
+            font-weight: bold;
+            letter-spacing: 1px;
+            color: white;
+            background: #8a2be2;
+            border-radius: 3px;
+        }
+
+        .admin-dialog {
+            position: fixed;
+            inset: 0;
+            z-index: 6000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 16px;
+            background: rgba(18, 26, 82, 0.55);
+        }
+
+        .admin-dialog-box {
+            width: 100%;
+            max-width: 320px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            padding: 18px 20px;
+            background: white;
+            border-radius: 6px;
+            box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+            font-family: Arial, sans-serif;
+            box-sizing: border-box;
+        }
+
+        .admin-dialog-title {
+            font-size: 18px;
+            font-weight: bold;
+        }
+
+        .admin-dialog-hint {
+            font-size: 12px;
+            color: #555;
+        }
+
+        .admin-dialog-box input {
+            padding: 6px 8px;
+            font-size: 14px;
+        }
+
+        .admin-dialog-error {
+            min-height: 14px;
+            font-size: 12px;
+            color: #c92a2a;
+        }
+
+        .admin-dialog-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+        }
+
         .status-REFUELING {
             background: #e8890c;
         }
@@ -766,13 +839,34 @@
     <button id="intro-start" class="intro-start">START</button>
 </div>
 
+<!--
+    The admin password prompt (admin.js), above everything - it's reachable
+    from the file-select screen too.
+-->
+<div id="admin-dialog" class="admin-dialog" style="display:none">
+    <form class="admin-dialog-box" onsubmit="event.preventDefault(); withSpinner(this.querySelector('[type=submit]'), submitAdminPassword)">
+        <div class="admin-dialog-title">Admin mode</div>
+        <div class="admin-dialog-hint">
+            Manage what every save file shares: gas stations, vehicle models, background jobs
+            and erasing files.
+        </div>
+        <input id="admin-password" type="password" autocomplete="current-password" placeholder="Admin password">
+        <div id="admin-dialog-error" class="admin-dialog-error"></div>
+        <div class="admin-dialog-actions">
+            <button type="button" onclick="closeAdminDialog()">Cancel</button>
+            <button type="submit">Elevate</button>
+        </div>
+    </form>
+</div>
+
 <div id="file-select" class="file-select">
     <div class="fs-screen">
         <div class="fs-title">LOGISIM</div>
         <div class="fs-subtitle">SELECT FILE</div>
         <div id="fs-files" class="fs-files"></div>
         <div class="fs-actions">
-            <button id="fs-erase-button" class="fs-button">ERASE</button>
+            <button id="fs-erase-button" class="fs-button admin-only">ERASE</button>
+            <button id="fs-admin-button" class="fs-button" onclick="toggleAdminMode()">ADMIN</button>
         </div>
         <div id="fs-message" class="fs-message"></div>
         <div class="fs-hint">ARROWS: CHOOSE &middot; ENTER: SELECT &middot; ESC: BACK</div>
@@ -827,6 +921,7 @@
     <div id="map-controls">
     <div id="sim-clock">
         <button id="current-file-label" class="current-file" onclick="returnToFileSelect()" title="Back to file select"></button>
+        <div class="admin-indicator admin-only" title="Admin mode - leave it from the tab menu">ADMIN</div>
         <div id="balance-display" class="balance-display" title="Gold Doubloons"></div>
         <div id="sim-clock-text"></div>
         <div id="time-multiplier-control">
@@ -858,12 +953,13 @@
             <span class="tab-menu-arrow">&#9662;</span>
         </button>
         <div class="tab-menu-list" id="tab-menu-list">
-            <button class="tab-button" id="tab-button-vehiclemodels" onclick="withSpinner(this, () => showTab('vehiclemodels'))">Vehicle Models</button>
+            <button class="tab-button admin-only" id="tab-button-vehiclemodels" onclick="withSpinner(this, () => showTab('vehiclemodels'))">Vehicle Models</button>
             <button class="tab-button active" id="tab-button-myvehicles" onclick="withSpinner(this, () => showTab('myvehicles'))">My Vehicles</button>
-            <button class="tab-button" id="tab-button-gasprices" onclick="withSpinner(this, () => showTab('gasprices'))">Gas Prices</button>
-            <button class="tab-button" id="tab-button-jobs" onclick="withSpinner(this, () => showTab('jobs'))">Background Jobs</button>
+            <button class="tab-button admin-only" id="tab-button-gasprices" onclick="withSpinner(this, () => showTab('gasprices'))">Gas Prices</button>
+            <button class="tab-button admin-only" id="tab-button-jobs" onclick="withSpinner(this, () => showTab('jobs'))">Background Jobs</button>
             <button class="tab-button" id="tab-button-config" onclick="withSpinner(this, () => showTab('config'))">Config</button>
             <button class="tab-button" id="tab-button-budget" onclick="openBudgetPage()">Budget</button>
+            <button class="tab-button tab-button-admin" id="tab-button-admin" onclick="toggleAdminMode()">Admin mode</button>
         </div>
     </div>
 
@@ -983,9 +1079,9 @@
             </div>
         </div>
 
-        <div class="panel-form">
+        <div class="panel-form admin-only">
             <span class="config-label"><b>Gas stations backup</b></span>
-            <a class="config-button" href="/api/gas-prices/export" download>Export all gas stations (CSV)</a>
+            <a class="config-button" data-admin-href="/api/gas-prices/export" download>Export all gas stations (CSV)</a>
             <div class="config-hint">
                 Downloads every gas station - name, brand, price and exact location - as one CSV file.
                 Shared by all save files. To restore it, upload the file under Gas Prices &rarr; Bulk import:
@@ -994,9 +1090,9 @@
             </div>
         </div>
 
-        <div class="panel-form">
+        <div class="panel-form admin-only">
             <span class="config-label"><b>Vehicle models backup</b></span>
-            <a class="config-button" href="/api/vehicle-models/export" download>Export all vehicle models (CSV)</a>
+            <a class="config-button" data-admin-href="/api/vehicle-models/export" download>Export all vehicle models (CSV)</a>
             <label for="vehicle-model-file-input" class="config-hint">Restore from an export (models with the same year, brand and model are updated, not duplicated):</label>
             <input id="vehicle-model-file-input" type="file" accept=".csv,text/csv">
             <button onclick="withSpinner(this, uploadVehicleModels)">Import vehicle models</button>
@@ -1023,6 +1119,7 @@
 <script src="app.js"></script>
 <script src="budget.js"></script>
 <script src="fileselect.js"></script>
+<script src="admin.js"></script>
 
 </body>
 </html>

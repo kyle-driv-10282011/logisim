@@ -14,9 +14,12 @@ import requests
 import json
 import bisect
 import csv
+import hashlib
+import hmac
 import io
 import logging
 import math
+import os
 import random
 import re
 import threading
@@ -640,6 +643,56 @@ def current_slot(x_save_slot: Optional[str] = Header(None)):
         raise HTTPException(status_code=409, detail=f"File {slot_id} has no game - start one from the file select screen")
 
     return slot_id
+
+
+#
+# Two roles: everyone is a "user" (save files, their vehicles, the budget),
+# and anyone who knows ADMIN_PASSWORD (.env, per instance) can elevate to
+# "admin" for the global configuration every file shares - gas stations,
+# vehicle models, background jobs, erasing files. Not a login: elevating
+# hands back a signed token (expiry + HMAC keyed by the password, so
+# changing the password revokes every token) that the browser sends as
+# X-Admin-Token - or ?admin_token= on a plain download link.
+#
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+ADMIN_TOKEN_TTL_SECONDS = 12 * 60 * 60
+
+#
+# A wrong password waits this long before answering, so guessing is slow.
+#
+ADMIN_WRONG_PASSWORD_DELAY_SECONDS = 1
+
+
+def admin_token_signature(expires):
+
+    key = hashlib.sha256(("logisim-admin:" + ADMIN_PASSWORD).encode()).digest()
+
+    return hmac.new(key, str(expires).encode(), hashlib.sha256).hexdigest()
+
+
+def is_valid_admin_token(token):
+
+    if not ADMIN_PASSWORD or not token:
+        return False
+
+    expires, _, signature = token.partition(".")
+
+    try:
+        expires = int(expires)
+    except ValueError:
+        return False
+
+    return expires > time.time() and hmac.compare_digest(signature, admin_token_signature(expires))
+
+
+#
+# The FastAPI dependency on every admin-only endpoint. 403 is used for
+# nothing else, so the frontend reads it as "admin mode has lapsed".
+#
+def require_admin(x_admin_token: Optional[str] = Header(None), admin_token: Optional[str] = None):
+
+    if not is_valid_admin_token(x_admin_token or admin_token):
+        raise HTTPException(status_code=403, detail="Admin only - elevate to admin first")
 
 
 def settle_arrived_vehicles(conn, cur):
@@ -2973,7 +3026,7 @@ def update_job(job_id, **fields):
 # run at once.
 #
 @app.get("/api/jobs")
-def list_jobs(slot: int = Depends(current_slot)):
+def list_jobs(slot: int = Depends(current_slot), _admin: None = Depends(require_admin)):
 
     conn = db()
     cur = conn.cursor()
@@ -3538,6 +3591,31 @@ class StartSaveSlotRequest(BaseModel):
 # the road, total miles, and where its own game clock is). Not slot-scoped
 # itself - it's what a slot gets picked from.
 #
+class ElevateAdminRequest(BaseModel):
+    password: str
+
+
+@app.post("/api/admin/elevate")
+def elevate_admin(req: ElevateAdminRequest):
+
+    if not ADMIN_PASSWORD:
+        raise HTTPException(status_code=503, detail="Admin isn't set up here - set ADMIN_PASSWORD in .env")
+
+    if not hmac.compare_digest(req.password.encode(), ADMIN_PASSWORD.encode()):
+        time.sleep(ADMIN_WRONG_PASSWORD_DELAY_SECONDS)
+        raise HTTPException(status_code=401, detail="Wrong password")
+
+    expires = int(time.time()) + ADMIN_TOKEN_TTL_SECONDS
+
+    return {"token": f"{expires}.{admin_token_signature(expires)}", "expires": expires}
+
+
+@app.get("/api/admin/status")
+def admin_status(x_admin_token: Optional[str] = Header(None)):
+
+    return {"configured": bool(ADMIN_PASSWORD), "admin": is_valid_admin_token(x_admin_token)}
+
+
 @app.get("/api/slots")
 def list_save_slots():
 
@@ -3663,7 +3741,7 @@ def start_save_slot(slot_id: int, req: StartSaveSlotRequest):
 # an arrival forgets them (forget_unused_paths()/forget_unused_places()).
 #
 @app.delete("/api/slots/{slot_id}")
-def erase_save_slot(slot_id: int):
+def erase_save_slot(slot_id: int, _admin: None = Depends(require_admin)):
 
     conn = db()
     cur = conn.cursor()
@@ -4028,7 +4106,7 @@ def create_vehicle(req: CreateVehicleRequest, slot: int = Depends(current_slot))
 
 
 @app.post("/api/vehicle-models")
-def create_vehicle_model(req: CreateVehicleModelRequest):
+def create_vehicle_model(req: CreateVehicleModelRequest, _admin: None = Depends(require_admin)):
 
     if req.mpg <= 0:
         raise HTTPException(status_code=400, detail="mpg must be positive")
@@ -4083,7 +4161,7 @@ VEHICLE_MODEL_EXPORT_COLUMNS = [
 
 
 @app.get("/api/vehicle-models/export")
-def export_vehicle_models():
+def export_vehicle_models(_admin: None = Depends(require_admin)):
 
     conn = db()
     cur = conn.cursor()
@@ -4124,7 +4202,7 @@ def export_vehicle_models():
 # own so one bad row doesn't cost the rest.
 #
 @app.post("/api/vehicle-models/upload")
-async def upload_vehicle_models(file: UploadFile = File(...)):
+async def upload_vehicle_models(file: UploadFile = File(...), _admin: None = Depends(require_admin)):
 
     raw = await file.read()
 
@@ -4249,7 +4327,7 @@ def list_vehicle_models():
 
 
 @app.delete("/api/vehicle-models/{id}")
-def delete_vehicle_model(id: int):
+def delete_vehicle_model(id: int, _admin: None = Depends(require_admin)):
 
     conn = db()
     cur = conn.cursor()
@@ -5236,7 +5314,7 @@ def list_places():
 
 
 @app.post("/api/places")
-def create_place(req: CreatePlaceRequest):
+def create_place(req: CreatePlaceRequest, _admin: None = Depends(require_admin)):
 
     conn = db()
     cur = conn.cursor()
@@ -5256,7 +5334,7 @@ def create_place(req: CreatePlaceRequest):
 
 
 @app.delete("/api/places/{id}")
-def delete_place(id: int):
+def delete_place(id: int, _admin: None = Depends(require_admin)):
 
     conn = db()
     cur = conn.cursor()
@@ -5426,7 +5504,7 @@ def resolve_gas_station_place(cur, description, confirm_location):
 
 
 @app.post("/api/gas-prices")
-def upsert_gas_price(req: CreateGasPriceRequest):
+def upsert_gas_price(req: CreateGasPriceRequest, _admin: None = Depends(require_admin)):
 
     if req.price_per_gallon <= 0:
         raise HTTPException(status_code=400, detail="price_per_gallon must be positive")
@@ -5473,7 +5551,7 @@ def upsert_gas_price(req: CreateGasPriceRequest):
 
 
 @app.delete("/api/gas-prices/{place_id}")
-def delete_gas_price(place_id: int):
+def delete_gas_price(place_id: int, _admin: None = Depends(require_admin)):
 
     conn = db()
     cur = conn.cursor()
@@ -5810,7 +5888,7 @@ def find_or_create_place_from_export(cur, description, entry, lat, lng):
 # Shared world data, not per save file.
 #
 @app.get("/api/gas-prices/export")
-def export_gas_prices():
+def export_gas_prices(_admin: None = Depends(require_admin)):
 
     conn = db()
     cur = conn.cursor()
@@ -5878,7 +5956,7 @@ def parse_gas_price_csv(text):
 
 
 @app.post("/api/gas-prices/upload", status_code=202)
-async def upload_gas_prices(file: UploadFile = File(...)):
+async def upload_gas_prices(file: UploadFile = File(...), _admin: None = Depends(require_admin)):
 
     raw = await file.read()
 
@@ -6577,7 +6655,7 @@ def list_paths():
 
 
 @app.post("/api/paths/{path_id}/zones")
-def create_zone(path_id: int, req: RoadZoneRequest):
+def create_zone(path_id: int, req: RoadZoneRequest, _admin: None = Depends(require_admin)):
 
     conn = db()
     cur = conn.cursor()
@@ -6665,7 +6743,7 @@ def create_zone(path_id: int, req: RoadZoneRequest):
 
 
 @app.put("/api/zones/{id}")
-def update_zone(id: int, req: RoadZoneRequest):
+def update_zone(id: int, req: RoadZoneRequest, _admin: None = Depends(require_admin)):
 
     conn = db()
     cur = conn.cursor()
@@ -6760,7 +6838,7 @@ def update_zone(id: int, req: RoadZoneRequest):
 
 
 @app.delete("/api/zones/{id}")
-def delete_zone(id: int):
+def delete_zone(id: int, _admin: None = Depends(require_admin)):
 
     conn = db()
     cur = conn.cursor()
