@@ -121,6 +121,10 @@
             background: linear-gradient(90deg, #ff4fd8 0%, #8a2be2 50%, #2de2e6 100%);
         }
 
+        .view-swatch-90s {
+            background: linear-gradient(90deg, #000080 0%, #1084d0 50%, #c0c0c0 50%);
+        }
+
         #refresh-interval-slider {
             width: 100%;
             margin: 0;
@@ -881,6 +885,7 @@
     -->
     <link id="theme-80s-css" rel="stylesheet" href="theme80s.css">
     <link id="theme-bw-css" rel="stylesheet" href="themebw.css">
+    <link id="theme-90s-css" rel="stylesheet" href="theme90s.css">
     <script>
         (function () {
             var view = "80s";
@@ -889,12 +894,13 @@
             } catch (e) {
                 // the default
             }
-            if (["bw", "blue", "80s"].indexOf(view) < 0) {
+            if (["bw", "blue", "80s", "90s"].indexOf(view) < 0) {
                 view = "80s";
             }
             document.documentElement.dataset.view = view;
-            document.getElementById("theme-80s-css").disabled = view !== "80s";
             document.getElementById("theme-bw-css").disabled = view !== "bw";
+            document.getElementById("theme-80s-css").disabled = view !== "80s";
+            document.getElementById("theme-90s-css").disabled = view !== "90s";
         })();
     </script>
 </head>
@@ -1193,6 +1199,11 @@
                     <input type="radio" name="view-choice" value="80s" onchange="setView(this.value)">
                     <span class="view-swatch view-swatch-80s"></span>
                     80's
+                </label>
+                <label class="view-choice">
+                    <input type="radio" name="view-choice" value="90s" onchange="setView(this.value)">
+                    <span class="view-swatch view-swatch-90s"></span>
+                    90's
                 </label>
             </div>
             <div class="config-hint">

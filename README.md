@@ -56,9 +56,10 @@ empty file), **My Vehicles**, **Budget**, the clock box settings, Config's
 refresh slider and **View**, and the gas station map overlay.
 
 **Config → View** picks the game screen's look for this browser only:
-**Black & White**, **Blue & White** (the original look) or **80's** (the
-default). It's saved in `localStorage`, and each view is a stylesheet
-(`themebw.css`, `theme80s.css`, or neither for blue & white) plus the
+**Black & White**, **Blue & White** (the original look), **80's** (the
+default) or **90's** (a Windows 95 desktop). It's saved in `localStorage`, and
+each view is a stylesheet (`themebw.css`, `theme80s.css`, `theme90s.css`, or
+none for blue & white) plus the
 map's route and marker styles (`MAP_STYLES` in `app.js`). The file-select
 screen keeps its own look in every view.
 

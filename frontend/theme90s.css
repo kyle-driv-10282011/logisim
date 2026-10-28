@@ -1,0 +1,661 @@
+/*
+ * The 90's view (Config -> View): a Windows 95 desktop. Silver-grey
+ * beveled panels, navy title bars, chunky raised buttons that press in,
+ * sunken white fields, and the classic 16-color palette for badges. The
+ * map keeps its normal tiles with a navy route cased in white and a yellow
+ * square for each vehicle (MAP_STYLES in app.js). Loaded after index.html's
+ * own <style> block, so these win wherever both set the same thing.
+ */
+
+:root {
+    --w95-face: #c0c0c0;
+    --w95-light: #dfdfdf;
+    --w95-white: #ffffff;
+    --w95-shadow: #808080;
+    --w95-dark: #0a0a0a;
+    --w95-navy: #000080;
+    --w95-title: linear-gradient(90deg, #000080 0%, #1084d0 100%);
+    --w95-teal: #008080;
+    --w95-font: "Microsoft Sans Serif", "MS Sans Serif", Tahoma, Verdana, sans-serif;
+
+    --w95-raised:
+        inset -1px -1px var(--w95-dark),
+        inset 1px 1px var(--w95-white),
+        inset -2px -2px var(--w95-shadow),
+        inset 2px 2px var(--w95-light);
+    --w95-pressed:
+        inset -1px -1px var(--w95-white),
+        inset 1px 1px var(--w95-dark),
+        inset -2px -2px var(--w95-light),
+        inset 2px 2px var(--w95-shadow);
+    --w95-sunken:
+        inset -1px -1px var(--w95-white),
+        inset 1px 1px var(--w95-shadow),
+        inset -2px -2px var(--w95-light),
+        inset 2px 2px var(--w95-dark);
+}
+
+body {
+    font-family: var(--w95-font);
+    color: #000;
+    background: var(--w95-teal);
+}
+
+/* ---------- Side panel: one big window ---------- */
+
+#vehicle-panel {
+    background: var(--w95-face);
+    border-left: none;
+    box-shadow: var(--w95-raised);
+    scrollbar-color: var(--w95-face) var(--w95-light);
+}
+
+.config-hint,
+.list-item-details,
+.vehicle-card-location,
+.fuel-gauge-label,
+#gasprice-legend,
+#refresh-interval-ticks,
+#time-multiplier-control,
+#auto-refuel-control,
+#tab-vehiclemodels label,
+#vehicle-panel [style*="color:#555"] {
+    color: #222 !important;
+}
+
+/* Sunken white fields. */
+#vehicle-panel input,
+#vehicle-panel select,
+#sim-clock input,
+.budget-page select,
+.admin-dialog-box input {
+    font-family: var(--w95-font);
+    font-size: 12px;
+    color: #000;
+    background: var(--w95-white);
+    border: none;
+    border-radius: 0;
+    padding: 4px 5px;
+    box-shadow: var(--w95-sunken);
+    outline: none;
+}
+
+#vehicle-panel input[type="range"],
+#vehicle-panel input[type="radio"],
+#vehicle-panel input[type="checkbox"] {
+    padding: 0;
+    background: none;
+    box-shadow: none;
+    accent-color: var(--w95-navy);
+}
+
+#vehicle-panel input[type="file"] {
+    padding: 3px;
+    background: var(--w95-face);
+    box-shadow: none;
+}
+
+#auto-refuel-control input {
+    accent-color: var(--w95-navy);
+}
+
+/* Raised buttons that press in. */
+#vehicle-panel button,
+#sim-clock button:not(.current-file),
+#vehicle-overlay button:not(.vehicle-overlay-close),
+.budget-page button:not(.budget-close),
+.admin-dialog-actions button,
+.config-button {
+    font-family: var(--w95-font);
+    font-size: 12px;
+    padding: 5px 12px;
+    color: #000;
+    background: var(--w95-face);
+    border: none;
+    border-radius: 0;
+    box-shadow: var(--w95-raised);
+    cursor: pointer;
+    text-decoration: none;
+}
+
+#vehicle-panel button:active:not(:disabled),
+#sim-clock button:not(.current-file):active:not(:disabled),
+#vehicle-overlay button:not(.vehicle-overlay-close):active:not(:disabled),
+.budget-page button:not(.budget-close):active,
+.admin-dialog-actions button:active,
+.config-button:active {
+    box-shadow: var(--w95-pressed);
+    padding: 6px 11px 4px 13px;
+}
+
+#vehicle-panel button:focus-visible,
+.admin-dialog-actions button:focus-visible {
+    outline: 1px dotted #000;
+    outline-offset: -5px;
+}
+
+#vehicle-panel button:disabled,
+#sim-clock button:disabled,
+#vehicle-overlay button:disabled {
+    color: var(--w95-shadow);
+    text-shadow: 1px 1px var(--w95-white);
+    cursor: default;
+}
+
+#sim-clock #time-multiplier-control button {
+    padding: 2px 8px;
+    font-size: 11px;
+}
+
+.sell-button,
+.refuel-button,
+.remove-gasprice-button,
+.remove-vehicle-model-button {
+    padding: 3px 8px !important;
+    font-size: 11px !important;
+}
+
+.config-button {
+    display: block;
+    text-align: center;
+}
+
+/* ---------- Tab menu: a title bar with a drop-down menu ---------- */
+
+#vehicle-panel .tab-menu-toggle {
+    font-family: var(--w95-font);
+    font-size: 12px;
+    font-weight: bold;
+    padding: 6px 8px;
+    color: var(--w95-white);
+    background: var(--w95-title);
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+}
+
+#vehicle-panel .tab-menu-toggle .tab-menu-arrow {
+    width: 16px;
+    height: 14px;
+    line-height: 14px;
+    text-align: center;
+    color: #000;
+    background: var(--w95-face);
+    box-shadow: var(--w95-raised);
+}
+
+.tab-menu-list {
+    background: var(--w95-face);
+    border: none;
+    border-radius: 0;
+    padding: 2px;
+    box-shadow: var(--w95-raised), 2px 2px 0 rgba(0, 0, 0, 0.5);
+}
+
+#vehicle-panel .tab-menu-list .tab-button {
+    font-family: var(--w95-font);
+    font-size: 12px;
+    padding: 5px 10px 5px 22px;
+    color: #000;
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+}
+
+#vehicle-panel .tab-menu-list .tab-button:hover,
+#vehicle-panel .tab-menu-list .tab-button.active:hover {
+    color: var(--w95-white);
+    background: var(--w95-navy);
+}
+
+#vehicle-panel .tab-menu-list .tab-button.active {
+    font-weight: normal;
+    color: #000;
+    background: transparent;
+    position: relative;
+}
+
+#vehicle-panel .tab-menu-list .tab-button.active::before {
+    content: "\2713";
+    position: absolute;
+    left: 7px;
+}
+
+.tab-menu-separator {
+    margin: 3px 2px;
+    border-top: 1px solid var(--w95-shadow);
+    border-bottom: 1px solid var(--w95-white);
+}
+
+/* ---------- Vehicle cards and lists ---------- */
+
+.vehicle-item {
+    color: #000;
+    background: var(--w95-face);
+    border: none;
+    border-radius: 0;
+    box-shadow: var(--w95-raised);
+}
+
+.vehicle-item:hover,
+.vehicle-row.clickable:hover {
+    background: var(--w95-light);
+}
+
+.vehicle-row:hover {
+    background: var(--w95-face);
+}
+
+.vehicle-item.selected {
+    color: #000;
+    background: var(--w95-white);
+    box-shadow: var(--w95-sunken);
+    outline: 1px dotted #000;
+    outline-offset: -6px;
+}
+
+.vehicle-card-name {
+    font-weight: bold;
+}
+
+.vehicle-card-detail {
+    border-top: 1px solid var(--w95-shadow);
+    box-shadow: 0 1px 0 var(--w95-white) inset;
+}
+
+.list-item-thumb {
+    border-radius: 0;
+    background: var(--w95-white);
+    box-shadow: var(--w95-sunken);
+}
+
+.collapsible-header {
+    color: #000;
+    background: var(--w95-face);
+    border: none;
+    border-radius: 0;
+    box-shadow: var(--w95-raised);
+}
+
+.collapsible-header:hover {
+    background: var(--w95-light);
+}
+
+/* ---------- Badges: the 16-color palette ---------- */
+
+.status-badge,
+.gas-badge,
+.miles-badge,
+.fuel-badge,
+.rush-badge,
+.admin-indicator {
+    font-family: var(--w95-font);
+    font-size: 10px;
+    font-weight: bold;
+    padding: 2px 5px;
+    border-radius: 0;
+    border: 1px solid #000;
+}
+
+.status-READY {
+    color: #000;
+    background: var(--w95-face);
+}
+
+.status-DRIVING {
+    color: var(--w95-white);
+    background: #008000;
+}
+
+.status-STRANDED {
+    color: var(--w95-white);
+    background: #ff0000;
+}
+
+.status-REFUELING {
+    color: #000;
+    background: #ffff00;
+}
+
+.status-SOLD {
+    color: var(--w95-white);
+    background: var(--w95-shadow);
+}
+
+.gas-badge {
+    color: #000;
+    background: #ffff00;
+}
+
+.miles-badge {
+    color: var(--w95-white);
+    background: var(--w95-navy);
+}
+
+.fuel-badge {
+    color: var(--w95-white);
+    background: var(--w95-teal);
+}
+
+.rush-badge {
+    color: var(--w95-white);
+    background: #800000;
+}
+
+.admin-indicator {
+    color: var(--w95-white);
+    background: #800080;
+}
+
+.fuel-gauge-bar {
+    border-radius: 0;
+    background: var(--w95-white);
+    box-shadow: var(--w95-sunken);
+}
+
+/* ---------- Form results ---------- */
+
+.form-result.success,
+.form-result.error {
+    border-radius: 0;
+    background: var(--w95-white);
+    box-shadow: var(--w95-sunken);
+    border: none;
+}
+
+.form-result.success {
+    color: #008000;
+}
+
+.form-result.error {
+    color: #ff0000;
+}
+
+/* ---------- Clock box and map badges: little windows ---------- */
+
+#sim-clock {
+    color: #000;
+    background: var(--w95-face);
+    border-radius: 0;
+    padding: 4px 8px 6px;
+    box-shadow: var(--w95-raised), 2px 2px 0 rgba(0, 0, 0, 0.35);
+}
+
+.current-file {
+    margin: -1px -5px 6px;
+    width: calc(100% + 10px);
+    font-family: var(--w95-font);
+    font-size: 11px;
+    font-weight: bold;
+    color: var(--w95-white);
+    background: var(--w95-title);
+    border: none;
+    border-radius: 0;
+}
+
+.current-file:hover {
+    background: linear-gradient(90deg, #1010a0 0%, #30a4f0 100%);
+}
+
+.balance-display {
+    font-size: 14px;
+    color: #008000;
+}
+
+.balance-display.negative {
+    color: #ff0000;
+}
+
+#gasprice-overlay-toggle,
+#live-updates-toggle {
+    border-radius: 0;
+    background: var(--w95-face);
+    box-shadow: var(--w95-raised), 2px 2px 0 rgba(0, 0, 0, 0.35);
+}
+
+#gasprice-overlay-toggle.active,
+#live-updates-toggle.active {
+    background: var(--w95-light);
+    box-shadow: var(--w95-pressed), 2px 2px 0 rgba(0, 0, 0, 0.35);
+}
+
+/* ---------- Vehicle spotlight: a window with a title bar ---------- */
+
+#vehicle-overlay {
+    color: #000;
+    background: var(--w95-face);
+    border: none;
+    border-radius: 0;
+    padding: 3px 3px 8px;
+    box-shadow: var(--w95-raised), 3px 3px 0 rgba(0, 0, 0, 0.35);
+}
+
+#vehicle-overlay > :not(.vehicle-overlay-header) {
+    margin-left: 6px;
+    margin-right: 6px;
+}
+
+.vehicle-overlay-header {
+    padding: 3px 3px 3px 6px;
+    color: var(--w95-white);
+    background: var(--w95-title);
+}
+
+#vehicle-overlay.collapsed {
+    padding-bottom: 3px;
+}
+
+.vehicle-overlay-toggle {
+    color: var(--w95-white);
+}
+
+.vehicle-overlay-name {
+    font-size: 12px;
+}
+
+.vehicle-overlay-header .status-badge {
+    border-color: var(--w95-white);
+}
+
+.vehicle-overlay-close {
+    width: 18px;
+    height: 16px;
+    padding: 0;
+    font-family: var(--w95-font);
+    font-size: 13px;
+    font-weight: bold;
+    line-height: 14px;
+    color: #000 !important;
+    background: var(--w95-face) !important;
+    box-shadow: var(--w95-raised);
+}
+
+.vehicle-overlay-close:active {
+    box-shadow: var(--w95-pressed);
+}
+
+.dashboard {
+    border-radius: 0;
+    border: none;
+    box-shadow: var(--w95-sunken);
+}
+
+/* ---------- Map ---------- */
+
+#map .leaflet-bar {
+    border: none;
+    border-radius: 0;
+    box-shadow: var(--w95-raised), 2px 2px 0 rgba(0, 0, 0, 0.35);
+}
+
+#map .leaflet-bar a,
+#map .leaflet-bar a:hover {
+    color: #000;
+    background: var(--w95-face);
+    border-radius: 0;
+    border-bottom: 1px solid var(--w95-shadow);
+}
+
+#map .leaflet-tooltip {
+    font-family: var(--w95-font);
+    color: #000;
+    background: #ffffe1;
+    border: 1px solid #000;
+    border-radius: 0;
+    box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.35);
+}
+
+#map .leaflet-tooltip-top::before {
+    border-top-color: #000;
+}
+
+/* A driving vehicle's map marker (MAP_STYLES in app.js): a beveled yellow square. */
+.nineties-vehicle-marker {
+    width: 16px;
+    height: 16px;
+    box-sizing: border-box;
+    background: #ffff00;
+    border: 2px solid #000;
+    box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.45);
+}
+
+/* ---------- Budget page: a window ---------- */
+
+.budget-page {
+    background: rgba(0, 128, 128, 0.55);
+}
+
+.budget-sheet {
+    padding: 3px 3px 12px;
+    color: #000;
+    background: var(--w95-face);
+    border-radius: 0;
+    box-shadow: var(--w95-raised), 4px 4px 0 rgba(0, 0, 0, 0.4);
+}
+
+.budget-sheet > :not(.budget-header) {
+    margin-left: 10px;
+    margin-right: 10px;
+}
+
+.budget-header {
+    padding: 4px 4px 4px 8px;
+    color: var(--w95-white);
+    background: var(--w95-title);
+}
+
+.budget-title {
+    font-size: 14px;
+}
+
+.budget-subtitle,
+#budget-balance {
+    color: var(--w95-white);
+}
+
+.budget-close {
+    font-family: var(--w95-font);
+    font-size: 14px;
+    font-weight: bold;
+    padding: 0 6px;
+    color: #000;
+    background: var(--w95-face);
+    border: none;
+    border-radius: 0;
+    box-shadow: var(--w95-raised);
+}
+
+.budget-filters label,
+.budget-status,
+.budget-detail {
+    color: #222;
+}
+
+.budget-table-wrap {
+    background: var(--w95-white);
+    box-shadow: var(--w95-sunken);
+    padding: 2px;
+}
+
+.budget-table th {
+    color: #000;
+    background: var(--w95-face);
+    border-bottom: none;
+    box-shadow: var(--w95-raised);
+}
+
+.budget-table td {
+    border-bottom: 1px solid var(--w95-light);
+}
+
+.budget-table tbody tr:hover {
+    color: var(--w95-white);
+    background: var(--w95-navy);
+}
+
+.budget-table tbody tr:hover * {
+    color: var(--w95-white) !important;
+}
+
+.budget-amount.charge {
+    color: #ff0000;
+}
+
+.budget-amount.refund {
+    color: #008000;
+}
+
+.budget-page .budget-direction {
+    border: none;
+    border-radius: 0;
+    gap: 2px;
+}
+
+.budget-page .budget-direction button:not(.budget-close).active {
+    color: #000;
+    background: var(--w95-light);
+    box-shadow: var(--w95-pressed);
+}
+
+/* ---------- Admin password prompt: a dialog box ---------- */
+
+.admin-dialog {
+    background: rgba(0, 128, 128, 0.55);
+}
+
+.admin-dialog-box {
+    padding: 3px 3px 12px;
+    gap: 8px;
+    font-family: var(--w95-font);
+    color: #000;
+    background: var(--w95-face);
+    border-radius: 0;
+    box-shadow: var(--w95-raised), 4px 4px 0 rgba(0, 0, 0, 0.4);
+}
+
+.admin-dialog-box > :not(.admin-dialog-title) {
+    margin-left: 10px;
+    margin-right: 10px;
+}
+
+.admin-dialog-title {
+    padding: 4px 8px;
+    font-size: 13px;
+    color: var(--w95-white);
+    background: var(--w95-title);
+}
+
+.admin-dialog-hint {
+    color: #222;
+}
+
+.admin-dialog-error {
+    color: #ff0000;
+}
+
+#admin-dialog-submit.danger {
+    color: #000;
+    background: var(--w95-face);
+    font-weight: bold;
+}

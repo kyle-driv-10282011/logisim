@@ -263,7 +263,7 @@ map = L.map("map", { preferCanvas: true }).setView([44.977, -93.265], 6);
 //
 // OpenStreetMap tiles. The 80's view turns them into a dark neon map
 // (theme80s.css filters the tile pane), the black & white view greys
-// them (themebw.css); blue & white shows them as they are.
+// them (themebw.css); blue & white and 90's show them as they are.
 //
 L.tileLayer(
     "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
@@ -280,7 +280,8 @@ L.tileLayer(
 //   routeGlow / routeCore: the route line, drawn twice - a wide faint glow
 //     under a bright core in the 80's view, the glow hidden otherwise.
 //   vehicleIcon: a driving vehicle's marker - a pulsing neon dot
-//     (.neon-vehicle-marker in theme80s.css) or Leaflet's own pin.
+//     (.neon-vehicle-marker in theme80s.css), a yellow square
+//     (.nineties-vehicle-marker in theme90s.css) or Leaflet's own pin.
 //   resting: the dot under a selected parked vehicle.
 //
 // Black & white uses blue & white's - themebw.css greys the whole page,
@@ -291,6 +292,14 @@ const neonVehicleIcon = L.divIcon({
     html: '<div class="neon-vehicle-marker"></div>',
     iconSize: [18, 18],
     iconAnchor: [9, 9],
+    tooltipAnchor: [0, -2]
+});
+
+const ninetiesVehicleIcon = L.divIcon({
+    className: "",
+    html: '<div class="nineties-vehicle-marker"></div>',
+    iconSize: [16, 16],
+    iconAnchor: [8, 8],
     tooltipAnchor: [0, -2]
 });
 
@@ -307,6 +316,12 @@ const MAP_STYLES = {
         routeCore: { color: "#ff4fd8", weight: 4, opacity: 0.95 },
         vehicleIcon: neonVehicleIcon,
         resting: { color: "#fff1a8", weight: 3, fillColor: "#2de2e6" }
+    },
+    "90s": {
+        routeGlow: { color: "#ffffff", weight: 9, opacity: 1 },
+        routeCore: { color: "#000080", weight: 5, opacity: 1 },
+        vehicleIcon: ninetiesVehicleIcon,
+        resting: { color: "#000000", weight: 2, fillColor: "#ffff00" }
     },
     blue: PLAIN_MAP_STYLE,
     bw: PLAIN_MAP_STYLE
@@ -2858,14 +2873,19 @@ function renderRefreshIntervalControl() {
 }
 
 //
-// Config -> View: black & white, blue & white (the app's original look) or
-// 80's (the default). A per-browser preference like the refresh setting -
+// Config -> View: black & white, blue & white (the app's original look),
+// 80's (the default) or 90's (a Windows 95 desktop). A per-browser preference like the refresh setting -
 // each person picks their own. The stylesheet half is switched by enabling
 // one of index.html's theme <link>s (an inline script there applies the
 // saved choice before first paint); the map half is restyled here.
 //
 const VIEW_STORAGE_KEY = "logisim-view";
-const VIEWS = ["bw", "blue", "80s"];
+const VIEWS = ["bw", "blue", "80s", "90s"];
+
+//
+// Each view's stylesheet <link> in index.html - blue & white has none.
+//
+const VIEW_STYLESHEETS = { bw: "theme-bw-css", "80s": "theme-80s-css", "90s": "theme-90s-css" };
 
 function currentView() {
 
@@ -2886,8 +2906,10 @@ function setView(view) {
     }
 
     document.documentElement.dataset.view = view;
-    document.getElementById("theme-80s-css").disabled = view !== "80s";
-    document.getElementById("theme-bw-css").disabled = view !== "bw";
+
+    for (const [stylesheetView, linkId] of Object.entries(VIEW_STYLESHEETS)) {
+        document.getElementById(linkId).disabled = stylesheetView !== view;
+    }
 
     renderViewChoice();
     restyleMap();
