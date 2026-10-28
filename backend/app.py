@@ -504,10 +504,75 @@ def trip_fuel_pool(starting_fuel_gallons, roadside_refuel_count, fuel_tank_gallo
 # and blending the purchase into the tank's average cost per gallon.
 # Returns (gallons bought, cost). The caller sets fuel_gallons itself.
 #
+#
+# Settings shared by every save file (global_settings), as opposed to each
+# file's own clock and auto-refuel (settings). Read with get_global_setting(),
+# changed by admins (PUT /api/global-settings).
+#
+# diesel_markup_percent: how much more diesel costs than a station's (gas)
+# price - stations only have the one price, so a diesel vehicle (its model's
+# fuel_type) pays that plus this at every fill-up, roadside refuel included.
+#
+GLOBAL_SETTING_DEFAULTS = {
+    "diesel_markup_percent": 18.0,
+}
+
+DIESEL_MARKUP_RANGE = (0.0, 200.0)
+
+
+def get_global_setting(cur, key):
+
+    cur.execute("SELECT value FROM global_settings WHERE key = %s", (key,))
+
+    row = cur.fetchone()
+
+    return float(row[0]) if row is not None else GLOBAL_SETTING_DEFAULTS[key]
+
+
+#
+# What a vehicle pays per gallon where a station charges station_price:
+# the same for gasoline (or a model with no fuel type set), plus the diesel
+# markup for diesel. Returns (price, markup_percent or None).
+#
+def fuel_price_for_vehicle(cur, vehicle_id, station_price):
+
+    cur.execute(
+        """
+        SELECT vm.fuel_type
+        FROM vehicles v JOIN vehicle_models vm ON vm.id = v.vehicle_model_id
+        WHERE v.id = %s
+        """,
+        (vehicle_id,)
+    )
+
+    row = cur.fetchone()
+
+    if row is None or row[0] != "diesel":
+        return station_price, None
+
+    markup_percent = get_global_setting(cur, "diesel_markup_percent")
+
+    return station_price * (1 + markup_percent / 100), markup_percent
+
+
+def fuel_purchase_label(gallons, price_per_gallon, markup_percent):
+
+    if markup_percent is None:
+        return f"Gas: {gallons:.2f} gal at ${price_per_gallon:.2f}/gal"
+
+    return f"Diesel: {gallons:.2f} gal at ${price_per_gallon:.2f}/gal (gas +{markup_percent:g}%)"
+
+
+#
+# price_per_gallon is the station's price; a diesel vehicle pays the
+# diesel markup on top (fuel_price_for_vehicle()).
+#
 def buy_fuel_to_full(
     cur, slot_id, vehicle_id, vehicle_name, gallons_in_tank, tank_cost_per_gallon,
     fuel_tank_gallons, price_per_gallon, where, trip=None, journey_id=None
 ):
+
+    price_per_gallon, markup_percent = fuel_price_for_vehicle(cur, vehicle_id, price_per_gallon)
 
     gallons_bought = max(0.0, fuel_tank_gallons - gallons_in_tank)
     cost = gallons_bought * price_per_gallon
@@ -521,7 +586,7 @@ def buy_fuel_to_full(
 
     record_money(
         cur, slot_id, -cost, "gas_purchase",
-        f"Gas: {gallons_bought:.2f} gal at ${price_per_gallon:.2f}/gal",
+        fuel_purchase_label(gallons_bought, price_per_gallon, markup_percent),
         vehicle_id, vehicle_name, where, trip, journey_id
     )
 
@@ -2871,6 +2936,15 @@ def run_migrations():
 
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS global_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """
+    )
+
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS vehicle_model_icons (
             vehicle_model_id INTEGER PRIMARY KEY REFERENCES vehicle_models(id) ON DELETE CASCADE,
             content_type TEXT NOT NULL,
@@ -3780,6 +3854,57 @@ def elevate_admin(req: ElevateAdminRequest):
 def admin_status(x_admin_token: Optional[str] = Header(None)):
 
     return {"configured": bool(ADMIN_PASSWORD), "admin": is_valid_admin_token(x_admin_token)}
+
+
+class GlobalSettingsRequest(BaseModel):
+    diesel_markup_percent: float
+
+
+#
+# Readable by everyone (it's part of what a fill-up costs); only admins
+# change it - from the Gas Prices tab.
+#
+@app.get("/api/global-settings")
+def read_global_settings():
+
+    conn = db()
+    cur = conn.cursor()
+
+    try:
+        return {key: get_global_setting(cur, key) for key in GLOBAL_SETTING_DEFAULTS}
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.put("/api/global-settings")
+def update_global_settings(req: GlobalSettingsRequest, _admin: None = Depends(require_admin)):
+
+    low, high = DIESEL_MARKUP_RANGE
+
+    if not low <= req.diesel_markup_percent <= high:
+        raise HTTPException(status_code=400, detail=f"The diesel markup must be {low:g}-{high:g}%")
+
+    conn = db()
+    cur = conn.cursor()
+
+    try:
+
+        cur.execute(
+            """
+            INSERT INTO global_settings (key, value) VALUES ('diesel_markup_percent', %s)
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+            """,
+            (str(req.diesel_markup_percent),)
+        )
+
+        conn.commit()
+
+        return {key: get_global_setting(cur, key) for key in GLOBAL_SETTING_DEFAULTS}
+
+    finally:
+        cur.close()
+        conn.close()
 
 
 @app.get("/api/slots")
@@ -5625,7 +5750,9 @@ def roadside_refuel_vehicle(id: int, slot: int = Depends(current_slot)):
     #
     lat, lng = interpolate_position_at_distance(route, distances_miles, progress["distance_miles"])
     nearest = find_closest_gas_station(cur, lat, lng)
-    price_per_gallon = nearest["price_per_gallon"] if nearest else 0.0
+    price_per_gallon, markup_percent = fuel_price_for_vehicle(
+        cur, id, nearest["price_per_gallon"] if nearest else 0.0
+    )
     gas_cost = fuel_tank_gallons * price_per_gallon
 
     cur.execute(
@@ -5646,7 +5773,8 @@ def roadside_refuel_vehicle(id: int, slot: int = Depends(current_slot)):
 
     record_money(
         cur, slot, -gas_cost, "gas_purchase",
-        f"Roadside gas: {fuel_tank_gallons:.2f} gal at ${price_per_gallon:.2f}/gal (nearest station's price)",
+        "Roadside " + fuel_purchase_label(fuel_tank_gallons, price_per_gallon, markup_percent).lower()
+        + " (nearest station's price)",
         id, vehicle_name, location, trip_label, journey_id
     )
 

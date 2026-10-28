@@ -649,6 +649,10 @@ function showTab(tab) {
         loadJobs();
     }
 
+    if (tab === "gasprices") {
+        loadDieselMarkup();
+    }
+
 }
 
 
@@ -745,6 +749,65 @@ async function loadVehicleModels() {
     renderVehicleList();
     renderVehicleModelsPage();
     restyleMap();
+}
+
+
+//
+// The Gas Prices tab's diesel markup (global_settings in app.py): how much
+// more a diesel vehicle pays than a station's price. Shared by every save
+// file, so it's read fresh each time the tab opens.
+//
+async function loadDieselMarkup() {
+
+    try {
+
+        const response = await apiFetch(API + "/api/global-settings");
+
+        if (response.ok) {
+            document.getElementById("diesel-markup").value = (await response.json()).diesel_markup_percent;
+        }
+
+    } catch (e) {
+        // keeps whatever it showed
+    }
+}
+
+
+async function saveDieselMarkup() {
+
+    const result = document.getElementById("diesel-markup-result");
+    const value = Number(document.getElementById("diesel-markup").value);
+
+    const show = (kind, message) => {
+        result.className = "form-result " + kind;
+        result.textContent = message;
+    };
+
+    let response;
+    let data;
+
+    try {
+
+        response = await apiFetch(API + "/api/global-settings", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ diesel_markup_percent: value })
+        });
+
+        data = await response.json();
+
+    } catch (e) {
+        show("error", "Not saved - couldn't reach the server.");
+        return;
+    }
+
+    if (!response.ok) {
+        show("error", "Not saved - " + (typeof data.detail === "string" ? data.detail : "enter a number."));
+        return;
+    }
+
+    document.getElementById("diesel-markup").value = data.diesel_markup_percent;
+    show("success", `Saved - diesel now costs ${data.diesel_markup_percent}% more than gas.`);
 }
 
 

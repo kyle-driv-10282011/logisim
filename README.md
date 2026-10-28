@@ -118,6 +118,14 @@ real destination. Every charge and refund is on the **Budget** page (tab
 menu → Budget, `GET /api/ledger`): vehicle, location, trip, cost and the
 balance after it. The balance can go negative; nothing is blocked yet.
 
+Diesel costs more. Stations have a single price. A vehicle whose model's
+fuel type is **diesel** pays that price plus a markup at every fill-up,
+roadside refuels included. The markup starts at 18% and is set on the
+admin **Gas Prices** tab. It's one setting for all four files
+(`global_settings`, `GET`/`PUT /api/global-settings`). Its refund follows
+the price it actually paid, like gas. Models with no fuel type set pay the
+gas price.
+
 ### Outbound network access
 
 The backend needs to reach two public services over the internet:

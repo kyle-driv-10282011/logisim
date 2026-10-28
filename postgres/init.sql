@@ -135,6 +135,17 @@ CREATE TABLE vehicle_model_icons (
 );
 
 
+-- Settings shared by every save file (see GLOBAL_SETTING_DEFAULTS in
+-- app.py), one row per key - a missing row means its default. Admins change
+-- them (PUT /api/global-settings), e.g. diesel_markup_percent.
+CREATE TABLE global_settings (
+
+    key TEXT PRIMARY KEY,
+
+    value TEXT NOT NULL
+);
+
+
 CREATE TABLE places (
 
     id SERIAL PRIMARY KEY,

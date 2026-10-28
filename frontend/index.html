@@ -82,6 +82,21 @@
             font-size: 12px;
         }
 
+        .diesel-markup-row {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+        }
+
+        #vehicle-panel .diesel-markup-row input {
+            width: 70px;
+        }
+
+        .diesel-markup-row span {
+            flex: 1;
+        }
+
         /* Config -> View: one row per view, each with a little preview swatch. */
         .view-choices {
             display: flex;
@@ -1224,6 +1239,20 @@
     </div>
 
     <div class="tab-content" id="tab-gasprices">
+
+        <div class="panel-form">
+            <span class="config-label"><b>Diesel price</b></span>
+            <label for="diesel-markup" class="config-hint">
+                Stations have one price. Diesel vehicles pay it plus this much at every fill-up,
+                roadside refuels included - in every save file.
+            </label>
+            <div class="diesel-markup-row">
+                <input id="diesel-markup" type="number" min="0" max="200" step="0.5" autocomplete="off">
+                <span>% more than gas</span>
+                <button onclick="withSpinner(this, saveDieselMarkup)">Save</button>
+            </div>
+            <div id="diesel-markup-result" class="form-result"></div>
+        </div>
 
         <div id="gasprice-legend">
             Price:
