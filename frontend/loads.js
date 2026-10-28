@@ -478,9 +478,21 @@ function loadsPageRow(load) {
         when = `Ended ${formatGameDateTime(load.expires_game_time)}`;
     }
 
-    const pay = load.status === "delivered"
+    //
+    // What it's cost so far in fuel and roadside fees (tagged with it in the
+    // ledger - see LOAD_COST_KINDS in app.py), and once delivered, what it
+    // netted after them.
+    //
+    const costs = load.costs > 0 || load.status === "delivered"
+        ? `<div class="budget-detail">` +
+          (load.costs > 0 ? `fuel &amp; fees ${formatDoubloons(-load.costs)}` : "no fuel bought") +
+          (load.status === "delivered" ? ` &middot; net ${formatDoubloons(load.net)}` : "") +
+          `</div>`
+        : "";
+
+    const pay = (load.status === "delivered"
         ? formatDoubloons(load.paid) + (load.paid < load.pay ? ` <span class="loads-of">of ${formatDoubloons(load.pay)}</span>` : "")
-        : formatDoubloons(load.pay);
+        : formatDoubloons(load.pay)) + costs;
 
     row.innerHTML =
         `<td><span class="load-status load-status-${load.status}">${LOAD_STATUS_LABELS[load.status] || load.status}</span></td>` +

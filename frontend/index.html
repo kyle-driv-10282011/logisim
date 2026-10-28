@@ -1203,6 +1203,9 @@
             <label>Trip
                 <select id="budget-trip-filter" onchange="reloadBudgetRows()"></select>
             </label>
+            <label>Load
+                <select id="budget-load-filter" onchange="reloadBudgetRows()"></select>
+            </label>
             <div class="budget-direction" id="budget-direction" role="group" aria-label="Show">
                 <button data-direction="in" aria-pressed="false">+ Additions</button>
                 <button data-direction="out" aria-pressed="false">&minus; Subtractions</button>
@@ -1216,6 +1219,7 @@
                         <th>Vehicle</th>
                         <th>Location</th>
                         <th>Trip</th>
+                        <th>Load</th>
                         <th class="budget-cost">Cost</th>
                         <th class="budget-balance-after">New balance</th>
                     </tr>

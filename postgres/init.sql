@@ -529,6 +529,10 @@ CREATE TABLE ledger (
     -- The file's balance right after this entry.
     balance_after NUMERIC(14, 2),
 
+    -- The load this was for: fuel and roadside fees while hauling it or on
+    -- the way to pick it up, and its delivery payment (see LOAD_COST_KINDS).
+    load_id INTEGER,
+
     created TIMESTAMP DEFAULT NOW()
 );
 
@@ -592,3 +596,4 @@ CREATE TABLE loads (
 
 CREATE INDEX loads_slot_status ON loads (slot_id, status);
 CREATE INDEX loads_vehicle ON loads (vehicle_id);
+CREATE INDEX ledger_load ON ledger (load_id);

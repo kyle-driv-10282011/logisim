@@ -822,7 +822,24 @@ async function loadVehicleModels() {
         option.value = vehicleModel.id;
         option.textContent = `${vehicleModelLabel(vehicleModel)} - ${formatDoubloons(vehicleModel.cost)}`;
 
+        //
+        // Grandpa's van is one of a kind - listed, but not for sale (the
+        // backend refuses too).
+        //
+        if (isStarterVehicleModel(vehicleModel)) {
+            option.disabled = true;
+            option.textContent = `${vehicleModelLabel(vehicleModel)} - grandpa's, not for sale`;
+        }
+
         select.appendChild(option);
+    }
+
+    //
+    // Never left sitting on the one that can't be bought.
+    //
+    if (select.selectedOptions[0] && select.selectedOptions[0].disabled) {
+        const buyable = [...select.options].find((option) => !option.disabled);
+        select.value = buyable ? buyable.value : "";
     }
 
     if (vehicleModels.some((vehicleModel) => String(vehicleModel.id) === previousValue)) {
@@ -1646,13 +1663,19 @@ async function sellVehicle(vehicleId) {
     const vehicle = vehiclesById.get(vehicleId);
 
     //
-    // Refunds what was paid for it - nothing for the inherited starter van.
+    // Refunds what was paid for it - nothing for the inherited starter van,
+    // which can never be bought back.
     //
     const refund = vehicle ? vehicle.purchase_price : 0;
+    const grandpas = vehicle && vehicle.vehicle_model && isStarterVehicleModel(vehicle.vehicle_model);
 
     if (!confirm(
         `Sell ${vehicle ? vehicle.name : "this vehicle"}?\n\n` +
-        (refund > 0 ? `You'll get back ${formatDoubloons(refund)}, what it was bought for.` : "It was free, so it sells for nothing.")
+        (grandpas
+            ? "It's grandpa's van - it sells for nothing, and there isn't another one anywhere. Once it's gone, it's gone for good."
+            : refund > 0
+                ? `You'll get back ${formatDoubloons(refund)}, what it was bought for.`
+                : "It was free, so it sells for nothing.")
     )) {
         return;
     }
@@ -2382,7 +2405,7 @@ async function addVehicle() {
     const vehicleModelId = document.getElementById("vehicle-model-select").value;
 
     if (!vehicleModelId) {
-        alert("Add a hauling vehicle model first");
+        alert("Nothing's for sale yet - an admin can add vehicle models.");
         return;
     }
 

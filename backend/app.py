@@ -396,15 +396,35 @@ def give_starter_vehicle(cur, slot_id):
 # time, for the Budget page: the vehicle can be deleted, and the places and
 # path behind a trip are forgotten once nothing uses them.
 #
+#
+# What a load costs to run: fuel bought (at a station, by auto-refuel, or
+# roadside) and roadside fees while a vehicle is carrying a load or on its
+# way to pick one up are tagged with that load (ledger.load_id) - as is the
+# load's own delivery payment - so the Budget and Loads pages can show what
+# each load cost against what it paid.
+#
+LOAD_COST_KINDS = ("gas_purchase", "roadside_fee")
+
+
 def record_money(
     cur, slot_id, amount, kind, description, vehicle_id=None, vehicle_name=None, location=None, trip=None,
-    journey_id=None
+    journey_id=None, load_id=None
 ):
 
     amount = round(amount, 2)
 
     if amount == 0:
         return
+
+    if load_id is None and vehicle_id is not None and kind in LOAD_COST_KINDS:
+
+        cur.execute(
+            "SELECT id FROM loads WHERE vehicle_id = %s AND status IN ('accepted', 'loaded') LIMIT 1",
+            (vehicle_id,)
+        )
+
+        row = cur.fetchone()
+        load_id = row[0] if row else None
 
     cur.execute("UPDATE save_slots SET balance = balance + %s WHERE id = %s RETURNING balance", (amount, slot_id))
 
@@ -413,10 +433,13 @@ def record_money(
     cur.execute(
         """
         INSERT INTO ledger
-        (slot_id, amount, kind, description, vehicle_id, vehicle_name, location, trip, journey_id, balance_after)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        (slot_id, amount, kind, description, vehicle_id, vehicle_name, location, trip, journey_id, balance_after, load_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
-        (slot_id, amount, kind, description, vehicle_id, vehicle_name, location, trip, journey_id, balance_after)
+        (
+            slot_id, amount, kind, description, vehicle_id, vehicle_name, location, trip, journey_id, balance_after,
+            load_id
+        )
     )
 
 
@@ -3002,6 +3025,9 @@ def run_migrations():
     cur.execute("CREATE INDEX IF NOT EXISTS loads_slot_status ON loads (slot_id, status)")
     cur.execute("CREATE INDEX IF NOT EXISTS loads_vehicle ON loads (vehicle_id)")
 
+    cur.execute("ALTER TABLE ledger ADD COLUMN IF NOT EXISTS load_id INTEGER")
+    cur.execute("CREATE INDEX IF NOT EXISTS ledger_load ON ledger (load_id)")
+
     cur.execute(
         """
         UPDATE vehicle_models SET tire_count = %s
@@ -4250,10 +4276,39 @@ def list_ledger_filters(slot: int = Depends(current_slot)):
         for row in cur.fetchall()
     ]
 
+    #
+    # Every load with money against it, newest first.
+    #
+    cur.execute(
+        """
+        SELECT l.id, l.cargo, l.origin_name, l.origin_state, l.destination_name, l.destination_state,
+            MIN(e.vehicle_name)
+        FROM ledger e JOIN loads l ON l.id = e.load_id
+        WHERE e.slot_id = %s
+        GROUP BY l.id
+        ORDER BY l.id DESC
+        """,
+        (slot,)
+    )
+
+    loads = [
+        {
+            "id": row[0],
+            "label": ledger_load_label(row[0], row[1], row[2], row[3], row[4], row[5]),
+            "vehicle": row[6],
+        }
+        for row in cur.fetchall()
+    ]
+
     cur.close()
     conn.close()
 
-    return {"vehicles": vehicles, "trips": trips}
+    return {"vehicles": vehicles, "trips": trips, "loads": loads}
+
+
+def ledger_load_label(load_id, cargo, origin_name, origin_state, destination_name, destination_state):
+
+    return f"#{load_id} {cargo}: {origin_name}, {origin_state} → {destination_name}, {destination_state}"
 
 
 #
@@ -4280,7 +4335,7 @@ LEDGER_DIRECTIONS = ("both", "in", "out")
 @app.get("/api/ledger")
 def list_ledger(
     limit: int = 50, before_id: Optional[int] = None, vehicle: Optional[str] = None, trip: Optional[str] = None,
-    direction: str = "both", slot: int = Depends(current_slot)
+    direction: str = "both", load_id: Optional[int] = None, slot: int = Depends(current_slot)
 ):
 
     limit = max(1, min(limit, 500))
@@ -4304,20 +4359,23 @@ def list_ledger(
     #
     cur.execute(
         """
-        SELECT id, amount, kind, description, created, vehicle_name, location, trip, balance_after
-        FROM ledger
-        WHERE slot_id = %s
-        AND (%s::int IS NULL OR id < %s::int)
-        AND (%s::text IS NULL OR vehicle_name = %s::text)
-        AND (%s::int IS NULL OR journey_id = %s::int)
-        AND (%s::text IS NULL OR (journey_id IS NULL AND trip = %s::text))
-        AND (%s = 'both' OR (%s = 'in' AND amount > 0) OR (%s = 'out' AND amount < 0))
-        ORDER BY id DESC
+        SELECT e.id, e.amount, e.kind, e.description, e.created, e.vehicle_name, e.location, e.trip,
+            e.balance_after, e.load_id, l.cargo
+        FROM ledger e
+        LEFT JOIN loads l ON l.id = e.load_id
+        WHERE e.slot_id = %s
+        AND (%s::int IS NULL OR e.id < %s::int)
+        AND (%s::text IS NULL OR e.vehicle_name = %s::text)
+        AND (%s::int IS NULL OR e.journey_id = %s::int)
+        AND (%s::text IS NULL OR (e.journey_id IS NULL AND e.trip = %s::text))
+        AND (%s = 'both' OR (%s = 'in' AND e.amount > 0) OR (%s = 'out' AND e.amount < 0))
+        AND (%s::int IS NULL OR e.load_id = %s::int)
+        ORDER BY e.id DESC
         LIMIT %s
         """,
         (
             slot, before_id, before_id, vehicle, vehicle, journey_id, journey_id, trip_label, trip_label,
-            direction, direction, direction, limit + 1
+            direction, direction, direction, load_id, load_id, limit + 1
         )
     )
 
@@ -4342,6 +4400,12 @@ def list_ledger(
                 "location": row[6],
                 "trip": row[7],
                 "balance_after": float(row[8]) if row[8] is not None else None,
+                "load_id": row[9],
+                #
+                # Just the load's number and cargo - its route is already
+                # the row's trip.
+                #
+                "load": f"#{row[9]} {row[10]}" if row[9] is not None else None,
             }
             for row in rows[:limit]
         ]
@@ -4465,6 +4529,15 @@ def create_vehicle(req: CreateVehicleRequest, slot: int = Depends(current_slot))
         cur.close()
         conn.close()
         raise HTTPException(status_code=404, detail="Vehicle model not found")
+
+    #
+    # Grandpa's van is one of a kind: each file inherits it
+    # (give_starter_vehicle()), and nobody can buy another.
+    #
+    if is_starter_vehicle_model(vehicle_model["year"], vehicle_model["brand"], vehicle_model["model"]):
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=409, detail="There was only ever one of grandpa's van - it can't be bought")
 
     #
     # Geocoded/resolved up front (same as _drive_vehicle_to()'s
@@ -8089,7 +8162,9 @@ def list_loads(
         cur.execute(
             f"""
             SELECT {LOAD_COLUMNS}, picked_up_game_time, delivered_game_time, paid,
-                (SELECT v.name FROM vehicles v WHERE v.id = loads.vehicle_id)
+                (SELECT v.name FROM vehicles v WHERE v.id = loads.vehicle_id),
+                (SELECT COALESCE(SUM(-e.amount), 0) FROM ledger e WHERE e.load_id = loads.id AND e.amount < 0),
+                (SELECT COALESCE(SUM(e.amount), 0) FROM ledger e WHERE e.load_id = loads.id)
             FROM loads
             WHERE slot_id = %s
             AND (%s::text[] IS NULL OR status = ANY(%s::text[]))
@@ -8132,6 +8207,13 @@ def list_loads(
             "delivered_game_time": row[22].isoformat() if row[22] else None,
             "paid": float(row[23]) if row[23] is not None else None,
             "vehicle_name": row[24],
+
+            #
+            # Fuel and roadside fees run up on it so far, and what it's
+            # netted (its pay less those) - see LOAD_COST_KINDS.
+            #
+            "costs": float(row[25]),
+            "net": float(row[26]),
         })
 
     return {
@@ -8387,7 +8469,8 @@ def handle_load_arrival(cur, slot_id, vehicle_id, vehicle_name, arrived_place_id
 
     record_money(
         cur, slot_id, paid, "load_payment", f"Delivered {load['cargo'].lower()} ({note})",
-        vehicle_id, vehicle_name, load["destination"], journey_label(load["origin"], load["destination"])
+        vehicle_id, vehicle_name, load["destination"], journey_label(load["origin"], load["destination"]),
+        load_id=load["id"]
     )
 
     return None

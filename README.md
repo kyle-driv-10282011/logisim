@@ -120,7 +120,9 @@ yet.
 
 Vehicles cost money too. **Buy Vehicle** charges the model's price, and
 **Sell** refunds what was paid (`vehicles.purchase_price`). The inherited
-starter van was free, so it sells for nothing. Each vehicle also records
+starter van was free, so it sells for nothing, and it can't be bought:
+there's only ever one of grandpa's van. The Buy Vehicle list shows it as
+not for sale and the backend refuses it, so selling it is for good. Each vehicle also records
 its model's price when acquired (`list_price`), for depreciation later. A
 vehicle can only be sold while it's parked. It can't be sold while it's
 driving, stranded, mid-detour, between a refuel and the next leg, or while
@@ -157,6 +159,12 @@ expired and failed. It's newest first, filterable by status and vehicle,
 with a summary of counts and total earnings (`GET /api/loads`). An
 available load can be accepted from here by any parked vehicle that fits
 it, wherever its pickup is. The deadline allows for the drive there.
+
+Money is tagged with its load (`ledger.load_id`). Fuel bought and roadside
+fees while a vehicle is hauling a load or heading to pick it up are tagged
+with that load, and so is its delivery payment. The Budget page has a
+**Load** column and filter. The Loads page shows each load's fuel and fees
+so far and, once delivered, what it netted.
 
 - **Cities:** every US city and town of 10,000+ people, except Hawaii and
   Juneau, AK, which no road reaches, bundled in

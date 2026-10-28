@@ -14,7 +14,7 @@ let budgetOldestId = null;
 // The dropdown choices (GET /api/ledger/filters): vehicle names, and trips
 // as { key, vehicle, trip, started }. Re-fetched each time the page opens.
 //
-let budgetFilterOptions = { vehicles: [], trips: [] };
+let budgetFilterOptions = { vehicles: [], trips: [], loads: [] };
 
 //
 // The Additions / Subtractions / Both toggle: "in" (delivery pay, sales),
@@ -64,6 +64,7 @@ async function openBudgetPage() {
 
     renderBudgetVehicleFilter();
     renderBudgetTripFilter();
+    renderBudgetLoadFilter();
 
     reloadBudgetRows();
 }
@@ -130,9 +131,34 @@ function renderBudgetTripFilter() {
 }
 
 
+//
+// Loads with money against them - fuel and fees run up hauling them, and
+// their delivery pay - narrowed to the chosen vehicle's, like trips.
+//
+function renderBudgetLoadFilter() {
+
+    const vehicle = document.getElementById("budget-vehicle-filter").value;
+    const select = document.getElementById("budget-load-filter");
+    const previous = select.value;
+
+    const loads = (budgetFilterOptions.loads || []).filter((load) => !vehicle || load.vehicle === vehicle);
+
+    select.innerHTML = "";
+
+    addBudgetOption(select, "", vehicle ? `All loads (${loads.length})` : "All loads");
+
+    for (const load of loads) {
+        addBudgetOption(select, String(load.id), vehicle ? load.label : `${load.label} · ${load.vehicle}`);
+    }
+
+    select.value = loads.some((load) => String(load.id) === previous) ? previous : "";
+}
+
+
 function onBudgetVehicleFilterChange() {
 
     renderBudgetTripFilter();
+    renderBudgetLoadFilter();
     reloadBudgetRows();
 }
 
@@ -181,6 +207,12 @@ async function loadBudgetPage() {
         params.set("trip", trip);
     }
 
+    const load = document.getElementById("budget-load-filter").value;
+
+    if (load) {
+        params.set("load_id", load);
+    }
+
     if (budgetDirection !== "both") {
         params.set("direction", budgetDirection);
     }
@@ -216,7 +248,7 @@ async function loadBudgetPage() {
         budgetOldestId = data.entries[data.entries.length - 1].id;
     }
 
-    const filtered = Boolean(vehicle || trip || budgetDirection !== "both");
+    const filtered = Boolean(vehicle || trip || load || budgetDirection !== "both");
 
     status.textContent = rows.children.length
         ? ""
@@ -270,6 +302,7 @@ function budgetRow(entry) {
         budgetCell(entry.vehicle),
         budgetCell(entry.location),
         budgetCell(entry.trip),
+        budgetCell(entry.load),
         cost,
         balance
     );
