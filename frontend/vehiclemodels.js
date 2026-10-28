@@ -21,6 +21,14 @@ let vehicleModelsPageOpen = false;
 let modelEditorId = null;
 let modelEditorImage = null;
 
+//
+// The engine size exactly as it'll be saved, in liters. The two size boxes
+// show it rounded (L to 2 places, cubic inches whole), so typing in either
+// sets this precisely and refills the other - 351 ci stays 351 ci rather
+// than drifting through a rounded liter value.
+//
+let modelEditorLiters = null;
+
 
 function openVehicleModelsPage() {
 
@@ -116,6 +124,7 @@ function renderVehicleModelsPage() {
             `<span>${vehicleModel.mpg} mpg</span>` +
             `<span>${vehicleModel.fuel_tank_gallons} gal tank</span>` +
             `</div>` +
+            `<div class="model-card-engine"></div>` +
             `<div class="model-card-cost">${formatDoubloons(vehicleModel.cost)}</div>` +
             `</div>` +
             `<div class="model-card-actions">` +
@@ -124,6 +133,7 @@ function renderVehicleModelsPage() {
             `</div>`;
 
         card.querySelector(".model-card-name").textContent = vehicleModelLabel(vehicleModel);
+        card.querySelector(".model-card-engine").textContent = engineSummary(vehicleModel) || "Engine not set";
         card.querySelector(".model-edit-button").onclick = () => openModelEditor(vehicleModel.id);
 
         const deleteButton = card.querySelector(".model-delete-button");
@@ -189,6 +199,39 @@ const MODEL_EDITOR_FIELDS = [
     ["image", "model-field-image-file", String]
 ];
 
+//
+// The engine selects: element id -> model field, with how a select's value
+// maps to and from the stored one ("" is "not set").
+//
+const MODEL_ENGINE_SELECTS = [
+    ["model-field-cylinders", "engine_cylinders", (v) => (v ? Number(v) : null), (v) => (v ?? "")],
+    ["model-field-turbo", "engine_turbo", (v) => (v ? v === "yes" : null), (v) => (v === null || v === undefined ? "" : v ? "yes" : "no")],
+    ["model-field-fuel", "fuel_type", (v) => v || null, (v) => v || ""],
+    ["model-field-transmission", "transmission", (v) => v || null, (v) => v || ""]
+];
+
+
+function trimNumber(value, places) {
+
+    return String(Number(value.toFixed(places)));
+}
+
+
+function setModelEditorLiters(liters, from) {
+
+    modelEditorLiters = liters;
+
+    if (from !== "liters") {
+        document.getElementById("model-field-liters").value = liters === null ? "" : trimNumber(liters, 2);
+    }
+
+    if (from !== "ci") {
+        document.getElementById("model-field-ci").value =
+            liters === null ? "" : String(Math.round(liters * CUBIC_INCHES_PER_LITER));
+    }
+}
+
+
 const NEW_MODEL_DEFAULTS = {
     year: new Date().getFullYear(),
     brand: "",
@@ -198,7 +241,12 @@ const NEW_MODEL_DEFAULTS = {
     cost: 45000,
     mpg: 18,
     fuel_tank_gallons: 20,
-    image: ""
+    image: "",
+    engine_liters: null,
+    engine_cylinders: null,
+    engine_turbo: null,
+    fuel_type: null,
+    transmission: null
 };
 
 
@@ -212,6 +260,12 @@ function openModelEditor(vehicleModelId = null) {
 
     for (const [key, id] of MODEL_EDITOR_FIELDS) {
         document.getElementById(id).value = values[key] ?? "";
+    }
+
+    setModelEditorLiters(values.engine_liters ?? null, null);
+
+    for (const [id, key, , toSelect] of MODEL_ENGINE_SELECTS) {
+        document.getElementById(id).value = toSelect(values[key]);
     }
 
     //
@@ -395,6 +449,11 @@ async function saveModelEditor() {
     }
 
     body.image = body.image || null;
+    body.engine_liters = modelEditorLiters;
+
+    for (const [id, key, fromSelect] of MODEL_ENGINE_SELECTS) {
+        body[key] = fromSelect(document.getElementById(id).value);
+    }
 
     error.textContent = "";
 
@@ -533,6 +592,19 @@ async function uploadVehicleModels() {
     };
 
     document.getElementById("model-field-image-file").oninput = renderModelEditorPreview;
+
+    //
+    // Either engine size box fills the other (see modelEditorLiters).
+    //
+    document.getElementById("model-field-liters").oninput = (event) => {
+        const value = event.target.value.trim();
+        setModelEditorLiters(value === "" ? null : Number(value), "liters");
+    };
+
+    document.getElementById("model-field-ci").oninput = (event) => {
+        const value = event.target.value.trim();
+        setModelEditorLiters(value === "" ? null : Number(value) / CUBIC_INCHES_PER_LITER, "ci");
+    };
 
     document.getElementById("model-image-url").onkeydown = (event) => {
         if (event.key === "Enter") {

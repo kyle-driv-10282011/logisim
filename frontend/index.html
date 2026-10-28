@@ -1006,6 +1006,38 @@
                 <label>Cost ($) <input id="model-field-cost" type="number" min="0" step="0.01" required></label>
                 <label>MPG <input id="model-field-mpg" type="number" min="0.1" step="0.1" required></label>
                 <label>Fuel tank (gal) <input id="model-field-tank" type="number" min="0.1" step="0.1" required></label>
+
+                <div class="model-editor-section">Engine</div>
+                <label>Size (L) <input id="model-field-liters" type="number" min="0.5" max="20" step="0.01" placeholder="5.8"></label>
+                <label>Size (cu in) <input id="model-field-ci" type="number" min="31" max="1220" step="1" placeholder="351"></label>
+                <label>Cylinders
+                    <select id="model-field-cylinders">
+                        <option value="">&mdash;</option>
+                        <option>3</option><option>4</option><option>5</option><option>6</option>
+                        <option>8</option><option>10</option><option>12</option>
+                    </select>
+                </label>
+                <label>Turbo
+                    <select id="model-field-turbo">
+                        <option value="">&mdash;</option>
+                        <option value="no">No</option>
+                        <option value="yes">Yes</option>
+                    </select>
+                </label>
+                <label>Fuel type
+                    <select id="model-field-fuel">
+                        <option value="">&mdash;</option>
+                        <option value="gasoline">Gasoline</option>
+                        <option value="diesel">Diesel</option>
+                    </select>
+                </label>
+                <label>Transmission
+                    <select id="model-field-transmission">
+                        <option value="">&mdash;</option>
+                        <option value="manual">Manual</option>
+                        <option value="automatic">Automatic</option>
+                    </select>
+                </label>
                 <div class="model-editor-note" id="model-editor-starter-note">
                     The starter van keeps its year, brand and model - every new file starts with one.
                 </div>

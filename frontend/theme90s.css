@@ -659,6 +659,15 @@ body {
     color: #008000;
 }
 
+.model-editor-section {
+    border-top: 1px solid var(--w95-shadow);
+    box-shadow: inset 0 1px 0 var(--w95-white);
+}
+
+.model-card-engine {
+    color: #000;
+}
+
 .model-card-starter {
     border-radius: 0;
     color: #000;

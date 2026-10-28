@@ -937,6 +937,14 @@ side panel since they don't all fit as a row:
   their model does. An uploaded picture wins over a built-in `image`
   filename. **Export CSV** and **Import CSV** carry the built-in filenames
   only. The starter van can't be deleted or renamed.
+  The editor's **Engine** section records size (liters or cubic inches:
+  typing in either fills the other), cylinders (3, 4, 5, 6, 8, 10 or 12),
+  turbo, fuel type (gasoline or diesel) and transmission (manual or
+  automatic). All are optional. They show on each card and as an **Engine:**
+  line in the vehicle spotlight, and they travel in the CSV
+  (`engine_liters`, `engine_cylinders`, `engine_turbo` as yes or no,
+  `fuel_type`, `transmission`). An older CSV without those columns leaves
+  existing specs alone. Fuel type is recorded only for now.
 - **Places** — the saved-places bank (see [`places`](#places)). Add one
   directly, or just let it fill in from vehicle/path locations as they're
   typed elsewhere. A row of filter chips above the list — one row per

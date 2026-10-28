@@ -233,7 +233,14 @@ STARTER_VEHICLE_MODEL = {
     "cost": 3000,
     "mpg": 8,
     "fuel_tank_gallons": 38,
-    "image": "1978-Ford-Econoline.png"
+    "image": "1978-Ford-Econoline.png",
+    # The 351 cu in V8 Ford sold as a 5.8L - stored from cubic inches so it
+    # reads back as 351, not the 354 a flat 5.8 L would convert to.
+    "engine_liters": round(351 / 61.0237, 4),
+    "engine_cylinders": 8,
+    "engine_turbo": False,
+    "fuel_type": "gasoline",
+    "transmission": "automatic"
 }
 
 #
@@ -292,14 +299,16 @@ def ensure_starter_vehicle_model(cur):
     cur.execute(
         """
         INSERT INTO vehicle_models
-        (year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, fuel_tank_gallons, image)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        (year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, fuel_tank_gallons, image,
+         engine_liters, engine_cylinders, engine_turbo, fuel_type, transmission)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
         (
             starter["year"], starter["brand"], starter["model"], starter["person_capacity"],
             starter["cargo_capacity_cuft"], starter["cost"], starter["mpg"], starter["fuel_tank_gallons"],
-            starter["image"]
+            starter["image"], starter["engine_liters"], starter["engine_cylinders"], starter["engine_turbo"],
+            starter["fuel_type"], starter["transmission"]
         )
     )
 
@@ -2820,6 +2829,32 @@ def run_migrations():
 
     cur.execute("ALTER TABLE trips ADD COLUMN IF NOT EXISTS journey_route_before JSONB NOT NULL DEFAULT '[]'")
 
+    #
+    # Engine specs (see ENGINE_COLUMNS) - nullable, so existing models just
+    # have none until someone fills them in. The starter van gets its own.
+    #
+    cur.execute("ALTER TABLE vehicle_models ADD COLUMN IF NOT EXISTS engine_liters DOUBLE PRECISION")
+    cur.execute("ALTER TABLE vehicle_models ADD COLUMN IF NOT EXISTS engine_cylinders INTEGER")
+    cur.execute("ALTER TABLE vehicle_models ADD COLUMN IF NOT EXISTS engine_turbo BOOLEAN")
+    cur.execute("ALTER TABLE vehicle_models ADD COLUMN IF NOT EXISTS fuel_type TEXT")
+    cur.execute("ALTER TABLE vehicle_models ADD COLUMN IF NOT EXISTS transmission TEXT")
+
+    cur.execute(
+        """
+        UPDATE vehicle_models
+        SET engine_liters = %s, engine_cylinders = %s, engine_turbo = %s, fuel_type = %s, transmission = %s
+        WHERE year = %s AND LOWER(brand) = LOWER(%s) AND LOWER(model) = LOWER(%s)
+        AND engine_liters IS NULL AND engine_cylinders IS NULL AND engine_turbo IS NULL
+        AND fuel_type IS NULL AND transmission IS NULL
+        """,
+        (
+            STARTER_VEHICLE_MODEL["engine_liters"], STARTER_VEHICLE_MODEL["engine_cylinders"],
+            STARTER_VEHICLE_MODEL["engine_turbo"], STARTER_VEHICLE_MODEL["fuel_type"],
+            STARTER_VEHICLE_MODEL["transmission"],
+            STARTER_VEHICLE_MODEL["year"], STARTER_VEHICLE_MODEL["brand"], STARTER_VEHICLE_MODEL["model"]
+        )
+    )
+
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS vehicle_model_images (
@@ -3190,13 +3225,24 @@ def vehicle_model_dict(row):
             else None
         ),
 
-        "has_uploaded_image": row[10] is not None
+        "has_uploaded_image": row[10] is not None,
+
+        "engine_liters": row[11],
+
+        "engine_cylinders": row[12],
+
+        "engine_turbo": row[13],
+
+        "fuel_type": row[14],
+
+        "transmission": row[15]
     }
 
 
 VEHICLE_MODEL_COLUMNS = """
     id, year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, image, fuel_tank_gallons,
-    (SELECT i.sha256 FROM vehicle_model_images i WHERE i.vehicle_model_id = vehicle_models.id)
+    (SELECT i.sha256 FROM vehicle_model_images i WHERE i.vehicle_model_id = vehicle_models.id),
+    engine_liters, engine_cylinders, engine_turbo, fuel_type, transmission
 """
 
 
@@ -3453,6 +3499,67 @@ class UpdateSettingsRequest(BaseModel):
 
 
 
+#
+# A vehicle model's engine: displacement (kept in liters - the editor
+# converts to and from cubic inches), cylinder count, turbo, fuel type and
+# transmission. All optional, so models from before these existed (and CSVs
+# without the columns) still work. Fuel type is recorded only for now; it's
+# kept to these exact values so it can drive refueling (diesel prices)
+# later.
+#
+ENGINE_CYLINDER_COUNTS = (3, 4, 5, 6, 8, 10, 12)
+ENGINE_LITERS_RANGE = (0.5, 20.0)
+FUEL_TYPES = ("gasoline", "diesel")
+TRANSMISSIONS = ("manual", "automatic")
+
+ENGINE_COLUMNS = ("engine_liters", "engine_cylinders", "engine_turbo", "fuel_type", "transmission")
+
+
+def validate_engine(req):
+
+    if req.engine_liters is not None and not ENGINE_LITERS_RANGE[0] <= req.engine_liters <= ENGINE_LITERS_RANGE[1]:
+        raise HTTPException(
+            status_code=400, detail=f"Engine size must be {ENGINE_LITERS_RANGE[0]}-{ENGINE_LITERS_RANGE[1]} L"
+        )
+
+    if req.engine_cylinders is not None and req.engine_cylinders not in ENGINE_CYLINDER_COUNTS:
+        raise HTTPException(
+            status_code=400, detail=f"Cylinders must be one of {', '.join(map(str, ENGINE_CYLINDER_COUNTS))}"
+        )
+
+    if req.fuel_type is not None and req.fuel_type not in FUEL_TYPES:
+        raise HTTPException(status_code=400, detail=f"Fuel type must be {' or '.join(FUEL_TYPES)}")
+
+    if req.transmission is not None and req.transmission not in TRANSMISSIONS:
+        raise HTTPException(status_code=400, detail=f"Transmission must be {' or '.join(TRANSMISSIONS)}")
+
+
+#
+# A CSV cell for one of ENGINE_COLUMNS -> its value (blank -> None).
+#
+def parse_engine_csv_value(column, text):
+
+    text = text.strip().lower()
+
+    if not text:
+        return None
+
+    if column == "engine_liters":
+        return float(text)
+
+    if column == "engine_cylinders":
+        return int(float(text))
+
+    if column == "engine_turbo":
+        if text in ("yes", "y", "true", "1"):
+            return True
+        if text in ("no", "n", "false", "0"):
+            return False
+        raise ValueError(f"engine_turbo must be yes or no, not {text!r}")
+
+    return text
+
+
 class CreateVehicleModelRequest(BaseModel):
 
     year: int
@@ -3477,6 +3584,12 @@ class CreateVehicleModelRequest(BaseModel):
     # its own origin.
     #
     image: Optional[str] = None
+
+    engine_liters: Optional[float] = None
+    engine_cylinders: Optional[int] = None
+    engine_turbo: Optional[bool] = None
+    fuel_type: Optional[str] = None
+    transmission: Optional[str] = None
 
 
 
@@ -4168,6 +4281,8 @@ def validate_vehicle_model(req):
     if req.person_capacity < 0 or req.cargo_capacity_cuft < 0 or req.cost < 0:
         raise HTTPException(status_code=400, detail="Capacity and cost can't be negative")
 
+    validate_engine(req)
+
 
 @app.post("/api/vehicle-models")
 def create_vehicle_model(req: CreateVehicleModelRequest, _admin: None = Depends(require_admin)):
@@ -4180,20 +4295,26 @@ def create_vehicle_model(req: CreateVehicleModelRequest, _admin: None = Depends(
     cur.execute(
         """
         INSERT INTO vehicle_models
-        (year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, image, fuel_tank_gallons)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        (year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, image, fuel_tank_gallons,
+         engine_liters, engine_cylinders, engine_turbo, fuel_type, transmission)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
         (
             req.year,
-            req.brand,
-            req.model,
+            req.brand.strip(),
+            req.model.strip(),
             req.person_capacity,
             req.cargo_capacity_cuft,
             req.cost,
             req.mpg,
             req.image,
-            req.fuel_tank_gallons
+            req.fuel_tank_gallons,
+            req.engine_liters,
+            req.engine_cylinders,
+            req.engine_turbo,
+            req.fuel_type,
+            req.transmission
         )
     )
 
@@ -4242,12 +4363,14 @@ def update_vehicle_model(id: int, req: CreateVehicleModelRequest, _admin: None =
             """
             UPDATE vehicle_models
             SET year = %s, brand = %s, model = %s, person_capacity = %s, cargo_capacity_cuft = %s,
-                cost = %s, mpg = %s, image = %s, fuel_tank_gallons = %s
+                cost = %s, mpg = %s, image = %s, fuel_tank_gallons = %s,
+                engine_liters = %s, engine_cylinders = %s, engine_turbo = %s, fuel_type = %s, transmission = %s
             WHERE id = %s
             """,
             (
                 req.year, req.brand.strip(), req.model.strip(), req.person_capacity, req.cargo_capacity_cuft,
-                req.cost, req.mpg, req.image or None, req.fuel_tank_gallons, id
+                req.cost, req.mpg, req.image or None, req.fuel_tank_gallons,
+                req.engine_liters, req.engine_cylinders, req.engine_turbo, req.fuel_type, req.transmission, id
             )
         )
 
@@ -4474,7 +4597,7 @@ def get_vehicle_model_image(id: int):
 #
 VEHICLE_MODEL_EXPORT_COLUMNS = [
     "year", "brand", "model", "person_capacity", "cargo_capacity_cuft",
-    "cost", "mpg", "fuel_tank_gallons", "image",
+    "cost", "mpg", "fuel_tank_gallons", "image", *ENGINE_COLUMNS,
 ]
 
 
@@ -4498,8 +4621,15 @@ def export_vehicle_models(_admin: None = Depends(require_admin)):
 
     writer.writerow(VEHICLE_MODEL_EXPORT_COLUMNS)
 
+    turbo_index = VEHICLE_MODEL_EXPORT_COLUMNS.index("engine_turbo")
+
     for row in rows:
-        writer.writerow(["" if value is None else value for value in row])
+        writer.writerow([
+            "" if value is None
+            else ("yes" if value else "no") if index == turbo_index
+            else value
+            for index, value in enumerate(row)
+        ])
 
     filename = f"logisim-vehicle-models-{local_now_naive():%Y-%m-%d}.csv"
 
@@ -4537,7 +4667,18 @@ async def upload_vehicle_models(file: UploadFile = File(...), _admin: None = Dep
     header = [normalize_csv_header_cell(cell) for cell in rows[0]]
     wanted = {normalize_csv_header_cell(column): column for column in VEHICLE_MODEL_EXPORT_COLUMNS}
 
-    missing = [column for key, column in wanted.items() if key not in header and column != "image"]
+    #
+    # image and the engine columns are optional - an older export has no
+    # engine columns, and restoring it leaves models' engine specs as
+    # they are rather than blanking them.
+    #
+    optional_columns = ("image", *ENGINE_COLUMNS)
+
+    missing = [column for key, column in wanted.items() if key not in header and column not in optional_columns]
+
+    engine_columns_present = [
+        column for column in ENGINE_COLUMNS if normalize_csv_header_cell(column) in header
+    ]
 
     if missing:
         raise HTTPException(
@@ -4570,7 +4711,11 @@ async def upload_vehicle_models(file: UploadFile = File(...), _admin: None = Dep
                 cost=float(entry["cost"]),
                 mpg=float(entry["mpg"]),
                 fuel_tank_gallons=float(entry["fuel_tank_gallons"]),
-                image=entry.get("image") or None
+                image=entry.get("image") or None,
+                **{
+                    column: parse_engine_csv_value(column, entry.get(column, ""))
+                    for column in engine_columns_present
+                }
             )
 
             if not model.brand or not model.model:
@@ -4578,6 +4723,14 @@ async def upload_vehicle_models(file: UploadFile = File(...), _admin: None = Dep
 
             if model.mpg <= 0 or model.fuel_tank_gallons <= 0:
                 raise ValueError("mpg and fuel_tank_gallons must be positive")
+
+            try:
+                validate_engine(model)
+            except HTTPException as e:
+                raise ValueError(e.detail)
+
+            engine_set_sql = "".join(f", {column} = %s" for column in engine_columns_present)
+            engine_values = tuple(getattr(model, column) for column in engine_columns_present)
 
             values = (
                 model.person_capacity, model.cargo_capacity_cuft, model.cost,
@@ -4588,7 +4741,7 @@ async def upload_vehicle_models(file: UploadFile = File(...), _admin: None = Dep
                 """
                 UPDATE vehicle_models
                 SET person_capacity = %s, cargo_capacity_cuft = %s, cost = %s,
-                    mpg = %s, fuel_tank_gallons = %s, image = %s
+                    mpg = %s, fuel_tank_gallons = %s, image = %s""" + engine_set_sql + """
                 WHERE id = (
                     SELECT id FROM vehicle_models
                     WHERE year = %s AND LOWER(brand) = LOWER(%s) AND LOWER(model) = LOWER(%s)
@@ -4597,7 +4750,7 @@ async def upload_vehicle_models(file: UploadFile = File(...), _admin: None = Dep
                 )
                 RETURNING id
                 """,
-                (*values, model.year, model.brand, model.model)
+                (*values, *engine_values, model.year, model.brand, model.model)
             )
 
             if cur.fetchone() is not None:
@@ -4606,10 +4759,14 @@ async def upload_vehicle_models(file: UploadFile = File(...), _admin: None = Dep
                 cur.execute(
                     """
                     INSERT INTO vehicle_models
-                    (year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, fuel_tank_gallons, image)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    (year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, fuel_tank_gallons, image,
+                     engine_liters, engine_cylinders, engine_turbo, fuel_type, transmission)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
-                    (model.year, model.brand, model.model, *values)
+                    (
+                        model.year, model.brand, model.model, *values,
+                        *(getattr(model, column) for column in ENGINE_COLUMNS)
+                    )
                 )
                 created += 1
 

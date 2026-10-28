@@ -636,6 +636,51 @@ function vehicleModelLabel(vehicleModel) {
 }
 
 
+const CUBIC_INCHES_PER_LITER = 61.0237;
+
+function capitalize(text) {
+
+    return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+
+//
+// A vehicle model's engine specs as one line, e.g. "5.8L (351 ci) 8 cyl ·
+// Gasoline · Automatic" - whatever's filled in, or "" if none of it is.
+//
+function engineSummary(vehicleModel) {
+
+    const engine = [];
+
+    if (vehicleModel.engine_liters) {
+        engine.push(
+            `${vehicleModel.engine_liters.toFixed(1)}L ` +
+            `(${Math.round(vehicleModel.engine_liters * CUBIC_INCHES_PER_LITER)} ci)`
+        );
+    }
+
+    if (vehicleModel.engine_cylinders) {
+        engine.push(`${vehicleModel.engine_cylinders} cyl`);
+    }
+
+    if (vehicleModel.engine_turbo) {
+        engine.push("turbo");
+    }
+
+    const parts = engine.length ? [engine.join(" ")] : [];
+
+    if (vehicleModel.fuel_type) {
+        parts.push(capitalize(vehicleModel.fuel_type));
+    }
+
+    if (vehicleModel.transmission) {
+        parts.push(capitalize(vehicleModel.transmission));
+    }
+
+    return parts.join(" · ");
+}
+
+
 async function loadVehicleModels() {
 
     const response = await apiFetch(API + "/api/vehicle-models");
@@ -2086,7 +2131,8 @@ function vehicleDetailHtml(vehicle, trip) {
         dashboard +
         (vehicleModel
             ? `Capacity: ${vehicleModel.person_capacity} people, ${vehicleModel.cargo_capacity_cuft} cu ft cargo<br>` +
-              `Cost: $${Math.round(vehicleModel.cost).toLocaleString()} &middot; ${vehicleModel.mpg} mpg<br>`
+              `Cost: $${Math.round(vehicleModel.cost).toLocaleString()} &middot; ${vehicleModel.mpg} mpg<br>` +
+              (engineSummary(vehicleModel) ? `Engine: ${engineSummary(vehicleModel)}<br>` : "")
             : "") +
         cityLine +
         `Position: ${trip.position[0].toFixed(4)}, ${trip.position[1].toFixed(4)}<br>` +

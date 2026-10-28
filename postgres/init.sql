@@ -79,6 +79,22 @@ CREATE TABLE vehicle_models (
     -- since a vehicle model is still usable without a picture.
     image TEXT,
 
+    -- Engine specs, all optional (see ENGINE_COLUMNS in app.py).
+    -- Displacement is kept in liters; the editor converts to cubic inches.
+    engine_liters DOUBLE PRECISION,
+
+    -- 3, 4, 5, 6, 8, 10 or 12.
+    engine_cylinders INTEGER,
+
+    engine_turbo BOOLEAN,
+
+    -- 'gasoline' or 'diesel'. Recorded only for now; kept to those exact
+    -- values so it can drive refueling later.
+    fuel_type TEXT,
+
+    -- 'manual' or 'automatic'.
+    transmission TEXT,
+
     created TIMESTAMP DEFAULT NOW()
 );
 

@@ -745,6 +745,18 @@ body {
     color: var(--neon-muted);
 }
 
+.model-editor-section {
+    font-family: var(--pixel-font);
+    font-size: 9px;
+    font-weight: normal;
+    color: var(--neon-yellow);
+    border-top-color: var(--neon-line);
+}
+
+.model-card-engine {
+    color: var(--neon-cyan);
+}
+
 .model-card-cost {
     font-family: var(--pixel-font);
     font-size: 10px;

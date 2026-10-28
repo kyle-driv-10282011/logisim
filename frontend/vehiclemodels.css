@@ -183,6 +183,29 @@
     font-size: 13px;
 }
 
+.model-editor-fields select {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 4px 6px;
+    font-size: 13px;
+}
+
+/* "Engine" - a heading across both columns, above its fields. */
+.model-editor-section {
+    grid-column: span 2;
+    margin-top: 6px;
+    padding-top: 8px;
+    font-size: 12px;
+    font-weight: bold;
+    border-top: 1px solid #ddd;
+}
+
+.model-card-engine {
+    margin-top: 6px;
+    font-size: 12px;
+    color: #333;
+}
+
 .model-editor-fields input:disabled {
     opacity: 0.6;
 }
