@@ -948,6 +948,16 @@ side panel since they don't all fit as a row:
   The picture has three tools, which run in the browser on a canvas and only
   save with the model:
   - **Crop:** drag a box over what to keep.
+  - **Detect vehicle:** an AI cutout. The backend runs IS-Net, the
+    open-source salient-object model that rembg ships, on the CPU with
+    onnxruntime. It finds the vehicle in a photo and clears everything
+    else (street, buildings, shadows, what shows through the windows),
+    optionally trimming to just the vehicle. It takes about 3–4 seconds,
+    one picture at a time (`POST /api/vehicle-models/cutout`, admin). The
+    ~180 MB model is downloaded into the backend image at build time
+    (`CUTOUT_MODEL_URL` / `CUTOUT_MODEL_PATH` in `backend/Dockerfile`), so
+    it runs offline. It's loaded on first use and holds about 1 GB of
+    memory after that.
   - **Remove background:** clears the color around the picture's edge and
     anything joined to it, with a tolerance slider. It's meant for plain
     studio backdrops, not photographed scenes.

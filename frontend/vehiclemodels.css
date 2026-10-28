@@ -361,6 +361,46 @@
     pointer-events: none;
 }
 
+/* Detect vehicle: the picture dimmed under a working message until the cutout's back. */
+.detect-source {
+    max-width: 94%;
+    max-height: 90%;
+    opacity: 0.35;
+}
+
+.detect-working {
+    position: absolute;
+    padding: 8px 14px;
+    font-size: 13px;
+    color: white;
+    background: rgba(0, 0, 0, 0.65);
+    border-radius: 4px;
+}
+
+.model-image-preview.detecting .detect-working::before {
+    content: "";
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    margin-right: 8px;
+    border: 2px solid currentColor;
+    border-top-color: transparent;
+    border-radius: 50%;
+    vertical-align: -1px;
+    animation: button-spin 0.6s linear infinite;
+}
+
+.model-tool-check {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+}
+
+.model-tool-check input {
+    width: auto;
+}
+
 /* The eraser: a taller box, a scrolling stage (for zoom) and a brush-sized ring cursor. */
 .model-image-preview.erasing {
     aspect-ratio: 4 / 3;

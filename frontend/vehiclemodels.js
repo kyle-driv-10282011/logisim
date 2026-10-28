@@ -555,7 +555,7 @@ async function saveModelEditor() {
 }
 
 
-// ---------- Picture tools: crop, remove background, eraser, create icon ----------
+// ---------- Picture tools: crop, detect vehicle, remove background, eraser, create icon ----------
 
 //
 // They all work on whatever the preview shows (editorPicture()) in a
@@ -688,6 +688,8 @@ async function openImageTool(tool) {
         startBackgroundRemoval();
     } else if (tool === "erase") {
         startEraser();
+    } else if (tool === "detect") {
+        startDetect();
     } else {
         startIcon();
     }
@@ -709,7 +711,7 @@ function closeImageTool() {
 
     panel.style.display = "none";
     panel.innerHTML = "";
-    document.getElementById("model-image-preview").classList.remove("tool-open", "erasing");
+    document.getElementById("model-image-preview").classList.remove("tool-open", "erasing", "detecting");
 
     renderModelEditorPreview();
 }
@@ -1074,6 +1076,105 @@ function startIcon() {
             closeImageTool();
         }
     );
+}
+
+
+// --- Detect vehicle: an AI cutout, done by the backend ---
+
+//
+// Sends the picture as it is now to POST /api/vehicle-models/cutout, where
+// an AI model (IS-Net, see cut_out_vehicle() in app.py) finds the vehicle
+// and clears everything else - street, buildings, shadows, what shows
+// through the windows - then trims to it. Takes a few seconds; nothing is
+// stored until the model's saved. Touch up with the eraser afterwards.
+//
+async function startDetect() {
+
+    const preview = document.getElementById("model-image-preview");
+
+    preview.innerHTML =
+        `<img src="${modelToolState.image.src}" alt="" class="detect-source">` +
+        `<div class="detect-working">Finding the vehicle...</div>`;
+
+    const panel = toolPanel(
+        `<label class="model-tool-check"><input type="checkbox" class="detect-trim" checked> Trim to the vehicle</label>` +
+        `<div class="model-tool-hint" id="detect-status">An AI model finds the vehicle and clears the rest. ` +
+        `A few seconds - the first one after a restart takes a little longer.</div>`,
+        () => applyPictureResult(modelToolState.result)
+    );
+
+    const apply = panel.querySelector(".model-tool-apply");
+    const trim = panel.querySelector(".detect-trim");
+
+    trim.onchange = () => runDetect();
+
+    apply.disabled = true;
+
+    modelToolState.source = await (await fetch(modelToolState.image.src)).blob();
+
+    await runDetect();
+}
+
+
+async function runDetect() {
+
+    const state = modelToolState;
+
+    if (!state || modelImageTool !== "detect") {
+        return;
+    }
+
+    const panel = document.getElementById("model-tool-panel");
+    const apply = panel.querySelector(".model-tool-apply");
+    const status = document.getElementById("detect-status");
+    const preview = document.getElementById("model-image-preview");
+    const trim = panel.querySelector(".detect-trim").checked;
+    const run = (state.run || 0) + 1;
+
+    state.run = run;
+    apply.disabled = true;
+    preview.classList.add("detecting");
+
+    const formData = new FormData();
+    formData.append("file", state.source, "picture");
+
+    let response;
+
+    try {
+        response = await apiFetch(API + `/api/vehicle-models/cutout?trim=${trim}`, { method: "POST", body: formData });
+    } catch (e) {
+        response = null;
+    }
+
+    //
+    // The tool was closed, or the checkbox changed again, while this one
+    // was out - its answer is stale.
+    //
+    if (modelToolState !== state || state.run !== run) {
+        return;
+    }
+
+    preview.classList.remove("detecting");
+
+    if (!response || !response.ok) {
+
+        const data = response ? await response.json().catch(() => ({})) : {};
+
+        status.textContent = "Didn't work - " + (data.detail || "couldn't reach the server, try again.");
+        preview.querySelector(".detect-working")?.remove();
+        return;
+    }
+
+    const image = await loadImage(URL.createObjectURL(await response.blob()));
+
+    state.result = imageToCanvas(image);
+    URL.revokeObjectURL(image.src);
+
+    preview.innerHTML = "";
+    preview.appendChild(state.result);
+
+    status.textContent = "Found it. Apply to use it, then touch up with the Eraser if needed.";
+    apply.disabled = false;
 }
 
 

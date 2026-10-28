@@ -10,10 +10,12 @@ from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
 from psycopg2.extras import Json
 from PIL import Image, ImageOps, UnidentifiedImageError
+import numpy as np
 from urllib.parse import quote, urlparse
 import psycopg2
 import requests
 import json
+import asyncio
 import bisect
 import csv
 import hashlib
@@ -4508,6 +4510,141 @@ def fetch_vehicle_image_url(url):
 
 class VehicleImageUrlRequest(BaseModel):
     url: str
+
+
+#
+# Detect vehicle (the Vehicle Models editor): an AI cutout of the picture's
+# main subject - IS-Net "general use", the open-source salient-object model
+# rembg ships, run on the CPU with onnxruntime. The model file is baked into
+# the backend image at build time (see the Dockerfile), so this works fully
+# offline. It finds the vehicle wherever it is in a photo - street,
+# buildings, shadows, background seen through the windows - rather than
+# just clearing the color around the edge like Remove background does.
+#
+# Loaded on first use, not at startup, so the backend doesn't hold its
+# ~1 GB of working memory until someone actually asks. One cutout at a time,
+# for the same reason.
+#
+CUTOUT_MODEL_PATH = os.environ.get("CUTOUT_MODEL_PATH", "/models/isnet-general-use.onnx")
+CUTOUT_INPUT_SIDE = 1024
+CUTOUT_MAX_SIDE = 1600
+
+#
+# Mask values (0-255) at or below CUTOUT_ALPHA_FLOOR are cleared outright -
+# the model's faint "maybe" haze, like a ghost of a building behind the
+# roof. The trim goes round only what it's confident about (at least
+# CUTOUT_CONFIDENT_ALPHA), plus CUTOUT_TRIM_PADDING pixels, and anything
+# left outside that box is cleared too.
+#
+CUTOUT_ALPHA_FLOOR = 40
+CUTOUT_CONFIDENT_ALPHA = 128
+CUTOUT_TRIM_PADDING = 8
+
+cutout_session = None
+cutout_lock = threading.Lock()
+
+
+def get_cutout_session():
+
+    global cutout_session
+
+    if cutout_session is None:
+
+        if not os.path.exists(CUTOUT_MODEL_PATH):
+            raise HTTPException(
+                status_code=503,
+                detail="Vehicle detection isn't installed here - rebuild the backend image to download its model"
+            )
+
+        import onnxruntime
+
+        cutout_session = onnxruntime.InferenceSession(CUTOUT_MODEL_PATH, providers=["CPUExecutionProvider"])
+
+    return cutout_session
+
+
+def cut_out_vehicle(data, trim=True):
+
+    if len(data) > VEHICLE_IMAGE_MAX_BYTES:
+        raise HTTPException(status_code=413, detail=f"Images can be at most {VEHICLE_IMAGE_MAX_BYTES // (1024 * 1024)} MB")
+
+    try:
+        image = Image.open(io.BytesIO(data))
+        image.load()
+    except (UnidentifiedImageError, Image.DecompressionBombError, OSError, ValueError):
+        raise HTTPException(status_code=400, detail="That isn't an image Logisim can read - try a PNG, JPEG, WebP or GIF")
+
+    image = ImageOps.exif_transpose(image).convert("RGBA")
+    image.thumbnail((CUTOUT_MAX_SIDE, CUTOUT_MAX_SIDE), Image.LANCZOS)
+
+    #
+    # The model's own preprocessing (as rembg does it): RGB at 1024x1024,
+    # scaled to 0-1, mean-centred, channels first.
+    #
+    rgb = np.asarray(
+        image.convert("RGB").resize((CUTOUT_INPUT_SIDE, CUTOUT_INPUT_SIDE), Image.LANCZOS), dtype=np.float32
+    )
+    rgb = rgb / max(float(rgb.max()), 1e-6)
+    rgb = (rgb - np.array([0.485, 0.456, 0.406], dtype=np.float32)).transpose(2, 0, 1)[np.newaxis]
+
+    with cutout_lock:
+        session = get_cutout_session()
+        prediction = session.run(None, {session.get_inputs()[0].name: rgb.astype(np.float32)})[0][0, 0]
+
+    low, high = float(prediction.min()), float(prediction.max())
+    prediction = (prediction - low) / max(high - low, 1e-6)
+
+    mask = Image.fromarray((prediction * 255).astype(np.uint8), mode="L").resize(image.size, Image.LANCZOS)
+    mask = np.asarray(mask).copy()
+    mask[mask <= CUTOUT_ALPHA_FLOOR] = 0
+
+    #
+    # Keeps whatever transparency the picture already had (an earlier
+    # eraser pass, say) as well as the model's cut.
+    #
+    pixels = np.asarray(image).copy()
+    pixels[:, :, 3] = np.minimum(pixels[:, :, 3], mask)
+
+    confident_rows = np.flatnonzero((pixels[:, :, 3] >= CUTOUT_CONFIDENT_ALPHA).any(axis=1))
+    confident_columns = np.flatnonzero((pixels[:, :, 3] >= CUTOUT_CONFIDENT_ALPHA).any(axis=0))
+
+    if not len(confident_rows):
+        raise HTTPException(status_code=422, detail="Couldn't find a vehicle in that picture")
+
+    height, width = pixels.shape[:2]
+    top = max(0, confident_rows[0] - CUTOUT_TRIM_PADDING)
+    bottom = min(height, confident_rows[-1] + 1 + CUTOUT_TRIM_PADDING)
+    left = max(0, confident_columns[0] - CUTOUT_TRIM_PADDING)
+    right = min(width, confident_columns[-1] + 1 + CUTOUT_TRIM_PADDING)
+
+    inside = np.zeros((height, width), dtype=bool)
+    inside[top:bottom, left:right] = True
+    pixels[~inside, 3] = 0
+
+    result = Image.fromarray(pixels, mode="RGBA")
+
+    if trim:
+        result = result.crop((left, top, right, bottom))
+
+    out = io.BytesIO()
+    result.save(out, "PNG", optimize=True)
+
+    return out.getvalue()
+
+
+#
+# Returns the cutout as a PNG without storing anything - the editor loads
+# it as the picture being edited, for touching up and saving like any
+# other change. trim crops it to just the vehicle.
+#
+@app.post("/api/vehicle-models/cutout")
+async def cutout_vehicle_image(
+    file: UploadFile = File(...), trim: bool = True, _admin: None = Depends(require_admin)
+):
+
+    data = await file.read(VEHICLE_IMAGE_MAX_BYTES + 1)
+
+    return Response(await asyncio.to_thread(cut_out_vehicle, data, trim), media_type="image/png")
 
 
 #
