@@ -395,6 +395,26 @@
     image-rendering: pixelated;
 }
 
+/* The Ctrl+click line preview: the start point, and the line to the pointer. */
+.erase-line {
+    position: absolute;
+    top: 0;
+    left: 0;
+    overflow: visible;
+    pointer-events: none;
+}
+
+.erase-line line {
+    stroke: rgba(255, 79, 109, 0.45);
+    stroke-linecap: round;
+}
+
+.erase-line circle {
+    fill: #fff;
+    stroke: #000;
+    stroke-width: 1.5;
+}
+
 .erase-stage.bucket {
     cursor: crosshair;
 }

@@ -1087,9 +1087,11 @@ function startIcon() {
 // the stage scroll so an outline can be traced closely. Bucket clears a
 // whole area with one click, bounded by what's already erased (see
 // bucketErase()) - trace round the vehicle, then click the background.
-// Every stroke and fill can be undone (Undo, or Ctrl+Z); [ and ] change
-// the size; holding Alt while painting flips Erase and Restore for that
-// stroke.
+// Ctrl+click sets a start point and the next Ctrl+click brushes a
+// straight line to it (previewed while Ctrl is held), chaining on from
+// there - for long clean edges. Every stroke, line and fill can be undone
+// (Undo, or Ctrl+Z); [ and ] change the size; holding Alt while painting
+// flips Erase and Restore for that stroke.
 //
 const ERASER_UNDO_LIMIT = 30;
 
@@ -1125,11 +1127,13 @@ function startEraser() {
         `<div class="erase-stage">` +
         `<div class="erase-surface"></div>` +
         `<div class="erase-cursor" hidden></div>` +
+        `<svg class="erase-line" hidden><line></line><circle r="4"></circle></svg>` +
         `</div>`;
 
     const stage = preview.querySelector(".erase-stage");
     const surface = stage.querySelector(".erase-surface");
     const cursor = stage.querySelector(".erase-cursor");
+    const lineOverlay = stage.querySelector(".erase-line");
 
     surface.appendChild(work);
 
@@ -1150,6 +1154,7 @@ function startEraser() {
         `<div class="model-tool-hint">Paint over what to clear. Restore brings the original back. ` +
         `Bucket clears a whole area with one click, stopping at what's already erased - ` +
         `trace a closed outline round the vehicle, then click the background. ` +
+        `Ctrl+click, then Ctrl+click again, for a straight line between them. ` +
         `[ and ] change the size, Ctrl+Z undoes, Alt flips the brush while held.</div>`,
         () => applyPictureResult(modelToolState.work)
     );
@@ -1219,17 +1224,67 @@ function startEraser() {
         cursor.hidden = false;
     };
 
-    let last = null;
-    let strokeMode = null;
+    //
+    // A point on the picture -> where it sits in the stage's scrolled
+    // content, for drawing the line preview over it.
+    //
+    const toStage = (point) => {
 
-    stage.onpointerdown = (event) => {
+        const workRect = work.getBoundingClientRect();
+        const stageRect = stage.getBoundingClientRect();
 
-        if (event.button !== 0) {
+        return {
+            x: workRect.left - stageRect.left + stage.scrollLeft + point.x * modelToolState.displayScale,
+            y: workRect.top - stageRect.top + stage.scrollTop + point.y * modelToolState.displayScale
+        };
+    };
+
+    let pointer = null; // the last pointer position over the stage, in picture pixels
+
+    //
+    // The pending line: a dot at the start point whenever there is one,
+    // plus the line itself - brush-wide - to the pointer while Ctrl is held.
+    //
+    const renderLinePreview = (ctrlHeld) => {
+
+        const anchor = modelToolState.lineAnchor;
+
+        if (!anchor) {
+            lineOverlay.hidden = true;
             return;
         }
 
-        event.preventDefault();
-        stage.setPointerCapture(event.pointerId);
+        lineOverlay.hidden = false;
+        lineOverlay.setAttribute("width", stage.scrollWidth);
+        lineOverlay.setAttribute("height", stage.scrollHeight);
+
+        const start = toStage(anchor);
+        const dot = lineOverlay.querySelector("circle");
+        const line = lineOverlay.querySelector("line");
+
+        dot.setAttribute("cx", start.x);
+        dot.setAttribute("cy", start.y);
+
+        line.style.display = ctrlHeld && pointer ? "" : "none";
+
+        if (ctrlHeld && pointer) {
+
+            const end = toStage(pointer);
+
+            line.setAttribute("x1", start.x);
+            line.setAttribute("y1", start.y);
+            line.setAttribute("x2", end.x);
+            line.setAttribute("y2", end.y);
+            line.setAttribute("stroke-width", Math.max(1, modelToolState.size * modelToolState.displayScale));
+        }
+    };
+
+    modelToolState.renderLinePreview = renderLinePreview;
+
+    let last = null;
+    let strokeMode = null;
+
+    const pushUndo = () => {
 
         const state = modelToolState;
 
@@ -1238,6 +1293,45 @@ function startEraser() {
         if (state.undo.length > ERASER_UNDO_LIMIT) {
             state.undo.shift();
         }
+    };
+
+    stage.onpointerdown = (event) => {
+
+        if (event.button !== 0) {
+            return;
+        }
+
+        event.preventDefault();
+
+        const state = modelToolState;
+        const brushMode = event.altKey ? (state.mode === "erase" ? "restore" : "erase") : state.mode;
+
+        //
+        // Ctrl+click: the first sets the start point (nothing painted yet),
+        // each one after brushes a straight line from it and becomes the
+        // next start.
+        //
+        if ((event.ctrlKey || event.metaKey) && state.mode !== "fill") {
+
+            const point = toPicture(event);
+
+            if (state.lineAnchor) {
+                pushUndo();
+                eraserSegment(state.lineAnchor, point, brushMode, true);
+            }
+
+            state.lineAnchor = point;
+
+            renderLinePreview(true);
+            renderControls();
+            return;
+        }
+
+        state.lineAnchor = null;
+        renderLinePreview(false);
+
+        stage.setPointerCapture(event.pointerId);
+        pushUndo();
 
         if (state.mode === "fill") {
 
@@ -1253,7 +1347,7 @@ function startEraser() {
             return;
         }
 
-        strokeMode = event.altKey ? (state.mode === "erase" ? "restore" : "erase") : state.mode;
+        strokeMode = brushMode;
         last = toPicture(event);
 
         eraserStamp(last.x, last.y, strokeMode);
@@ -1264,23 +1358,19 @@ function startEraser() {
 
         moveCursor(event);
 
+        pointer = toPicture(event);
+        renderLinePreview(event.ctrlKey || event.metaKey);
+
         if (!last) {
             return;
         }
 
-        const now = toPicture(event);
-        const step = Math.max(1, modelToolState.size / 5);
-        const distance = Math.hypot(now.x - last.x, now.y - last.y);
-
-        for (let travelled = step; travelled <= distance; travelled += step) {
-            const t = travelled / distance;
-            eraserStamp(last.x + (now.x - last.x) * t, last.y + (now.y - last.y) * t, strokeMode);
-        }
-
-        if (distance >= step) {
-            last = now;
+        if (eraserSegment(last, pointer, strokeMode, false)) {
+            last = pointer;
         }
     };
+
+    stage.onscroll = () => renderLinePreview(false);
 
     stage.onpointerup = () => {
         last = null;
@@ -1292,7 +1382,17 @@ function startEraser() {
 
     for (const button of panel.querySelectorAll("[data-mode]")) {
         button.onclick = () => {
+
             modelToolState.mode = button.dataset.mode;
+
+            //
+            // Bucket has no lines, so a pending start point goes with it.
+            //
+            if (modelToolState.mode === "fill") {
+                modelToolState.lineAnchor = null;
+                renderLinePreview(false);
+            }
+
             renderControls();
         };
     }
@@ -1440,6 +1540,34 @@ function bucketErase(point) {
 }
 
 
+//
+// Brushes from `from` to `to` in dabs a fifth of the brush apart - a drag's
+// latest stretch, or a whole Ctrl+click line (withStart: the line's first
+// dab too, which a drag already painted). False if the two are closer than
+// one dab, so a drag can wait for the pointer to move further.
+//
+function eraserSegment(from, to, mode, withStart) {
+
+    const step = Math.max(1, modelToolState.size / 5);
+    const distance = Math.hypot(to.x - from.x, to.y - from.y);
+
+    if (withStart) {
+        eraserStamp(from.x, from.y, mode);
+    }
+
+    for (let travelled = step; travelled <= distance; travelled += step) {
+        const t = travelled / distance;
+        eraserStamp(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t, mode);
+    }
+
+    if (withStart && distance > 0) {
+        eraserStamp(to.x, to.y, mode);
+    }
+
+    return distance >= step;
+}
+
+
 function eraserUndo() {
 
     const state = modelToolState;
@@ -1459,7 +1587,9 @@ document.addEventListener("keydown", (event) => {
         return;
     }
 
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
+    if (event.key === "Control" || event.key === "Meta") {
+        modelToolState.renderLinePreview(true);
+    } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
         event.preventDefault();
         eraserUndo();
     } else if (event.key === "[" || event.key === "]") {
@@ -1468,6 +1598,14 @@ document.addEventListener("keydown", (event) => {
         const factor = event.key === "]" ? 1.25 : 0.8;
         state.size = Math.min(200, Math.max(1, Math.round(state.size * factor + (event.key === "]" ? 1 : -1))));
         state.renderControls();
+    }
+});
+
+
+document.addEventListener("keyup", (event) => {
+
+    if (modelImageTool === "erase" && (event.key === "Control" || event.key === "Meta")) {
+        modelToolState.renderLinePreview(false);
     }
 });
 
@@ -1597,7 +1735,10 @@ document.addEventListener("keydown", (event) => {
         return;
     }
 
-    if (modelImageTool) {
+    if (modelImageTool === "erase" && modelToolState.lineAnchor) {
+        modelToolState.lineAnchor = null;
+        modelToolState.renderLinePreview(false);
+    } else if (modelImageTool) {
         closeImageTool();
     } else if (document.getElementById("model-editor").style.display !== "none") {
         closeModelEditor();

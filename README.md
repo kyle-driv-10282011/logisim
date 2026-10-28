@@ -955,7 +955,10 @@ side panel since they don't all fit as a row:
     tidying up after Remove background. **Erase** clears and **Restore**
     paints the original back. **Bucket** clears a whole area with one click,
     stopping at what's already erased: trace a closed outline around the
-    vehicle, then click the background. Size and Softness sliders, zoom from
+    vehicle, then click the background. **Ctrl+click**, then Ctrl+click
+    again, brushes a straight line between the two points (previewed while
+    Ctrl is held). Each line's end starts the next, and Esc drops the start
+    point. Size and Softness sliders, zoom from
     1× to 4×, and Undo. `[` and `]` change the size, Ctrl+Z undoes, and Alt flips the
     brush while held.
   - **Create icon:** trims to the visible vehicle and squares it to 128px
