@@ -696,6 +696,22 @@ body {
     background: #e8e8ff;
 }
 
+.model-tool-panel {
+    border: none;
+    border-radius: 0;
+    box-shadow: var(--w95-sunken);
+}
+
+.model-tool-hint,
+.model-tool-readout {
+    color: #222;
+}
+
+.model-image-tools button.active {
+    outline: 1px dotted #000;
+    box-shadow: var(--w95-pressed);
+}
+
 /* ---------- Admin password prompt: a dialog box ---------- */
 
 .admin-dialog {

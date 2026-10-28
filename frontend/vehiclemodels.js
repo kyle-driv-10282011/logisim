@@ -22,6 +22,12 @@ let modelEditorId = null;
 let modelEditorImage = null;
 
 //
+// The map icon to save with it, the same way: { blob, previewUrl } for a
+// newly created one, "remove" to drop the current one, or null.
+//
+let modelEditorIcon = null;
+
+//
 // The engine size exactly as it'll be saved, in liters. The two size boxes
 // show it rounded (L to 2 places, cubic inches whole), so typing in either
 // sets this precisely and refills the other - 351 ci stays 351 ci rather
@@ -115,6 +121,9 @@ function renderVehicleModelsPage() {
             `<div class="model-card-image">` +
             (imageUrl ? `<img src="${imageUrl}" alt="">` : `<span class="model-card-noimage">No picture</span>`) +
             (starter ? `<span class="model-card-starter" title="Every new file starts with one">STARTER</span>` : "") +
+            (vehicleModel.icon_url
+                ? `<img class="model-card-icon" src="${vehicleModel.icon_url}" alt="" title="Map icon">`
+                : "") +
             `</div>` +
             `<div class="model-card-body">` +
             `<div class="model-card-name"></div>` +
@@ -254,6 +263,8 @@ function openModelEditor(vehicleModelId = null) {
 
     modelEditorId = vehicleModelId;
     setModelEditorImage(null);
+    setModelEditorIcon(null);
+    closeImageTool();
 
     const vehicleModel = vehicleModelId !== null ? vehicleModelsById.get(vehicleModelId) : null;
     const values = vehicleModel || NEW_MODEL_DEFAULTS;
@@ -295,7 +306,9 @@ function openModelEditor(vehicleModelId = null) {
 
 function closeModelEditor() {
 
+    closeImageTool();
     setModelEditorImage(null);
+    setModelEditorIcon(null);
 
     document.getElementById("model-editor").style.display = "none";
 }
@@ -331,35 +344,50 @@ function showModelImageSource(source) {
 // it's being removed) the model's current one, else the built-in filename
 // typed in.
 //
+function editorPicture() {
+
+    const vehicleModel = modelEditorId !== null ? vehicleModelsById.get(modelEditorId) : null;
+    const filename = document.getElementById("model-field-image-file").value.trim();
+
+    if (modelEditorImage && modelEditorImage.previewUrl) {
+        return { url: modelEditorImage.previewUrl, caption: "New picture - saved with the model" };
+    }
+
+    if (modelEditorImage !== "remove" && vehicleModel && vehicleModel.has_uploaded_image) {
+        return { url: vehicleModelImageUrl(vehicleModel), caption: "Uploaded picture" };
+    }
+
+    if (filename) {
+        return { url: `images/${encodeURIComponent(filename)}`, caption: `Built-in file: ${filename}` };
+    }
+
+    return { url: null, caption: "No picture" };
+}
+
+
 function renderModelEditorPreview() {
 
     const preview = document.getElementById("model-image-preview");
     const removeButton = document.getElementById("model-image-remove");
     const vehicleModel = modelEditorId !== null ? vehicleModelsById.get(modelEditorId) : null;
-    const filename = document.getElementById("model-field-image-file").value.trim();
+    const { url, caption } = editorPicture();
 
-    let url = null;
-    let caption = "No picture";
-
-    if (modelEditorImage && modelEditorImage.previewUrl) {
-
-        url = modelEditorImage.previewUrl;
-        caption = "New picture - saved with the model";
-
-    } else if (modelEditorImage !== "remove" && vehicleModel && vehicleModel.has_uploaded_image) {
-
-        url = vehicleModelImageUrl(vehicleModel);
-        caption = "Uploaded picture";
-
-    } else if (filename) {
-
-        url = `images/${encodeURIComponent(filename)}`;
-        caption = `Built-in file: ${filename}`;
+    //
+    // A tool (crop, background, icon) draws its own stage in the preview.
+    //
+    if (!modelImageTool) {
+        preview.innerHTML = url ? `<img src="${url}" alt="">` : "";
+        preview.classList.toggle("empty", !url);
     }
 
-    preview.innerHTML = url ? `<img src="${url}" alt="">` : "";
-    preview.classList.toggle("empty", !url);
     document.getElementById("model-image-caption").textContent = caption;
+
+    for (const button of document.querySelectorAll(".model-image-tools button")) {
+        button.disabled = !url;
+        button.classList.toggle("active", button.dataset.tool === modelImageTool);
+    }
+
+    renderModelEditorIcon();
 
     removeButton.style.display =
         (modelEditorImage && modelEditorImage.previewUrl) ||
@@ -499,10 +527,547 @@ async function saveModelEditor() {
         await apiFetch(API + `/api/vehicle-models/${savedId}/image`, { method: "DELETE" });
     }
 
+    if (modelEditorIcon && modelEditorIcon.blob) {
+
+        const formData = new FormData();
+        formData.append("file", modelEditorIcon.blob, "icon.png");
+
+        response = await apiFetch(API + `/api/vehicle-models/${savedId}/icon`, { method: "PUT", body: formData });
+
+        if (!response.ok) {
+            data = await response.json();
+            modelEditorId = savedId;
+            setModelEditorImage(null);
+            await loadVehicleModels();
+            error.textContent = "Saved, but the icon wasn't - " + (data.detail || "try again.");
+            return;
+        }
+
+    } else if (modelEditorIcon === "remove") {
+
+        await apiFetch(API + `/api/vehicle-models/${savedId}/icon`, { method: "DELETE" });
+    }
+
     closeModelEditor();
     setModelsResult("success", `${isNew ? "Added" : "Saved"} ${body.year} ${body.brand} ${body.model}.`);
 
     await loadVehicleModels();
+}
+
+
+// ---------- Picture tools: crop, remove background, create icon ----------
+
+//
+// All three work on whatever the preview shows (editorPicture()) in a
+// canvas, right here in the browser, so each can be adjusted and looked at
+// before it's applied. Crop and Remove background replace the pending
+// picture with their result (still only saved with the model); Create icon
+// makes the map icon from it. Every picture here is same-origin (a blob,
+// /api or images/), so the canvas can always be read back.
+//
+let modelImageTool = null;
+
+//
+// The open tool's working state: the source image, plus the crop box (in
+// source pixels), or the background tool's source pixels and result
+// canvas, or the icon canvas.
+//
+let modelToolState = null;
+
+const ICON_SIZE = 128;
+const ICON_PADDING = 6;
+
+
+function setModelEditorIcon(icon) {
+
+    if (modelEditorIcon && modelEditorIcon.previewUrl) {
+        URL.revokeObjectURL(modelEditorIcon.previewUrl);
+    }
+
+    modelEditorIcon = icon;
+}
+
+
+function renderModelEditorIcon() {
+
+    const vehicleModel = modelEditorId !== null ? vehicleModelsById.get(modelEditorId) : null;
+    const preview = document.getElementById("model-icon-preview");
+    const caption = document.getElementById("model-icon-caption");
+    const removeButton = document.getElementById("model-icon-remove");
+
+    let url = null;
+
+    if (modelEditorIcon && modelEditorIcon.previewUrl) {
+        url = modelEditorIcon.previewUrl;
+        caption.textContent = "New - saved with the model";
+    } else if (modelEditorIcon !== "remove" && vehicleModel && vehicleModel.icon_url) {
+        url = vehicleModel.icon_url;
+        caption.textContent = "Shown on the map for this model";
+    } else {
+        caption.textContent = "None - the map uses the view's own marker";
+    }
+
+    preview.innerHTML = url ? `<img src="${url}" alt="">` : "";
+    removeButton.style.display = url ? "" : "none";
+}
+
+
+function removeModelEditorIcon() {
+
+    const vehicleModel = modelEditorId !== null ? vehicleModelsById.get(modelEditorId) : null;
+
+    setModelEditorIcon(vehicleModel && vehicleModel.icon_url ? "remove" : null);
+    renderModelEditorIcon();
+}
+
+
+function loadImage(url) {
+
+    return new Promise((resolve, reject) => {
+
+        const image = new Image();
+
+        image.onload = () => resolve(image);
+        image.onerror = () => reject(new Error("Couldn't load the picture"));
+        image.src = url;
+    });
+}
+
+
+function canvasToBlob(canvas) {
+
+    return new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+}
+
+
+function imageToCanvas(image) {
+
+    const canvas = document.createElement("canvas");
+
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    canvas.getContext("2d").drawImage(image, 0, 0);
+
+    return canvas;
+}
+
+
+async function openImageTool(tool) {
+
+    if (modelImageTool === tool) {
+        closeImageTool();
+        return;
+    }
+
+    closeImageTool();
+
+    const { url } = editorPicture();
+
+    if (!url) {
+        return;
+    }
+
+    let image;
+
+    try {
+        image = await loadImage(url);
+    } catch (e) {
+        document.getElementById("model-editor-error").textContent = e.message;
+        return;
+    }
+
+    modelImageTool = tool;
+    modelToolState = { image };
+
+    document.getElementById("model-tool-panel").style.display = "";
+    document.getElementById("model-image-preview").classList.add("tool-open");
+
+    if (tool === "crop") {
+        startCrop();
+    } else if (tool === "background") {
+        startBackgroundRemoval();
+    } else {
+        startIcon();
+    }
+
+    renderModelEditorPreview();
+}
+
+
+function closeImageTool() {
+
+    modelImageTool = null;
+    modelToolState = null;
+
+    const panel = document.getElementById("model-tool-panel");
+
+    panel.style.display = "none";
+    panel.innerHTML = "";
+    document.getElementById("model-image-preview").classList.remove("tool-open");
+
+    renderModelEditorPreview();
+}
+
+
+function toolPanel(html, onApply) {
+
+    const panel = document.getElementById("model-tool-panel");
+
+    panel.innerHTML =
+        html +
+        `<div class="model-tool-actions">` +
+        `<button type="button" class="model-tool-cancel">Cancel</button>` +
+        `<button type="button" class="model-tool-apply">Apply</button>` +
+        `</div>`;
+
+    panel.querySelector(".model-tool-cancel").onclick = closeImageTool;
+
+    const apply = panel.querySelector(".model-tool-apply");
+
+    apply.onclick = () => withSpinner(apply, onApply);
+
+    return panel;
+}
+
+
+//
+// Replaces the pending picture with a tool's result and closes the tool.
+//
+async function applyPictureResult(canvas) {
+
+    const blob = await canvasToBlob(canvas);
+
+    setModelEditorImage({ blob, previewUrl: URL.createObjectURL(blob) });
+    closeImageTool();
+}
+
+
+// --- Crop: drag a box over the picture ---
+
+function startCrop() {
+
+    const { image } = modelToolState;
+    const preview = document.getElementById("model-image-preview");
+
+    preview.innerHTML =
+        `<div class="crop-stage">` +
+        `<img src="${image.src}" alt="" draggable="false">` +
+        `<div class="crop-box" hidden></div>` +
+        `</div>`;
+
+    const stage = preview.querySelector(".crop-stage");
+    const shown = stage.querySelector("img");
+    const box = stage.querySelector(".crop-box");
+
+    const panel = toolPanel(
+        `<div class="model-tool-hint">Drag over the picture to choose what to keep.</div>` +
+        `<div class="model-tool-readout" id="crop-readout">Whole picture: ${image.naturalWidth} × ${image.naturalHeight}</div>`,
+        () => applyCrop()
+    );
+
+    const apply = panel.querySelector(".model-tool-apply");
+
+    apply.disabled = true;
+
+    let start = null;
+
+    const point = (event) => {
+
+        const rect = shown.getBoundingClientRect();
+
+        return {
+            x: Math.min(Math.max(event.clientX - rect.left, 0), rect.width),
+            y: Math.min(Math.max(event.clientY - rect.top, 0), rect.height),
+            scale: image.naturalWidth / rect.width
+        };
+    };
+
+    stage.onpointerdown = (event) => {
+        event.preventDefault();
+        stage.setPointerCapture(event.pointerId);
+        start = point(event);
+    };
+
+    stage.onpointermove = (event) => {
+
+        if (!start) {
+            return;
+        }
+
+        const now = point(event);
+        const left = Math.min(start.x, now.x);
+        const top = Math.min(start.y, now.y);
+        const width = Math.abs(now.x - start.x);
+        const height = Math.abs(now.y - start.y);
+
+        Object.assign(box.style, {
+            left: `${shown.offsetLeft + left}px`,
+            top: `${shown.offsetTop + top}px`,
+            width: `${width}px`,
+            height: `${height}px`
+        });
+        box.hidden = false;
+
+        const crop = {
+            x: Math.round(left * now.scale),
+            y: Math.round(top * now.scale),
+            width: Math.round(width * now.scale),
+            height: Math.round(height * now.scale)
+        };
+
+        modelToolState.crop = crop;
+
+        document.getElementById("crop-readout").textContent = `Keep ${crop.width} × ${crop.height}`;
+        apply.disabled = crop.width < 8 || crop.height < 8;
+    };
+
+    stage.onpointerup = () => {
+        start = null;
+    };
+}
+
+
+async function applyCrop() {
+
+    const { image, crop } = modelToolState;
+    const canvas = document.createElement("canvas");
+
+    canvas.width = crop.width;
+    canvas.height = crop.height;
+    canvas.getContext("2d").drawImage(image, crop.x, crop.y, crop.width, crop.height, 0, 0, crop.width, crop.height);
+
+    await applyPictureResult(canvas);
+}
+
+
+// --- Remove background: flood in from the edges ---
+
+//
+// The background is taken to be the color around the picture's edge (the
+// median of the border pixels). Everything connected to the edge that's
+// within `tolerance` of it is cleared - so a white window inside the van
+// stays, since it isn't connected - and pixels near the cut fade out with
+// the background color taken back out of them, so edges come out soft
+// rather than with a halo.
+//
+function removeBackground(source, tolerance) {
+
+    const { width, height } = source;
+    const data = source.data;
+    const out = new ImageData(new Uint8ClampedArray(data), width, height);
+    const pixels = out.data;
+
+    const border = [[], [], []];
+
+    const sample = (x, y) => {
+        const i = (y * width + x) * 4;
+        border[0].push(data[i]);
+        border[1].push(data[i + 1]);
+        border[2].push(data[i + 2]);
+    };
+
+    for (let x = 0; x < width; x++) {
+        sample(x, 0);
+        sample(x, height - 1);
+    }
+
+    for (let y = 0; y < height; y++) {
+        sample(0, y);
+        sample(width - 1, y);
+    }
+
+    const background = border.map((values) => values.sort((a, b) => a - b)[values.length >> 1]);
+
+    const distance = (i) => Math.max(
+        Math.abs(data[i] - background[0]),
+        Math.abs(data[i + 1] - background[1]),
+        Math.abs(data[i + 2] - background[2])
+    );
+
+    const seen = new Uint8Array(width * height);
+    const stack = [];
+
+    const push = (x, y) => {
+
+        const p = y * width + x;
+
+        if (!seen[p] && (data[p * 4 + 3] < 16 || distance(p * 4) < tolerance)) {
+            seen[p] = 1;
+            stack.push(p);
+        }
+    };
+
+    for (let x = 0; x < width; x++) {
+        push(x, 0);
+        push(x, height - 1);
+    }
+
+    for (let y = 0; y < height; y++) {
+        push(0, y);
+        push(width - 1, y);
+    }
+
+    while (stack.length) {
+
+        const p = stack.pop();
+        const x = p % width;
+        const y = (p - x) / width;
+
+        if (x > 0) push(x - 1, y);
+        if (x < width - 1) push(x + 1, y);
+        if (y > 0) push(x, y - 1);
+        if (y < height - 1) push(x, y + 1);
+    }
+
+    for (let p = 0; p < width * height; p++) {
+
+        if (!seen[p]) {
+            continue;
+        }
+
+        const i = p * 4;
+        const alpha = Math.min(1, distance(i) / tolerance) ** 2;
+
+        if (alpha < 0.04) {
+            pixels[i + 3] = 0;
+            continue;
+        }
+
+        for (let c = 0; c < 3; c++) {
+            pixels[i + c] = (data[i + c] - (1 - alpha) * background[c]) / alpha;
+        }
+
+        pixels[i + 3] = data[i + 3] * alpha;
+    }
+
+    return out;
+}
+
+
+function startBackgroundRemoval() {
+
+    const canvas = imageToCanvas(modelToolState.image);
+
+    modelToolState.source = canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height);
+    modelToolState.result = canvas;
+
+    const preview = document.getElementById("model-image-preview");
+
+    preview.innerHTML = "";
+    preview.appendChild(canvas);
+
+    const panel = toolPanel(
+        `<label class="model-tool-slider">Tolerance <input type="range" min="4" max="160" value="48"></label>` +
+        `<div class="model-tool-hint">Clears the color around the edge and anything joined to it. ` +
+        `Raise it if background is left behind, lower it if the vehicle starts to vanish.</div>`,
+        () => applyPictureResult(modelToolState.result)
+    );
+
+    const slider = panel.querySelector("input[type=range]");
+
+    const update = () => {
+        canvas.getContext("2d").putImageData(removeBackground(modelToolState.source, Number(slider.value)), 0, 0);
+    };
+
+    slider.oninput = update;
+    update();
+}
+
+
+// --- Create icon: trim, square up, preview on the map ---
+
+//
+// Trims to what's actually visible (pixels that aren't transparent - so
+// Remove background first for a clean marker), then centers it in a
+// transparent ICON_SIZE square.
+//
+function makeIcon(image) {
+
+    const canvas = imageToCanvas(image);
+    const { width, height } = canvas;
+    const data = canvas.getContext("2d").getImageData(0, 0, width, height).data;
+
+    let left = width;
+    let top = height;
+    let right = -1;
+    let bottom = -1;
+
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            if (data[(y * width + x) * 4 + 3] > 16) {
+                left = Math.min(left, x);
+                right = Math.max(right, x);
+                top = Math.min(top, y);
+                bottom = Math.max(bottom, y);
+            }
+        }
+    }
+
+    if (right < 0) {
+        left = 0;
+        top = 0;
+        right = width - 1;
+        bottom = height - 1;
+    }
+
+    const trimmedWidth = right - left + 1;
+    const trimmedHeight = bottom - top + 1;
+    const scale = (ICON_SIZE - ICON_PADDING * 2) / Math.max(trimmedWidth, trimmedHeight);
+
+    const icon = document.createElement("canvas");
+
+    icon.width = ICON_SIZE;
+    icon.height = ICON_SIZE;
+
+    const context = icon.getContext("2d");
+
+    context.imageSmoothingQuality = "high";
+    context.drawImage(
+        canvas, left, top, trimmedWidth, trimmedHeight,
+        (ICON_SIZE - trimmedWidth * scale) / 2, (ICON_SIZE - trimmedHeight * scale) / 2,
+        trimmedWidth * scale, trimmedHeight * scale
+    );
+
+    //
+    // Nothing transparent to trim to means the picture still has its
+    // background - worth a nudge.
+    //
+    const hasBackground = left === 0 && top === 0 && right === width - 1 && bottom === height - 1 &&
+        [0, width - 1].every((x) => [0, height - 1].every((y) => data[(y * width + x) * 4 + 3] > 200));
+
+    return { icon, hasBackground };
+}
+
+
+function startIcon() {
+
+    const { icon, hasBackground } = makeIcon(modelToolState.image);
+
+    modelToolState.icon = icon;
+
+    const url = icon.toDataURL("image/png");
+    const preview = document.getElementById("model-image-preview");
+
+    preview.innerHTML =
+        `<div class="icon-stage">` +
+        `<img class="icon-stage-big" src="${url}" alt="">` +
+        `<div class="icon-stage-maps">` +
+        `<span class="icon-on-map light"><img src="${url}" alt=""></span>` +
+        `<span class="icon-on-map dark"><img src="${url}" alt=""></span>` +
+        `</div>` +
+        `</div>`;
+
+    toolPanel(
+        `<div class="model-tool-hint">How this model's driving vehicles will look on the map ` +
+        `(light and dark maps, right).` +
+        (hasBackground ? ` <b>It still has a background</b> - Remove background first for a clean marker.` : "") +
+        `</div>`,
+        async () => {
+            const blob = await canvasToBlob(modelToolState.icon);
+            setModelEditorIcon({ blob, previewUrl: URL.createObjectURL(blob) });
+            closeImageTool();
+        }
+    );
 }
 
 
@@ -593,6 +1158,12 @@ async function uploadVehicleModels() {
 
     document.getElementById("model-field-image-file").oninput = renderModelEditorPreview;
 
+    for (const button of document.querySelectorAll(".model-image-tools button")) {
+        button.onclick = () => openImageTool(button.dataset.tool);
+    }
+
+    document.getElementById("model-icon-remove").onclick = removeModelEditorIcon;
+
     //
     // Either engine size box fills the other (see modelEditorLiters).
     //
@@ -625,7 +1196,9 @@ document.addEventListener("keydown", (event) => {
         return;
     }
 
-    if (document.getElementById("model-editor").style.display !== "none") {
+    if (modelImageTool) {
+        closeImageTool();
+    } else if (document.getElementById("model-editor").style.display !== "none") {
         closeModelEditor();
     } else {
         closeVehicleModelsPage();

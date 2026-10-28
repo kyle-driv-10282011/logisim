@@ -801,6 +801,26 @@ body {
     background: rgba(45, 226, 230, 0.08);
 }
 
+.model-map-icon {
+    filter: drop-shadow(0 0 4px var(--neon-cyan)) drop-shadow(0 0 10px rgba(45, 226, 230, 0.6));
+}
+
+.model-tool-panel,
+.model-image-tools button.active {
+    border-color: var(--neon-line);
+}
+
+.model-image-tools button.active {
+    outline-color: var(--neon-cyan);
+}
+
+.model-tool-hint,
+.model-tool-readout,
+.model-tool-slider,
+.model-icon-label {
+    color: var(--neon-muted);
+}
+
 /* ---------- Admin password prompt ---------- */
 
 .admin-dialog {

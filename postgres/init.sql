@@ -75,7 +75,7 @@ CREATE TABLE vehicle_models (
     -- below) and can hold at most this much at once.
     fuel_tank_gallons DOUBLE PRECISION NOT NULL DEFAULT 20,
 
-    -- Filename under frontend/images/, e.g. "2026-Chevy-Express.png". Nullable
+    -- Filename under frontend/images/, e.g. "1978-Ford-Econoline.png". Nullable
     -- since a vehicle model is still usable without a picture.
     image TEXT,
 
@@ -112,6 +112,23 @@ CREATE TABLE vehicle_model_images (
     data BYTEA NOT NULL,
 
     -- Versions the image URL (?v=) so browsers can cache it for good.
+    sha256 TEXT NOT NULL,
+
+    updated TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+
+-- A vehicle model's map icon (the Vehicle Models editor's Create icon): a
+-- small transparent square, at most 128px, shown as its driving vehicles'
+-- map marker. Same shape as vehicle_model_images.
+CREATE TABLE vehicle_model_icons (
+
+    vehicle_model_id INTEGER PRIMARY KEY REFERENCES vehicle_models(id) ON DELETE CASCADE,
+
+    content_type TEXT NOT NULL,
+
+    data BYTEA NOT NULL,
+
     sha256 TEXT NOT NULL,
 
     updated TIMESTAMP NOT NULL DEFAULT NOW()

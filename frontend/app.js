@@ -334,6 +334,39 @@ function mapStyle() {
 
 
 //
+// A driving vehicle's marker: its model's own map icon when one's been made
+// (the Vehicle Models editor's Create icon), in every view - otherwise the
+// view's marker. One L.icon per icon URL, shared by every vehicle of that
+// model.
+//
+const modelMapIcons = new Map();
+
+function vehicleMapIcon(vehicleId) {
+
+    const vehicle = vehiclesById.get(vehicleId);
+    const embedded = vehicle && vehicle.vehicle_model;
+    const vehicleModel = embedded ? vehicleModelsById.get(embedded.id) || embedded : null;
+    const url = vehicleModel && vehicleModel.icon_url;
+
+    if (!url) {
+        return mapStyle().vehicleIcon;
+    }
+
+    if (!modelMapIcons.has(url)) {
+        modelMapIcons.set(url, L.icon({
+            iconUrl: url,
+            iconSize: [48, 48],
+            iconAnchor: [24, 24],
+            tooltipAnchor: [0, -14],
+            className: "model-map-icon"
+        }));
+    }
+
+    return modelMapIcons.get(url);
+}
+
+
+//
 // A small dot marking where a non-driving (READY/SOLD) vehicle is
 // currently sitting - a driving vehicle already has its own live marker
 // from pollActiveTrips(), so this is only ever shown for one that doesn't.
@@ -711,6 +744,7 @@ async function loadVehicleModels() {
 
     renderVehicleList();
     renderVehicleModelsPage();
+    restyleMap();
 }
 
 
@@ -1235,6 +1269,12 @@ async function loadVehicles() {
 
     renderVehicleList();
     renderDriveForm();
+
+    //
+    // A model's map icon may have been added or changed since the markers
+    // were drawn.
+    //
+    restyleMap();
 }
 
 
@@ -2353,7 +2393,7 @@ async function pollActiveTrips() {
             const routeGlow = L.polyline(journeyRoute, { ...style.routeGlow, interactive: false }).addTo(map);
             const routeLine = L.polyline(journeyRoute, style.routeCore).addTo(map);
 
-            const marker = L.marker(trip.position, { icon: style.vehicleIcon }).addTo(map);
+            const marker = L.marker(trip.position, { icon: vehicleMapIcon(trip.vehicle_id) }).addTo(map);
 
             marker.bindTooltip(
                 "", { permanent: true, direction: "top", offset: [0, -10] }
@@ -2789,10 +2829,18 @@ function restyleMap() {
 
     const style = mapStyle();
 
-    for (const layer of tripLayers.values()) {
+    for (const [vehicleId, layer] of tripLayers) {
         layer.routeGlow.setStyle(style.routeGlow);
         layer.routeLine.setStyle(style.routeCore);
-        layer.marker.setIcon(style.vehicleIcon);
+
+        //
+        // Only when it actually changed - setIcon rebuilds the marker.
+        //
+        const icon = vehicleMapIcon(vehicleId);
+
+        if (layer.marker.options.icon !== icon) {
+            layer.marker.setIcon(icon);
+        }
     }
 
     if (restingVehicleMarker) {

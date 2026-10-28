@@ -188,7 +188,7 @@ configured timezone.
 
 ### `vehicle_models`
 
-A reusable hauling-vehicle-model catalog entry — e.g. "2026 Chevy Express" — that
+A reusable hauling-vehicle-model catalog entry — e.g. "1978 Ford Econoline" — that
 any number of vehicles can be created against, the same way a `path` is
 geocoded/routed once and reused by any number of trips.
 
@@ -201,7 +201,7 @@ geocoded/routed once and reused by any number of trips.
 | `cargo_capacity_cuft`  | double precision |                         |
 | `cost`                 | double precision |                         |
 | `mpg`                  | double precision |                         |
-| `image`                | text    | nullable; a filename under `frontend/images/` (e.g. `"2026-Chevy-Express.png"`), not a URL — the frontend resolves it against its own origin |
+| `image`                | text    | nullable; a filename under `frontend/images/` (e.g. `"1978-Ford-Econoline.png"`), not a URL — the frontend resolves it against its own origin |
 | `created`              | timestamp | default `NOW()`                |
 
 ### `places`
@@ -945,6 +945,19 @@ side panel since they don't all fit as a row:
   (`engine_liters`, `engine_cylinders`, `engine_turbo` as yes or no,
   `fuel_type`, `transmission`). An older CSV without those columns leaves
   existing specs alone. Fuel type is recorded only for now.
+  The picture has three tools, which run in the browser on a canvas and only
+  save with the model:
+  - **Crop:** drag a box over what to keep.
+  - **Remove background:** clears the color around the picture's edge and
+    anything joined to it, with a tolerance slider. It's meant for plain
+    studio backdrops, not photographed scenes.
+  - **Create icon:** trims to the visible vehicle and squares it to 128px
+    with a transparent background, previewed on a light and a dark map.
+
+  That icon becomes the map marker for the model's driving vehicles in
+  every view. Models without one keep the view's own marker. Icons are
+  stored in `vehicle_model_icons` and served from
+  `GET /api/vehicle-models/{id}/icon` (`PUT` and `DELETE` for admins).
 - **Places** — the saved-places bank (see [`places`](#places)). Add one
   directly, or just let it fill in from vehicle/path locations as they're
   typed elsewhere. A row of filter chips above the list — one row per

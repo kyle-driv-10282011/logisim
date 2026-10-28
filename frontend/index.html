@@ -1050,6 +1050,20 @@
                     <button type="button" id="model-image-remove" class="model-image-remove" onclick="removeModelEditorImage()">Remove</button>
                 </div>
 
+                <div class="model-image-tools">
+                    <button type="button" data-tool="crop">Crop</button>
+                    <button type="button" data-tool="background">Remove background</button>
+                    <button type="button" data-tool="icon">Create icon</button>
+                </div>
+                <div id="model-tool-panel" class="model-tool-panel" style="display:none"></div>
+
+                <div class="model-icon-row">
+                    <span class="model-icon-label">Map icon</span>
+                    <span id="model-icon-preview" class="model-icon-preview"></span>
+                    <span id="model-icon-caption" class="model-image-caption"></span>
+                    <button type="button" id="model-icon-remove" class="model-image-remove">Remove</button>
+                </div>
+
                 <div class="model-image-tabs" role="tablist">
                     <button type="button" class="model-image-tab" data-source="upload">Upload</button>
                     <button type="button" class="model-image-tab" data-source="url">From URL</button>

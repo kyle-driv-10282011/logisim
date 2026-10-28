@@ -414,9 +414,9 @@ def record_money(
 #
 # Ledger rows written before the Budget page's location/trip columns
 # existed only have the old one-line description, e.g.
-#   "2026 Chevy Express 1: 15.17 gal at $4.74/gal (Rb'S One Stop, Kaysville)"
-#   "2026 Chevy Express 1: gas refund for the trip to Chicago"
-#   "2026 Chevy Express 1: roadside assistance fee"
+#   "1978 Ford Econoline 1: 15.17 gal at $4.74/gal (Rb'S One Stop, Kaysville)"
+#   "1978 Ford Econoline 1: gas refund for the trip to Chicago"
+#   "1978 Ford Econoline 1: roadside assistance fee"
 # The location is recoverable from that text, and the description is
 # rewritten to today's style (no vehicle prefix - it has its own column).
 # The trip itself was never recorded and its path is long forgotten, so that
@@ -2867,6 +2867,18 @@ def run_migrations():
         """
     )
 
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS vehicle_model_icons (
+            vehicle_model_id INTEGER PRIMARY KEY REFERENCES vehicle_models(id) ON DELETE CASCADE,
+            content_type TEXT NOT NULL,
+            data BYTEA NOT NULL,
+            sha256 TEXT NOT NULL,
+            updated TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+        """
+    )
+
     cur.execute("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS slot_id INTEGER")
     cur.execute("ALTER TABLE jobs DROP CONSTRAINT IF EXISTS jobs_slot_id_fkey")
     cur.execute(
@@ -3235,14 +3247,22 @@ def vehicle_model_dict(row):
 
         "fuel_type": row[14],
 
-        "transmission": row[15]
+        "transmission": row[15],
+
+        #
+        # The map marker for this model's driving vehicles (made with the
+        # Vehicle Models editor's Create icon), versioned like image_url.
+        # None means the view's normal marker.
+        #
+        "icon_url": f"api/vehicle-models/{row[0]}/icon?v={row[16][:12]}" if row[16] else None
     }
 
 
 VEHICLE_MODEL_COLUMNS = """
     id, year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, image, fuel_tank_gallons,
     (SELECT i.sha256 FROM vehicle_model_images i WHERE i.vehicle_model_id = vehicle_models.id),
-    engine_liters, engine_cylinders, engine_turbo, fuel_type, transmission
+    engine_liters, engine_cylinders, engine_turbo, fuel_type, transmission,
+    (SELECT c.sha256 FROM vehicle_model_icons c WHERE c.vehicle_model_id = vehicle_models.id)
 """
 
 
@@ -3465,7 +3485,7 @@ class CreateVehicleRequest(BaseModel):
     # No user-supplied name - create_vehicle() derives "<year> <brand>
     # <model> <n>" from the vehicle model plus how many vehicles already exist on
     # it, so fleet vehicles are named consistently instead of whatever a
-    # user happens to type (e.g. "2026 Chevy Express 1").
+    # user happens to type (e.g. "1978 Ford Econoline 1").
     #
     vehicle_model_id: int
 
@@ -3579,7 +3599,7 @@ class CreateVehicleModelRequest(BaseModel):
     fuel_tank_gallons: float
 
     #
-    # Filename under frontend/images/ (e.g. "2026-Chevy-Express.png"), not a
+    # Filename under frontend/images/ (e.g. "1978-Ford-Econoline.png"), not a
     # full URL - the frontend is what knows it's serving that directory at
     # its own origin.
     #
@@ -4199,7 +4219,7 @@ def create_vehicle(req: CreateVehicleRequest, slot: int = Depends(current_slot))
 
     #
     # "<year> <brand> <model> <n>" instead of a user-typed name, e.g.
-    # "2026 Chevy Express 1" then "... 2" for the next one on that same
+    # "1978 Ford Econoline 1" then "... 2" for the next one on that same
     # vehicle model. Counts every vehicle ever created on this vehicle model (sold ones
     # included) so numbers stay unique across "My Vehicles" and "All
     # Vehicles" rather than getting reused after a sale - within this save
@@ -4403,7 +4423,9 @@ VEHICLE_IMAGE_FETCH_TIMEOUT_SECONDS = (5, 20)
 Image.MAX_IMAGE_PIXELS = 40_000_000
 
 
-def normalize_vehicle_image(data):
+def normalize_vehicle_image(data, max_side=None):
+
+    max_side = max_side or VEHICLE_IMAGE_MAX_SIDE
 
     if len(data) > VEHICLE_IMAGE_MAX_BYTES:
         raise HTTPException(status_code=413, detail=f"Images can be at most {VEHICLE_IMAGE_MAX_BYTES // (1024 * 1024)} MB")
@@ -4419,7 +4441,7 @@ def normalize_vehicle_image(data):
     if image.mode not in ("RGB", "RGBA"):
         image = image.convert("RGBA")
 
-    image.thumbnail((VEHICLE_IMAGE_MAX_SIDE, VEHICLE_IMAGE_MAX_SIDE), Image.LANCZOS)
+    image.thumbnail((max_side, max_side), Image.LANCZOS)
 
     out = io.BytesIO()
     image.save(out, "WEBP", quality=85, method=6)
@@ -4580,6 +4602,95 @@ def get_vehicle_model_image(id: int):
 
     if row is None:
         raise HTTPException(status_code=404, detail="No uploaded image for that vehicle model")
+
+    return Response(
+        bytes(row[1]),
+        media_type=row[0],
+        headers={"Cache-Control": "public, max-age=31536000, immutable"}
+    )
+
+
+#
+# A model's map icon - a small transparent square the editor makes from
+# its picture (Create icon). Stored like the picture, in its own table, and
+# kept to VEHICLE_ICON_MAX_SIDE whatever comes in.
+#
+VEHICLE_ICON_MAX_SIDE = 128
+
+
+@app.put("/api/vehicle-models/{id}/icon")
+async def upload_vehicle_model_icon(id: int, file: UploadFile = File(...), _admin: None = Depends(require_admin)):
+
+    data = normalize_vehicle_image(await file.read(VEHICLE_IMAGE_MAX_BYTES + 1), VEHICLE_ICON_MAX_SIDE)
+
+    conn = db()
+    cur = conn.cursor()
+
+    try:
+
+        cur.execute("SELECT 1 FROM vehicle_models WHERE id = %s", (id,))
+
+        if cur.fetchone() is None:
+            raise HTTPException(status_code=404, detail="Vehicle model not found")
+
+        cur.execute(
+            """
+            INSERT INTO vehicle_model_icons (vehicle_model_id, content_type, data, sha256)
+            VALUES (%s, 'image/webp', %s, %s)
+            ON CONFLICT (vehicle_model_id) DO UPDATE
+            SET content_type = EXCLUDED.content_type, data = EXCLUDED.data, sha256 = EXCLUDED.sha256, updated = NOW()
+            """,
+            (id, psycopg2.Binary(data), hashlib.sha256(data).hexdigest())
+        )
+
+        conn.commit()
+
+        return fetch_vehicle_models_by_id(cur, [id])[id]
+
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.delete("/api/vehicle-models/{id}/icon")
+def delete_vehicle_model_icon(id: int, _admin: None = Depends(require_admin)):
+
+    conn = db()
+    cur = conn.cursor()
+
+    try:
+
+        cur.execute("DELETE FROM vehicle_model_icons WHERE vehicle_model_id = %s", (id,))
+
+        conn.commit()
+
+        vehicle_model = fetch_vehicle_models_by_id(cur, [id]).get(id)
+
+        if vehicle_model is None:
+            raise HTTPException(status_code=404, detail="Vehicle model not found")
+
+        return vehicle_model
+
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.get("/api/vehicle-models/{id}/icon")
+def get_vehicle_model_icon(id: int):
+
+    conn = db()
+    cur = conn.cursor()
+
+    try:
+        cur.execute("SELECT content_type, data FROM vehicle_model_icons WHERE vehicle_model_id = %s", (id,))
+        row = cur.fetchone()
+    finally:
+        cur.close()
+        conn.close()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="No icon for that vehicle model")
 
     return Response(
         bytes(row[1]),

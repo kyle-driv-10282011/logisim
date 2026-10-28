@@ -307,3 +307,180 @@
     gap: 8px;
     margin-top: 12px;
 }
+
+/* ---------- Picture tools (crop, remove background, create icon) ---------- */
+
+.model-image-tools {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: 8px;
+}
+
+.model-image-tools button.active {
+    font-weight: bold;
+    outline: 2px solid #3388ff;
+}
+
+/* A checkerboard behind a picture while a tool is open, so transparency shows. */
+.model-image-preview.tool-open {
+    position: relative;
+    overflow: hidden;
+    background:
+        repeating-conic-gradient(#d6d6d6 0% 25%, #f7f7f7 0% 50%) 0 0 / 16px 16px;
+}
+
+.model-image-preview canvas {
+    max-width: 94%;
+    max-height: 90%;
+}
+
+.crop-stage {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    cursor: crosshair;
+    touch-action: none;
+    user-select: none;
+}
+
+.crop-stage img {
+    max-width: 94%;
+    max-height: 90%;
+    pointer-events: none;
+}
+
+.crop-box {
+    position: absolute;
+    border: 2px dashed #fff;
+    outline: 1px solid rgba(0, 0, 0, 0.6);
+    box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.45);
+    pointer-events: none;
+}
+
+.icon-stage {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 24px;
+    width: 100%;
+    height: 100%;
+}
+
+.icon-stage-big {
+    width: 112px;
+    height: 112px;
+}
+
+.icon-stage-maps {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+/* The icon at marker size, on a light map and a dark one. */
+.icon-on-map {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 72px;
+    height: 52px;
+    border-radius: 4px;
+}
+
+.icon-on-map.light {
+    background: #e8e4d8;
+}
+
+.icon-on-map.dark {
+    background: #1e1b2e;
+}
+
+.icon-on-map img {
+    width: 48px;
+    height: 48px;
+}
+
+.model-tool-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 10px;
+    padding: 8px 10px;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+}
+
+.model-tool-hint,
+.model-tool-readout {
+    font-size: 11px;
+    color: #666;
+}
+
+.model-tool-slider {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+}
+
+.model-tool-slider input {
+    flex: 1;
+}
+
+.model-tool-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+}
+
+.model-icon-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+}
+
+.model-icon-label {
+    font-size: 12px;
+    font-weight: bold;
+    white-space: nowrap;
+}
+
+.model-icon-preview {
+    width: 36px;
+    height: 36px;
+    flex-shrink: 0;
+    border-radius: 4px;
+    background:
+        repeating-conic-gradient(#d6d6d6 0% 25%, #f7f7f7 0% 50%) 0 0 / 8px 8px;
+}
+
+.model-icon-preview img {
+    width: 100%;
+    height: 100%;
+}
+
+.model-icon-row .model-image-caption {
+    flex: 1;
+}
+
+/* The map icon, tucked into a card's picture corner. */
+.model-card-icon {
+    position: absolute;
+    right: 8px;
+    bottom: 8px;
+    width: 34px;
+    height: 34px;
+    padding: 2px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.85);
+}
+
+/* A model's own icon as a map marker (vehicleMapIcon() in app.js). */
+.model-map-icon {
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.55));
+}
