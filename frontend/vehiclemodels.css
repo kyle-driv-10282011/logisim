@@ -395,6 +395,14 @@
     image-rendering: pixelated;
 }
 
+.erase-stage.bucket {
+    cursor: crosshair;
+}
+
+.erase-stage.bucket .erase-cursor {
+    display: none;
+}
+
 .erase-cursor {
     position: absolute;
     border: 1px solid #fff;
@@ -551,4 +559,85 @@
 /* A model's own icon as a map marker (vehicleMapIcon() in app.js). */
 .model-map-icon {
     filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.55));
+}
+
+/*
+ * The editor fills the whole screen: fields in a narrow scrolling column on
+ * the left, the picture as big as the screen allows in the middle (the
+ * crop, background, eraser and icon tools all work in it), and the tool
+ * controls, map icon and picture sources on the right. Stacked on a
+ * narrow screen.
+ */
+.model-editor.budget-page {
+    padding: 0;
+    overflow: hidden;
+}
+
+.model-editor .model-editor-sheet {
+    display: flex;
+    flex-direction: column;
+    width: 100vw;
+    max-width: none;
+    height: 100vh;
+    align-self: stretch;
+    border-radius: 0;
+}
+
+.model-editor .model-editor-body {
+    flex: 1;
+    min-height: 0;
+    grid-template-columns: minmax(250px, 300px) minmax(0, 1fr) minmax(270px, 320px);
+    gap: 18px;
+}
+
+.model-editor .model-editor-fields,
+.model-editor .model-editor-controls {
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 4px;
+}
+
+.model-editor .model-editor-image {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+.model-editor .model-image-preview,
+.model-editor .model-image-preview.erasing {
+    flex: 1;
+    min-height: 0;
+    aspect-ratio: auto;
+}
+
+.model-editor .icon-stage-big {
+    width: 192px;
+    height: 192px;
+}
+
+@media (max-width: 1000px) {
+
+    .model-editor.budget-page {
+        overflow-y: auto;
+    }
+
+    .model-editor .model-editor-sheet {
+        height: auto;
+        min-height: 100vh;
+    }
+
+    .model-editor .model-editor-body {
+        grid-template-columns: 1fr;
+    }
+
+    .model-editor .model-image-preview,
+    .model-editor .model-image-preview.erasing {
+        flex: none;
+        height: 60vh;
+    }
+
+    .model-editor .model-editor-fields,
+    .model-editor .model-editor-controls {
+        overflow: visible;
+    }
 }

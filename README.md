@@ -953,8 +953,10 @@ side panel since they don't all fit as a row:
     studio backdrops, not photographed scenes.
   - **Eraser:** a GIMP-style brush for outlining a vehicle by hand, or
     tidying up after Remove background. **Erase** clears and **Restore**
-    paints the original back. Size and Softness sliders, zoom from 1× to 4×,
-    and Undo. `[` and `]` change the size, Ctrl+Z undoes, and Alt flips the
+    paints the original back. **Bucket** clears a whole area with one click,
+    stopping at what's already erased: trace a closed outline around the
+    vehicle, then click the background. Size and Softness sliders, zoom from
+    1× to 4×, and Undo. `[` and `]` change the size, Ctrl+Z undoes, and Alt flips the
     brush while held.
   - **Create icon:** trims to the visible vehicle and squares it to 128px
     with a transparent background, previewed on a light and a dark map.

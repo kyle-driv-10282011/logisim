@@ -698,6 +698,10 @@ async function openImageTool(tool) {
 
 function closeImageTool() {
 
+    if (modelToolState && modelToolState.resizeObserver) {
+        modelToolState.resizeObserver.disconnect();
+    }
+
     modelImageTool = null;
     modelToolState = null;
 
@@ -1080,11 +1084,22 @@ function startIcon() {
 // paints the original back (GIMP's "anti-erase") - for tidying up after
 // Remove background, or outlining a vehicle by hand. Size is in the
 // picture's own pixels and Softness feathers the brush edge. Zoom makes
-// the stage scroll so an outline can be traced closely. Every stroke can be
-// undone (Undo, or Ctrl+Z); [ and ] change the size; holding Alt while
-// painting flips Erase and Restore for that stroke.
+// the stage scroll so an outline can be traced closely. Bucket clears a
+// whole area with one click, bounded by what's already erased (see
+// bucketErase()) - trace round the vehicle, then click the background.
+// Every stroke and fill can be undone (Undo, or Ctrl+Z); [ and ] change
+// the size; holding Alt while painting flips Erase and Restore for that
+// stroke.
 //
 const ERASER_UNDO_LIMIT = 30;
+
+//
+// For Bucket, a pixel this transparent or more is erased space - the wall
+// the fill stops at. Low enough that a stroke's soft edge is still filled
+// through (so no faint halo is left outside an outline), and only its
+// fully cleared core holds the fill back.
+//
+const BUCKET_WALL_ALPHA = 8;
 const ERASER_ZOOMS = [1, 2, 3, 4];
 
 
@@ -1123,6 +1138,7 @@ function startEraser() {
         `<div class="eraser-modes" role="group" aria-label="Brush">` +
         `<button type="button" data-mode="erase" class="active">Erase</button>` +
         `<button type="button" data-mode="restore">Restore</button>` +
+        `<button type="button" data-mode="fill" title="Clear a whole area, up to what's already erased">Bucket</button>` +
         `</div>` +
         `<div class="eraser-zooms" role="group" aria-label="Zoom">` +
         ERASER_ZOOMS.map((zoom) => `<button type="button" data-zoom="${zoom}"${zoom === 1 ? ' class="active"' : ""}>${zoom}×</button>`).join("") +
@@ -1132,6 +1148,8 @@ function startEraser() {
         `<label class="model-tool-slider">Size <input type="range" class="eraser-size" min="1" max="200"> <span class="eraser-size-value"></span></label>` +
         `<label class="model-tool-slider">Softness <input type="range" class="eraser-softness" min="0" max="100"> <span class="eraser-softness-value"></span></label>` +
         `<div class="model-tool-hint">Paint over what to clear. Restore brings the original back. ` +
+        `Bucket clears a whole area with one click, stopping at what's already erased - ` +
+        `trace a closed outline round the vehicle, then click the background. ` +
         `[ and ] change the size, Ctrl+Z undoes, Alt flips the brush while held.</div>`,
         () => applyPictureResult(modelToolState.work)
     );
@@ -1153,6 +1171,11 @@ function startEraser() {
         for (const button of panel.querySelectorAll("[data-mode]")) {
             button.classList.toggle("active", button.dataset.mode === state.mode);
         }
+
+        //
+        // Bucket is a click, not a brush - a crosshair instead of the ring.
+        //
+        stage.classList.toggle("bucket", state.mode === "fill");
 
         for (const button of panel.querySelectorAll("[data-zoom]")) {
             button.classList.toggle("active", Number(button.dataset.zoom) === state.zoom);
@@ -1214,6 +1237,20 @@ function startEraser() {
 
         if (state.undo.length > ERASER_UNDO_LIMIT) {
             state.undo.shift();
+        }
+
+        if (state.mode === "fill") {
+
+            //
+            // Nothing to fill (clicked on erased space, or off the
+            // picture) - that click shouldn't cost an undo step.
+            //
+            if (!bucketErase(toPicture(event))) {
+                state.undo.pop();
+            }
+
+            renderControls();
+            return;
         }
 
         strokeMode = event.altKey ? (state.mode === "erase" ? "restore" : "erase") : state.mode;
@@ -1282,6 +1319,13 @@ function startEraser() {
 
     modelToolState.renderControls = renderControls;
 
+    //
+    // Refit when the editor changes size (the window, or the stacked
+    // layout on a narrow screen) - disconnected in closeImageTool().
+    //
+    modelToolState.resizeObserver = new ResizeObserver(layout);
+    modelToolState.resizeObserver.observe(stage);
+
     layout();
     renderControls();
 }
@@ -1337,6 +1381,62 @@ function eraserStamp(x, y, mode) {
     brush(stampContext, diameter / 2, diameter / 2);
 
     context.drawImage(stamp, left, top);
+}
+
+
+//
+// Clears everything connected to the clicked pixel that isn't already
+// erased (alpha above BUCKET_WALL_ALPHA) - a flood fill whose boundary is
+// the erased space. False if there was nothing there to clear.
+//
+function bucketErase(point) {
+
+    const { work } = modelToolState;
+    const { width, height } = work;
+    const x = Math.floor(point.x);
+    const y = Math.floor(point.y);
+
+    if (x < 0 || y < 0 || x >= width || y >= height) {
+        return false;
+    }
+
+    const context = work.getContext("2d");
+    const image = context.getImageData(0, 0, width, height);
+    const data = image.data;
+    const start = y * width + x;
+
+    if (data[start * 4 + 3] <= BUCKET_WALL_ALPHA) {
+        return false;
+    }
+
+    const seen = new Uint8Array(width * height);
+    const stack = [start];
+
+    seen[start] = 1;
+
+    const visit = (p) => {
+        if (!seen[p] && data[p * 4 + 3] > BUCKET_WALL_ALPHA) {
+            seen[p] = 1;
+            stack.push(p);
+        }
+    };
+
+    while (stack.length) {
+
+        const p = stack.pop();
+        const px = p % width;
+
+        data[p * 4 + 3] = 0;
+
+        if (px > 0) visit(p - 1);
+        if (px < width - 1) visit(p + 1);
+        if (p >= width) visit(p - width);
+        if (p < width * (height - 1)) visit(p + width);
+    }
+
+    context.putImageData(image, 0, 0);
+
+    return true;
 }
 
 
