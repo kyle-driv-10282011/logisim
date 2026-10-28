@@ -107,16 +107,16 @@ change its stats.
 ### Gold Doubloons
 
 Each file has a balance in Gold Doubloons, written like dollars
-(`$14,328.45`), starting at $10,000.00. Gas is charged when it's bought:
-a Refuel at a station, the top-up on arriving at one (a Refuel drive or a
-gas-station detour), or a roadside refuel, which costs a full tank at the
-nearest station's price plus a $75 fee. Each vehicle tracks what the gas in
-its tank cost per gallon (a new vehicle's tank is free). When a trip
-finishes, the gas it burned is refunded at that price. A gas-station detour
-carries its cost forward, so the whole journey is refunded on reaching the
-real destination. Every charge and refund is on the **Budget** page (tab
-menu → Budget, `GET /api/ledger`): vehicle, location, trip, cost and the
-balance after it. The balance can go negative; nothing is blocked yet.
+(`$14,328.45`), starting at $10,000.00. Money comes in by delivering loads
+(see [Loads](#loads)) and goes out on gas, vehicles and roadside help.
+Gas is a real cost: it's charged when it's bought (a Refuel at a station,
+the top-up on arriving at one, or a roadside refuel, which costs a full
+tank at the nearest station's price plus a $75 fee) and isn't refunded.
+Each vehicle tracks what the gas in its tank cost per gallon (a new
+vehicle's tank is free). Every charge and payment is on the **Budget**
+page (tab menu → Budget, `GET /api/ledger`): vehicle, location, trip, cost
+and the balance after it. The balance can go negative; nothing is blocked
+yet.
 
 Vehicles cost money too. **Buy Vehicle** charges the model's price, and
 **Sell** refunds what was paid (`vehicles.purchase_price`). The inherited
@@ -130,9 +130,49 @@ Diesel costs more. Stations have a single price. A vehicle whose model's
 fuel type is **diesel** pays that price plus a markup at every fill-up,
 roadside refuels included. The markup starts at 18% and is set on the
 admin **Gas Prices** tab. It's one setting for all four files
-(`global_settings`, `GET`/`PUT /api/global-settings`). Its refund follows
-the price it actually paid, like gas. Models with no fuel type set pay the
-gas price.
+(`global_settings`, `GET`/`PUT /api/global-settings`). Models with no fuel
+type set pay the gas price.
+
+### Loads
+
+Vehicles don't go anywhere on their own; they carry loads. Select a parked
+vehicle in **My Vehicles** and its **load board** lists real-world
+shipments it can carry (office furniture, restaurant produce, a wedding
+party, and so on). Each one is picked up within 120 miles of where the
+vehicle is parked, nearest first. A row shows the cargo and its size, the
+pickup and delivery cities, how far away the pickup is (empty, unpaid
+miles), the loaded miles, the pay, the deadline if accepted now, and when
+the offer ends. Hover a load to see it on the map; click it to zoom there.
+
+**Accept** sends the vehicle to the pickup, unless it's parked there
+already. There it loads up (LOADING) and drives on to the delivery city,
+and it's paid on arrival. Refuel detours, auto-refuel, stranding and
+roadside fuel all work along the way. Delivering after the deadline pays
+75%, and later than the whole time allowed pays 40%. A vehicle with a load
+can't be sold, refueled by hand, or given another load until it delivers.
+
+- **Cities:** every US city and town of 10,000+ people, Hawaii aside,
+  bundled in `backend/data/us_cities.csv` (4,297 rows). It's from
+  [GeoNames](https://www.geonames.org)' `cities5000` list, licensed
+  [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Nothing is
+  looked up live. Bigger cities get more loads. A load's cities become
+  places only when it's accepted.
+- **Board:** made on demand. Opening a vehicle's board
+  (`GET /api/vehicles/{id}/loads`) tops it up to 8 loads that fit it.
+  Offers expire 8–36 game hours after they're posted. Each save file has
+  its own board.
+- **Fit:** freight fits up to the model's cargo cu ft, and passengers up to
+  its seats less the driver.
+- **Pay:** per estimated loaded mile, $1.10 plus $0.0045 per cu ft for
+  freight, or $0.85 plus $0.15 per passenger, plus a $40 or $30 handling
+  fee. Estimated miles are the straight-line distance × 1.25.
+- **Deadline:** set when accepted. The estimated miles (to the pickup plus
+  loaded) at 45 mph, × 1.5, plus 2 hours.
+- **Accepting:** `POST /api/loads/{id}/accept` with `{vehicle_id}` starts
+  the first leg as a background job (`load_leg`). `handle_load_arrival()`
+  in `settle_arrived_vehicles()` does the pickup, the next leg, and the
+  delivery and payment (`load_payment` in the ledger). The constants are
+  the `LOAD_*` values in `app.py`.
 
 ### Outbound network access
 

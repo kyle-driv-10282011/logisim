@@ -531,3 +531,64 @@ CREATE TABLE ledger (
 
     created TIMESTAMP DEFAULT NOW()
 );
+
+
+-- The load board (see LOAD_CARGO / generate_loads() in app.py): real-world
+-- shipments between real US cities (backend/data/us_cities.csv) for a save
+-- file's vehicles to carry, for pay. Made on demand around a vehicle when
+-- its board is opened; 'available' until accepted or past expires_game_time
+-- ('expired'), then 'accepted' (heading to the pickup), 'loaded' (aboard,
+-- heading to the delivery), 'delivered' (paid) - or 'failed' if a leg
+-- couldn't be routed with it aboard. Times are the file's game clock.
+CREATE TABLE loads (
+
+    id SERIAL PRIMARY KEY,
+
+    slot_id INTEGER NOT NULL REFERENCES save_slots(id) ON DELETE CASCADE,
+
+    -- What's moved: e.g. 'Office furniture' (kind 'freight', quantity in
+    -- cu ft) or 'Wedding party' (kind 'passengers', quantity in people).
+    cargo TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    quantity INTEGER NOT NULL,
+
+    origin_name TEXT NOT NULL,
+    origin_state TEXT NOT NULL,
+    origin_lat DOUBLE PRECISION NOT NULL,
+    origin_lng DOUBLE PRECISION NOT NULL,
+
+    destination_name TEXT NOT NULL,
+    destination_state TEXT NOT NULL,
+    destination_lat DOUBLE PRECISION NOT NULL,
+    destination_lng DOUBLE PRECISION NOT NULL,
+
+    -- Straight-line miles x LOAD_ROAD_FACTOR - the board's estimate; the real
+    -- route is only worked out once it's accepted.
+    estimated_miles DOUBLE PRECISION NOT NULL,
+
+    pay NUMERIC(14,2) NOT NULL,
+
+    posted_game_time TIMESTAMP NOT NULL,
+    expires_game_time TIMESTAMP NOT NULL,
+
+    status TEXT NOT NULL DEFAULT 'available',
+
+    vehicle_id INTEGER REFERENCES vehicles(id) ON DELETE SET NULL,
+
+    accepted_game_time TIMESTAMP,
+    deliver_by_game_time TIMESTAMP,
+    picked_up_game_time TIMESTAMP,
+    delivered_game_time TIMESTAMP,
+
+    -- The pickup and delivery cities as places, once accepted.
+    pickup_place_id INTEGER REFERENCES places(id) ON DELETE SET NULL,
+    dropoff_place_id INTEGER REFERENCES places(id) ON DELETE SET NULL,
+
+    -- What delivering it actually paid (less if late).
+    paid NUMERIC(14,2),
+
+    created TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX loads_slot_status ON loads (slot_id, status);
+CREATE INDEX loads_vehicle ON loads (vehicle_id);

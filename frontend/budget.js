@@ -17,8 +17,8 @@ let budgetOldestId = null;
 let budgetFilterOptions = { vehicles: [], trips: [] };
 
 //
-// The Additions / Subtractions / Both toggle: "in" (refunds), "out"
-// (charges) or "both" - filtered by the backend, so "Load older" pages
+// The Additions / Subtractions / Both toggle: "in" (delivery pay, sales),
+// "out" (charges) or "both" - filtered by the backend, so "Load older" pages
 // through only the matching entries.
 //
 let budgetDirection = "both";
@@ -222,7 +222,7 @@ async function loadBudgetPage() {
         ? ""
         : filtered
             ? "No transactions match these filters."
-            : "No transactions yet - gas bought and refunded shows up here.";
+            : "No transactions yet - fuel, vehicles and delivery pay show up here.";
     more.style.display = data.has_more ? "" : "none";
 }
 

@@ -844,6 +844,7 @@ def settle_arrived_vehicles(conn, cur):
     # to job_executor once every actual arrival below has been committed.
     #
     pending_resumes = []
+    pending_load_legs = []
     refueling_vehicle_ids = []
     auto_divert_candidates = []
     arrived_path_ids = []
@@ -917,11 +918,10 @@ def settle_arrived_vehicles(conn, cur):
         arrived_path_ids.append(path_id)
 
         #
-        # Money: the gas this leg burned cost what its fuel pool averaged per
-        # gallon. Added to whatever earlier legs of the journey carried in,
-        # it's refunded now if this was the journey's real destination - or
-        # passed on to the resumed leg if this was only a gas-station detour,
-        # so the whole journey's gas comes back together at the end.
+        # Fuel bookkeeping: what the gas this leg burned cost (its fuel pool's
+        # average per gallon), carried along the journey's legs. Gas isn't
+        # refunded any more - it's a real cost, paid for by delivering loads -
+        # but the tank's cost per gallon still matters for the next fill-up.
         #
         total_fuel_gallons, pool_cost_per_gallon = trip_fuel_pool(
             starting_fuel_gallons, roadside_refuel_count, fuel_tank_gallons, fuel_value_dollars
@@ -948,12 +948,6 @@ def settle_arrived_vehicles(conn, cur):
         )
 
         trip_label = journey_label(journey_origin, journey_destination)
-
-        if resume_destination_place_id is None:
-            record_money(
-                cur, slot_id, journey_fuel_cost, "gas_refund", "Gas refund: trip finished",
-                vehicle_id, vehicle_name, destination["description"], trip_label, journey_id
-            )
 
         if auto_refuel:
 
@@ -1002,6 +996,18 @@ def settle_arrived_vehicles(conn, cur):
                 trip_meter_offset_miles + distances_miles[-1], journey_fuel_cost, journey_origin, journey_id,
                 (route_before or []) + detour_route, slot_id
             ))
+
+        else:
+
+            #
+            # The end of a trip, not a stop on the way: picks up or delivers
+            # the vehicle's load, if it has one (handle_load_arrival()). Its
+            # next leg's job row goes in this same commit, like a resume's.
+            #
+            load_leg = handle_load_arrival(cur, slot_id, vehicle_id, vehicle_name, destination_place_id)
+
+            if load_leg is not None:
+                pending_load_legs.append(load_leg)
 
     #
     # An auto_refuel arrival gets topped back up to full separately, right
@@ -1053,6 +1059,9 @@ def settle_arrived_vehicles(conn, cur):
             _run_resume_trip_job, job_id, vehicle_id, gas_station_place_id, resume_destination_place_id, False,
             trip_meter_offset_miles, journey_fuel_cost, journey_origin, journey_id, journey_route_before
         )
+
+    for load_leg in pending_load_legs:
+        job_executor.submit(_run_load_leg_job, *load_leg)
 
     for vehicle_id, trip_id, progress in auto_divert_candidates:
         maybe_auto_divert_to_gas_station(conn, cur, vehicle_id, trip_id, progress)
@@ -2954,6 +2963,45 @@ def run_migrations():
     )
     cur.execute("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS vehicle_id INTEGER")
 
+    #
+    # The load board (see LOAD_CARGO and generate_loads()).
+    #
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS loads (
+            id SERIAL PRIMARY KEY,
+            slot_id INTEGER NOT NULL REFERENCES save_slots(id) ON DELETE CASCADE,
+            cargo TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            quantity INTEGER NOT NULL,
+            origin_name TEXT NOT NULL,
+            origin_state TEXT NOT NULL,
+            origin_lat DOUBLE PRECISION NOT NULL,
+            origin_lng DOUBLE PRECISION NOT NULL,
+            destination_name TEXT NOT NULL,
+            destination_state TEXT NOT NULL,
+            destination_lat DOUBLE PRECISION NOT NULL,
+            destination_lng DOUBLE PRECISION NOT NULL,
+            estimated_miles DOUBLE PRECISION NOT NULL,
+            pay NUMERIC(14,2) NOT NULL,
+            posted_game_time TIMESTAMP NOT NULL,
+            expires_game_time TIMESTAMP NOT NULL,
+            status TEXT NOT NULL DEFAULT 'available',
+            vehicle_id INTEGER REFERENCES vehicles(id) ON DELETE SET NULL,
+            accepted_game_time TIMESTAMP,
+            deliver_by_game_time TIMESTAMP,
+            picked_up_game_time TIMESTAMP,
+            delivered_game_time TIMESTAMP,
+            pickup_place_id INTEGER REFERENCES places(id) ON DELETE SET NULL,
+            dropoff_place_id INTEGER REFERENCES places(id) ON DELETE SET NULL,
+            paid NUMERIC(14,2),
+            created TIMESTAMP DEFAULT NOW()
+        )
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS loads_slot_status ON loads (slot_id, status)")
+    cur.execute("CREATE INDEX IF NOT EXISTS loads_vehicle ON loads (vehicle_id)")
+
     cur.execute(
         """
         UPDATE vehicle_models SET tire_count = %s
@@ -3778,17 +3826,6 @@ class CreateVehicleModelRequest(BaseModel):
     transmission: Optional[str] = None
     tire_count: Optional[int] = None
     icon_front: Optional[str] = None
-
-
-
-class DriveRequest(BaseModel):
-
-    #
-    # Free-text address or place description, resolved to a place row on
-    # the way in (see find_or_create_place()) - the trip always starts
-    # from wherever the vehicle currently is.
-    #
-    destination: str
 
 
 
@@ -5543,6 +5580,8 @@ def list_vehicles(include_sold: bool = False, slot: int = Depends(current_slot))
         cur, [row[0] for row in rows if row[10]], time_multiplier
     )
 
+    loads_by_vehicle = fetch_active_loads(cur, [row[0] for row in rows])
+
     cur.close()
     conn.close()
 
@@ -5601,7 +5640,12 @@ def list_vehicles(include_sold: bool = False, slot: int = Depends(current_slot))
             #
             "fuel_gallons": progress["fuel_gallons_remaining"] if progress else row[7],
 
-            "status": progress["status"] if progress else row[8]
+            "status": progress["status"] if progress else row[8],
+
+            #
+            # The load it's carrying or on its way to pick up, if any.
+            #
+            "load": loads_by_vehicle.get(row[0])
         })
 
     return result
@@ -5612,7 +5656,8 @@ def list_vehicles(include_sold: bool = False, slot: int = Depends(current_slot))
 # On a trip in any sense, so it can't be sold out from under it: its latest
 # trip still has its route (a trip's path is only forgotten once it
 # arrives - see forget_unused_paths()), which covers driving, stranded and
-# mid-detour alike; or a job is about to start one (a drive, a refuel run,
+# mid-detour alike; it has a load it hasn't delivered; or a job is about to
+# start one (a drive, a refuel run,
 # a divert, the leg after a refuel) and its trip doesn't exist yet. Settle
 # first, so a trip that's just arrived counts as over.
 #
@@ -5632,6 +5677,14 @@ def vehicle_is_busy(cur, vehicle_id):
     latest = cur.fetchone()
 
     if latest is not None and latest[0]:
+        return True
+
+    cur.execute(
+        "SELECT 1 FROM loads WHERE vehicle_id = %s AND status IN ('accepted', 'loaded') LIMIT 1",
+        (vehicle_id,)
+    )
+
+    if cur.fetchone() is not None:
         return True
 
     cur.execute(
@@ -7211,6 +7264,11 @@ def forget_unused_places(cur, place_ids=None):
         AND NOT EXISTS (SELECT 1 FROM paths x WHERE x.origin_place_id = p.id OR x.destination_place_id = p.id)
         AND NOT EXISTS (SELECT 1 FROM gas_prices g WHERE g.place_id = p.id)
         AND NOT EXISTS (
+            SELECT 1 FROM loads l
+            WHERE l.status IN ('accepted', 'loaded')
+            AND (l.pickup_place_id = p.id OR l.dropoff_place_id = p.id)
+        )
+        AND NOT EXISTS (
             SELECT 1 FROM trips t
             WHERE t.resume_destination_place_id = p.id
             AND t.path_id IS NOT NULL
@@ -7563,98 +7621,644 @@ def _run_resume_trip_job(
 
 
 #
-# The only way a user starts a trip now: a free-text destination, routed
-# from wherever the vehicle currently is. The path is created here, behind
-# the scenes, and only lives as long as the trip driving it (see
-# forget_unused_paths()) - always a fresh route rather than reusing an
-# existing path, since paths no longer outlive their trip anyway. Runs in
-# job_executor for the same reason creating a path always did: geocoding
-# the destination and routing it can take well past an HTTP timeout.
+# ---------- Loads: the work ----------
 #
-def _drive_vehicle_to(vehicle_id, destination):
+# Real-world shipments for each save file's vehicles to carry: something
+# concrete (office furniture, a wedding party...) from one real US city to
+# another, for pay. Vehicles don't go anywhere on their own any more - a
+# load is picked off the load board for a parked vehicle, the vehicle
+# drives to the pickup (empty miles, if it isn't there already), loads up,
+# drives to the delivery city and is paid on arrival, less if it's late.
+#
+# Cities come from data/us_cities.csv: every US city and town of 10,000+
+# people (Hawaii aside - no road there) from GeoNames' cities5000 list
+# (CC BY 4.0, https://www.geonames.org), bundled so nothing is looked up
+# live. A load's pickup and delivery become places only once it's accepted
+# (ensure_city_place()), and the legs drive between them like any other
+# trip - refuel detours, stranding and roadside fuel included.
+#
+# Loads are made on demand: a vehicle's board (GET /api/vehicles/{id}/loads)
+# tops itself up to LOAD_BOARD_TARGET that fit it within
+# LOAD_BOARD_RADIUS_MILES, and anything left unclaimed past its expiry (game
+# time) drops off. Each file has its own board.
+#
+US_CITIES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "us_cities.csv")
+
+
+def read_us_cities():
+
+    with open(US_CITIES_PATH, encoding="utf-8", newline="") as f:
+        cities = [
+            {
+                "name": row["name"], "state": row["state"],
+                "lat": float(row["lat"]), "lng": float(row["lng"]), "population": int(row["population"])
+            }
+            for row in csv.DictReader(f)
+        ]
+
+    return (
+        cities,
+        np.radians(np.array([city["lat"] for city in cities])),
+        np.radians(np.array([city["lng"] for city in cities])),
+        np.array([city["population"] for city in cities], dtype=float)
+    )
+
+
+US_CITIES, US_CITY_LAT_RADIANS, US_CITY_LNG_RADIANS, US_CITY_POPULATIONS = read_us_cities()
+
+
+def miles_to_us_cities(lat, lng):
+
+    lat = math.radians(lat)
+    lng = math.radians(lng)
+
+    a = (
+        np.sin((US_CITY_LAT_RADIANS - lat) / 2) ** 2
+        + math.cos(lat) * np.cos(US_CITY_LAT_RADIANS) * np.sin((US_CITY_LNG_RADIANS - lng) / 2) ** 2
+    )
+
+    return 2 * EARTH_RADIUS_MILES * np.arcsin(np.sqrt(np.minimum(a, 1.0)))
+
+
+LOAD_BOARD_RADIUS_MILES = 120
+LOAD_BOARD_TARGET = 8
+
+#
+# Roads aren't straight: the board's mileage estimates are the straight-line
+# distance times this. The real route is only worked out once a load's
+# accepted.
+#
+LOAD_ROAD_FACTOR = 1.25
+
+LOAD_DESTINATION_MILES = (30, 700)
+LOAD_EXPIRY_GAME_HOURS = (8, 36)
+
+#
+# Time allowed to deliver, from accepting: the estimated miles (to the
+# pickup and on to the delivery) at LOAD_PLANNING_MPH, times
+# LOAD_DEADLINE_SLACK, plus LOAD_DEADLINE_EXTRA_HOURS for loading, fuel and
+# the unexpected.
+#
+LOAD_PLANNING_MPH = 45
+LOAD_DEADLINE_SLACK = 1.5
+LOAD_DEADLINE_EXTRA_HOURS = 2
+
+#
+# Late pays LOAD_LATE_PAY of the price; more than the whole allowed time
+# late pays LOAD_VERY_LATE_PAY.
+#
+LOAD_LATE_PAY = 0.75
+LOAD_VERY_LATE_PAY = 0.4
+
+#
+# Parked this close to a load's pickup city counts as there already.
+#
+LOAD_AT_PICKUP_MILES = 3
+
+#
+# What gets moved: (cargo, kind, smallest, largest) - freight in cubic feet,
+# passengers in people. A vehicle carries freight up to its cargo capacity
+# and passengers up to its seats less the driver's.
+#
+LOAD_CARGO = [
+    ("Office furniture", "freight", 80, 320),
+    ("Restaurant produce", "freight", 40, 200),
+    ("Boxed electronics", "freight", 30, 160),
+    ("Medical supplies", "freight", 20, 100),
+    ("Kitchen appliances", "freight", 60, 260),
+    ("Moving boxes", "freight", 50, 320),
+    ("Auto parts", "freight", 20, 180),
+    ("Bakery goods", "freight", 20, 90),
+    ("Trade show displays", "freight", 40, 220),
+    ("Fresh flowers", "freight", 20, 120),
+    ("Craft beer kegs", "freight", 40, 160),
+    ("Hardware store restock", "freight", 60, 280),
+    ("Library books", "freight", 30, 140),
+    ("Bicycles", "freight", 40, 200),
+    ("Wedding party", "passengers", 3, 12),
+    ("Sports team", "passengers", 6, 15),
+    ("Airport shuttle group", "passengers", 1, 8),
+    ("Tour group", "passengers", 4, 14),
+    ("Church choir", "passengers", 4, 12),
+]
+
+#
+# Pay: per estimated loaded mile, a base plus more for a bigger load, plus a
+# flat handling fee. Freight pays $1.10 + $0.0045 per cu ft per mile, so a
+# full 300 cu ft van earns about $2.45 a mile against roughly $0.50 of gas -
+# but the trip to the pickup is unpaid.
+#
+LOAD_PAY = {
+    "freight": {"per_mile": 1.10, "per_unit_mile": 0.0045, "fee": 40},
+    "passengers": {"per_mile": 0.85, "per_unit_mile": 0.15, "fee": 30},
+}
+
+
+def load_pay(kind, quantity, miles):
+
+    rate = LOAD_PAY[kind]
+
+    return round(miles * (rate["per_mile"] + rate["per_unit_mile"] * quantity) + rate["fee"])
+
+
+def load_capacity(vehicle_model):
+
+    return {
+        "freight": vehicle_model["cargo_capacity_cuft"] or 0,
+        "passengers": max(0, (vehicle_model["person_capacity"] or 0) - 1),
+    }
+
+
+def city_label(name, state):
+
+    return f"{name}, {state}"
+
+
+def slot_game_time(cur, slot_id):
+
+    #
+    # get_settings()'s clock without its first-use insert (and commit), so
+    # it's safe mid-transaction - settle_arrived_vehicles() uses it.
+    #
+    cur.execute("SELECT time_multiplier, anchor_real_utc, anchor_game_time FROM settings WHERE id = %s", (slot_id,))
+
+    multiplier, anchor_real_utc, anchor_game_time = cur.fetchone()
+
+    return anchor_game_time + timedelta(seconds=(datetime.utcnow() - anchor_real_utc).total_seconds() * multiplier)
+
+
+#
+# Adds `count` new loads near (lat, lng) sized to fit `capacity` (see
+# load_capacity()): pickups in cities within the board's radius (bigger
+# cities more often), deliveries 30-700 miles on (bigger cities, and
+# medium-length runs, more often).
+#
+def generate_loads(cur, slot_id, lat, lng, game_now, capacity, count):
+
+    nearby = miles_to_us_cities(lat, lng)
+    pickup_candidates = np.flatnonzero(nearby <= LOAD_BOARD_RADIUS_MILES)
+
+    if not len(pickup_candidates):
+        pickup_candidates = np.argsort(nearby)[:5]
+
+    cargo_choices = [
+        cargo for cargo in LOAD_CARGO
+        if capacity[cargo[1]] >= cargo[2]
+    ]
+
+    if not cargo_choices:
+        return 0
+
+    created = 0
+
+    for _ in range(count):
+
+        weights = US_CITY_POPULATIONS[pickup_candidates] ** 0.6
+        pickup = int(random.choices(pickup_candidates, weights=weights)[0])
+
+        onward = miles_to_us_cities(US_CITIES[pickup]["lat"], US_CITIES[pickup]["lng"])
+        low, high = LOAD_DESTINATION_MILES
+        destination_candidates = np.flatnonzero((onward >= low) & (onward <= high))
+
+        if not len(destination_candidates):
+            continue
+
+        distances = onward[destination_candidates]
+        weights = (
+            US_CITY_POPULATIONS[destination_candidates] ** 0.5
+            * (np.exp(-((distances - 250) / 300) ** 2) + 0.2)
+        )
+        destination = int(random.choices(destination_candidates, weights=weights)[0])
+
+        #
+        # Passengers only now and then, and only for a vehicle with seats
+        # to spare.
+        #
+        freight = [cargo for cargo in cargo_choices if cargo[1] == "freight"]
+        passengers = [cargo for cargo in cargo_choices if cargo[1] == "passengers"]
+        pool = passengers if passengers and (not freight or random.random() < 0.25) else freight
+
+        cargo, kind, smallest, largest = random.choice(pool)
+        quantity = random.randint(smallest, int(min(largest, capacity[kind])))
+
+        miles = float(onward[destination]) * LOAD_ROAD_FACTOR
+        origin_city = US_CITIES[pickup]
+        destination_city = US_CITIES[destination]
+
+        cur.execute(
+            """
+            INSERT INTO loads (
+                slot_id, cargo, kind, quantity,
+                origin_name, origin_state, origin_lat, origin_lng,
+                destination_name, destination_state, destination_lat, destination_lng,
+                estimated_miles, pay, posted_game_time, expires_game_time
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                slot_id, cargo, kind, quantity,
+                origin_city["name"], origin_city["state"], origin_city["lat"], origin_city["lng"],
+                destination_city["name"], destination_city["state"], destination_city["lat"], destination_city["lng"],
+                round(miles, 1), load_pay(kind, quantity, miles), game_now,
+                game_now + timedelta(hours=random.uniform(*LOAD_EXPIRY_GAME_HOURS))
+            )
+        )
+
+        created += 1
+
+    return created
+
+
+LOAD_COLUMNS = """
+    id, cargo, kind, quantity, origin_name, origin_state, origin_lat, origin_lng,
+    destination_name, destination_state, destination_lat, destination_lng,
+    estimated_miles, pay, expires_game_time, status, vehicle_id, deliver_by_game_time,
+    accepted_game_time, pickup_place_id, dropoff_place_id
+"""
+
+
+def load_dict(row):
+
+    return {
+        "id": row[0],
+        "cargo": row[1],
+        "kind": row[2],
+        "quantity": row[3],
+        "origin": city_label(row[4], row[5]),
+        "origin_lat": row[6],
+        "origin_lng": row[7],
+        "destination": city_label(row[8], row[9]),
+        "destination_lat": row[10],
+        "destination_lng": row[11],
+        "estimated_miles": row[12],
+        "pay": float(row[13]),
+        "expires_game_time": row[14].isoformat(),
+        "status": row[15],
+        "vehicle_id": row[16],
+        "deliver_by_game_time": row[17].isoformat() if row[17] else None,
+        "accepted_game_time": row[18].isoformat() if row[18] else None,
+    }
+
+
+def load_allowed_hours(pickup_miles, load_miles):
+
+    return (pickup_miles + load_miles) / LOAD_PLANNING_MPH * LOAD_DEADLINE_SLACK + LOAD_DEADLINE_EXTRA_HOURS
+
+
+def vehicle_position(cur, vehicle_id):
+
+    cur.execute(
+        """
+        SELECT v.slot_id, v.sold, v.place_id, p.lat, p.lng, p.description, v.vehicle_model_id
+        FROM vehicles v JOIN places p ON p.id = v.place_id
+        WHERE v.id = %s
+        """,
+        (vehicle_id,)
+    )
+
+    return cur.fetchone()
+
+
+#
+# The load board for one vehicle: available loads it can carry, picked up
+# within LOAD_BOARD_RADIUS_MILES of where it's parked - nearest pickup
+# first - with what each would mean for this vehicle: the empty miles to the
+# pickup and the time it would have to deliver if accepted now.
+#
+@app.get("/api/vehicles/{id}/loads")
+def vehicle_load_board(id: int, slot: int = Depends(current_slot)):
+
+    assert_vehicle_in_slot(id, slot)
 
     conn = db()
     cur = conn.cursor()
 
     try:
 
-        cur.execute("SELECT place_id FROM vehicles WHERE id = %s", (vehicle_id,))
+        _, game_now = get_settings(conn, cur, slot)
 
-        row = cur.fetchone()
+        position = vehicle_position(cur, id)
 
-        if row is None:
+        if position is None or position[1]:
             raise HTTPException(status_code=404, detail="Vehicle not found")
 
-        origin_place_id = row[0]
-        origin = fetch_places_by_id(cur, [origin_place_id])[origin_place_id]
+        _, _, _, lat, lng, location, vehicle_model_id = position
+        capacity = load_capacity(fetch_vehicle_models_by_id(cur, [vehicle_model_id])[vehicle_model_id])
 
-        destination_place_id, destination_lat, destination_lng = find_or_create_place(cur, destination)
-
-        if destination_place_id == origin_place_id:
-            raise HTTPException(status_code=400, detail=f"Vehicle is already at {destination}")
-
-        path_id, _, _, _ = insert_routed_path(
-            cur, origin_place_id, origin["lat"], origin["lng"],
-            destination_place_id, destination_lat, destination_lng
+        cur.execute(
+            "UPDATE loads SET status = 'expired' WHERE slot_id = %s AND status = 'available' AND expires_game_time < %s",
+            (slot, game_now)
         )
 
-        #
-        # Committed before the trip exists, since start_trip_on_path() runs
-        # on its own connection - so a failed start has to forget the path
-        # itself rather than just rolling back.
-        #
+        def board():
+
+            cur.execute(
+                f"SELECT {LOAD_COLUMNS} FROM loads WHERE slot_id = %s AND status = 'available'",
+                (slot,)
+            )
+
+            entries = []
+
+            for row in cur.fetchall():
+
+                load = load_dict(row)
+
+                if load["quantity"] > capacity[load["kind"]]:
+                    continue
+
+                pickup_miles = haversine_miles(lat, lng, load["origin_lat"], load["origin_lng"])
+
+                if pickup_miles > LOAD_BOARD_RADIUS_MILES:
+                    continue
+
+                pickup_miles = 0.0 if pickup_miles <= LOAD_AT_PICKUP_MILES else pickup_miles * LOAD_ROAD_FACTOR
+                allowed_hours = load_allowed_hours(pickup_miles, load["estimated_miles"])
+
+                entries.append({
+                    **load,
+                    "pickup_miles": round(pickup_miles, 1),
+                    "allowed_hours": round(allowed_hours, 1),
+                    "deliver_by_if_accepted": (game_now + timedelta(hours=allowed_hours)).isoformat(),
+                })
+
+            return entries
+
+        entries = board()
+
+        if len(entries) < LOAD_BOARD_TARGET:
+            generate_loads(cur, slot, lat, lng, game_now, capacity, LOAD_BOARD_TARGET - len(entries))
+            entries = board()
+
         conn.commit()
+
+        entries.sort(key=lambda load: (load["pickup_miles"], -load["pay"]))
+
+        return {"location": location, "game_time": game_now.isoformat(), "loads": entries}
 
     finally:
         cur.close()
         conn.close()
 
+
+#
+# A load's city as a place a trip can drive to - saved directly from the
+# bundled coordinates (no geocode), and reused if that city's already a
+# place.
+#
+def ensure_city_place(cur, name, state, lat, lng):
+
+    description = city_label(name, state)
+    saved = find_saved_place(cur, description)
+
+    if saved is not None:
+        return saved[0]
+
+    lat = round_coord(lat)
+    lng = round_coord(lng)
+
+    cur.execute("SELECT id FROM places WHERE lat = %s AND lng = %s", (lat, lng))
+
+    existing = cur.fetchone()
+
+    if existing is not None:
+        return existing[0]
+
+    cur.execute(
+        """
+        INSERT INTO places (description, address, lat, lng, continent, country, state, city)
+        VALUES (%s, %s, %s, %s, 'North America', 'United States', %s, %s)
+        RETURNING id
+        """,
+        (description, f"{description}, United States", lat, lng, state, name)
+    )
+
+    return cur.fetchone()[0]
+
+
+class AcceptLoadRequest(BaseModel):
+    vehicle_id: int
+
+
+#
+# Starts one leg of a load - to the pickup or on to the delivery - as a
+# background job (routing takes a moment), the same way a refuel stop's
+# next leg starts. If it can't be routed, a load not yet picked up goes back
+# on the board; one already aboard is marked failed.
+#
+def _run_load_leg_job(job_id, vehicle_id, origin_place_id, destination_place_id, load_id):
+
+    update_job(job_id, status="running")
+
     try:
-        return start_trip_on_path(vehicle_id, path_id)
-    except Exception:
+        result = _resume_trip_after_refuel(vehicle_id, origin_place_id, destination_place_id, False)
+    except Exception as e:
 
         conn = db()
         cur = conn.cursor()
 
         try:
-            forget_unused_paths(cur, [path_id])
+            cur.execute(
+                """
+                UPDATE loads SET
+                    status = CASE WHEN status = 'accepted' THEN 'available' ELSE 'failed' END,
+                    vehicle_id = CASE WHEN status = 'accepted' THEN NULL ELSE vehicle_id END
+                WHERE id = %s
+                """,
+                (load_id,)
+            )
             conn.commit()
         finally:
             cur.close()
             conn.close()
 
-        raise
-
-
-def _run_drive_job(job_id, vehicle_id, destination):
-
-    update_job(job_id, status="running")
-
-    try:
-        result = _drive_vehicle_to(vehicle_id, destination)
-    except Exception as e:
         update_job(job_id, status="error", error=getattr(e, "detail", str(e)))
         return
 
     update_job(job_id, status="done", result=result)
 
 
-@app.post("/api/vehicles/{id}/drive", status_code=202)
-def drive_vehicle(id: int, req: DriveRequest, slot: int = Depends(current_slot)):
+def start_load_leg(cur, slot_id, vehicle_id, origin_place_id, destination_place_id, load_id):
 
-    assert_vehicle_in_slot(id, slot)
+    job_id = create_job("load_leg", cur=cur, slot_id=slot_id, vehicle_id=vehicle_id)
 
-    destination = req.destination.strip()
+    return job_id, (job_id, vehicle_id, origin_place_id, destination_place_id, load_id)
 
-    if not destination:
-        raise HTTPException(status_code=400, detail="Enter a destination")
 
-    job_id = create_job("drive_to_destination", slot_id=slot, vehicle_id=id)
+@app.post("/api/loads/{load_id}/accept", status_code=202)
+def accept_load(load_id: int, req: AcceptLoadRequest, slot: int = Depends(current_slot)):
 
-    job_executor.submit(_run_drive_job, job_id, id, destination)
+    assert_vehicle_in_slot(req.vehicle_id, slot)
 
-    return {"job_id": job_id}
+    conn = db()
+    cur = conn.cursor()
 
+    try:
+
+        settle_arrived_vehicles(conn, cur)
+
+        _, game_now = get_settings(conn, cur, slot)
+
+        position = vehicle_position(cur, req.vehicle_id)
+
+        if position is None or position[1]:
+            raise HTTPException(status_code=404, detail="Vehicle not found")
+
+        _, _, vehicle_place_id, lat, lng, _, vehicle_model_id = position
+
+        if vehicle_is_busy(cur, req.vehicle_id):
+            raise HTTPException(status_code=409, detail="That vehicle is on a trip - it can take a load once it's parked")
+
+        cur.execute(
+            "SELECT 1 FROM loads WHERE vehicle_id = %s AND status IN ('accepted', 'loaded')",
+            (req.vehicle_id,)
+        )
+
+        if cur.fetchone() is not None:
+            raise HTTPException(status_code=409, detail="That vehicle already has a load")
+
+        cur.execute(f"SELECT {LOAD_COLUMNS} FROM loads WHERE id = %s AND slot_id = %s FOR UPDATE", (load_id, slot))
+
+        row = cur.fetchone()
+
+        if row is None:
+            raise HTTPException(status_code=404, detail="Load not found")
+
+        load = load_dict(row)
+
+        if load["status"] != "available" or row[14] < game_now:
+            raise HTTPException(status_code=409, detail="That load has been taken or has expired")
+
+        capacity = load_capacity(fetch_vehicle_models_by_id(cur, [vehicle_model_id])[vehicle_model_id])
+
+        if load["quantity"] > capacity[load["kind"]]:
+            raise HTTPException(status_code=409, detail="That load doesn't fit this vehicle")
+
+        pickup_place_id = ensure_city_place(cur, row[4], row[5], row[6], row[7])
+        dropoff_place_id = ensure_city_place(cur, row[8], row[9], row[10], row[11])
+
+        straight_miles = haversine_miles(lat, lng, load["origin_lat"], load["origin_lng"])
+        at_pickup = straight_miles <= LOAD_AT_PICKUP_MILES
+        pickup_miles = 0.0 if at_pickup else straight_miles * LOAD_ROAD_FACTOR
+
+        deliver_by = game_now + timedelta(hours=load_allowed_hours(pickup_miles, load["estimated_miles"]))
+
+        cur.execute(
+            """
+            UPDATE loads SET
+                status = %s, vehicle_id = %s, accepted_game_time = %s, deliver_by_game_time = %s,
+                picked_up_game_time = %s, pickup_place_id = %s, dropoff_place_id = %s
+            WHERE id = %s
+            """,
+            (
+                "loaded" if at_pickup else "accepted", req.vehicle_id, game_now, deliver_by,
+                game_now if at_pickup else None, pickup_place_id, dropoff_place_id, load_id
+            )
+        )
+
+        job_id, leg = start_load_leg(
+            cur, slot, req.vehicle_id, vehicle_place_id,
+            dropoff_place_id if at_pickup else pickup_place_id, load_id
+        )
+
+        conn.commit()
+
+    finally:
+        cur.close()
+        conn.close()
+
+    job_executor.submit(_run_load_leg_job, *leg)
+
+    return {"job_id": job_id, "picked_up": at_pickup, "deliver_by_game_time": deliver_by.isoformat()}
+
+
+#
+# Called by settle_arrived_vehicles() when a vehicle finishes a trip (not
+# just a refuel stop on the way): picks up its load at the pickup (and
+# queues the leg to the delivery), or delivers it and pays - less if it's
+# late. Arriving anywhere else with a load still to move queues the leg it
+# still needs. Returns that leg, if any, for the caller to start once its
+# transaction commits.
+#
+def handle_load_arrival(cur, slot_id, vehicle_id, vehicle_name, arrived_place_id):
+
+    cur.execute(
+        f"""
+        SELECT {LOAD_COLUMNS}
+        FROM loads WHERE vehicle_id = %s AND status IN ('accepted', 'loaded')
+        FOR UPDATE
+        """,
+        (vehicle_id,)
+    )
+
+    row = cur.fetchone()
+
+    if row is None:
+        return None
+
+    load = load_dict(row)
+    pickup_place_id, dropoff_place_id = row[19], row[20]
+    game_now = slot_game_time(cur, slot_id)
+
+    if load["status"] == "accepted":
+
+        if arrived_place_id != pickup_place_id:
+            return start_load_leg(cur, slot_id, vehicle_id, arrived_place_id, pickup_place_id, load["id"])[1]
+
+        cur.execute(
+            "UPDATE loads SET status = 'loaded', picked_up_game_time = %s WHERE id = %s",
+            (game_now, load["id"])
+        )
+
+        return start_load_leg(cur, slot_id, vehicle_id, pickup_place_id, dropoff_place_id, load["id"])[1]
+
+    if arrived_place_id != dropoff_place_id:
+        return start_load_leg(cur, slot_id, vehicle_id, arrived_place_id, dropoff_place_id, load["id"])[1]
+
+    #
+    # Delivered. On time pays in full; late pays LOAD_LATE_PAY; later than
+    # the whole time it was given pays LOAD_VERY_LATE_PAY.
+    #
+    deliver_by = row[17]
+    allowed = deliver_by - row[18]
+    late_by = game_now - deliver_by
+
+    if late_by <= timedelta(0):
+        share, note = 1.0, "on time"
+    elif late_by <= allowed:
+        share, note = LOAD_LATE_PAY, f"late - {round(LOAD_LATE_PAY * 100)}% pay"
+    else:
+        share, note = LOAD_VERY_LATE_PAY, f"very late - {round(LOAD_VERY_LATE_PAY * 100)}% pay"
+
+    paid = round(load["pay"] * share, 2)
+
+    cur.execute(
+        "UPDATE loads SET status = 'delivered', delivered_game_time = %s, paid = %s WHERE id = %s",
+        (game_now, paid, load["id"])
+    )
+
+    record_money(
+        cur, slot_id, paid, "load_payment", f"Delivered {load['cargo'].lower()} ({note})",
+        vehicle_id, vehicle_name, load["destination"], journey_label(load["origin"], load["destination"])
+    )
+
+    return None
+
+
+#
+# Each vehicle's load in progress (accepted or aboard), for its card and
+# spotlight - GET /api/vehicles.
+#
+def fetch_active_loads(cur, vehicle_ids):
+
+    if not vehicle_ids:
+        return {}
+
+    cur.execute(
+        f"SELECT {LOAD_COLUMNS} FROM loads WHERE vehicle_id = ANY(%s) AND status IN ('accepted', 'loaded')",
+        (list(vehicle_ids),)
+    )
+
+    return {row[16]: load_dict(row) for row in cur.fetchall()}
 
 
 @app.get("/api/paths")
@@ -8123,6 +8727,7 @@ def start_trip(req: StartTripRequest, slot: int = Depends(current_slot)):
 REFRESH_MODES = ("never", "refill", "miles", "arrival")
 
 TRIP_STARTING_JOB_TYPES = (
+    "load_leg",
     "drive_to_destination",
     "resume_trip_after_refuel",
     "auto_divert_to_gas_station",

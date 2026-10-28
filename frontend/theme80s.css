@@ -349,6 +349,7 @@ body {
     box-shadow: 0 0 8px rgba(255, 77, 109, 0.7);
 }
 
+.status-LOADING,
 .status-REFUELING {
     background: var(--neon-orange);
     box-shadow: 0 0 8px rgba(255, 154, 60, 0.6);
@@ -826,6 +827,54 @@ body {
 .model-tool-slider,
 .model-icon-label {
     color: var(--neon-muted);
+}
+
+/* ---------- Load board ---------- */
+
+.load-board {
+    border-top-color: var(--neon-pink);
+}
+
+.load-board-sub,
+.load-board-empty,
+.load-cargo span,
+.load-pay span,
+.load-meta {
+    color: var(--neon-muted);
+}
+
+.load-row {
+    color: var(--neon-text);
+    background: rgba(26, 6, 51, 0.85);
+    border-color: var(--neon-line);
+    border-radius: 6px;
+}
+
+.load-row:hover {
+    background: var(--neon-panel-2);
+    border-color: var(--neon-cyan);
+    box-shadow: 0 0 10px rgba(45, 226, 230, 0.35);
+}
+
+.load-cargo {
+    color: var(--neon-cream);
+}
+
+.load-pay {
+    font-family: var(--pixel-font);
+    font-size: 10px;
+    font-weight: normal;
+    color: var(--neon-green);
+}
+
+.load-pay span {
+    margin-top: 4px;
+    font-family: var(--mono-font);
+    font-size: 11px;
+}
+
+.vehicle-card-load {
+    color: var(--neon-cyan);
 }
 
 /* ---------- Admin password prompt ---------- */

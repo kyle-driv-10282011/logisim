@@ -313,6 +313,7 @@ body {
     background: #ff0000;
 }
 
+.status-LOADING,
 .status-REFUELING {
     color: #000;
     background: #ffff00;
@@ -710,6 +711,40 @@ body {
 .model-image-tools button.active {
     outline: 1px dotted #000;
     box-shadow: var(--w95-pressed);
+}
+
+/* ---------- Load board ---------- */
+
+.load-board {
+    border-top: 1px solid var(--w95-shadow);
+    box-shadow: inset 0 1px 0 var(--w95-white);
+}
+
+.load-board-sub,
+.load-board-empty,
+.load-cargo span,
+.load-pay span,
+.load-meta {
+    color: #222;
+}
+
+.load-row {
+    background: var(--w95-face);
+    border: none;
+    border-radius: 0;
+    box-shadow: var(--w95-raised);
+}
+
+.load-row:hover {
+    background: var(--w95-light);
+}
+
+.load-pay {
+    color: #008000;
+}
+
+.vehicle-card-load {
+    color: var(--w95-navy);
 }
 
 /* ---------- Admin password prompt: a dialog box ---------- */

@@ -12,6 +12,7 @@
     <link rel="stylesheet" href="fileselect.css">
     <link rel="stylesheet" href="budget.css">
     <link rel="stylesheet" href="vehiclemodels.css">
+    <link rel="stylesheet" href="loads.css">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Share+Tech+Mono&display=swap">
 
     <style>
@@ -594,6 +595,7 @@
             gap: 8px;
         }
 
+        .status-LOADING,
         .status-REFUELING {
             background: #e8890c;
         }
@@ -878,11 +880,6 @@
         .collapsible-arrow {
             font-size: 10px;
             color: #555;
-        }
-
-        #drive-form-label {
-            font-size: 12px;
-            color: #333;
         }
     </style>
 
@@ -1245,12 +1242,8 @@
 
         <div id="vehicle-list"><div class="list-loading">Loading vehicles...</div></div>
 
-        <div class="panel-form" id="drive-form" style="display:none">
-            <label for="drive-destination" id="drive-form-label"></label>
-            <input id="drive-destination" autocomplete="off" placeholder="Destination - a description (Target near Chicago) or an address"
-                onkeydown="if (event.key === 'Enter') document.getElementById('drive-button').click()">
-            <button id="drive-button" onclick="withSpinner(this, driveToDestination)">Drive</button>
-        </div>
+        <!-- The selected parked vehicle's load board (loads.js). -->
+        <div id="load-board" class="load-board" style="display:none"></div>
 
     </div>
 
@@ -1378,6 +1371,7 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="app.js"></script>
 <script src="budget.js"></script>
+<script src="loads.js"></script>
 <script src="vehiclemodels.js"></script>
 <script src="fileselect.js"></script>
 <script src="admin.js"></script>

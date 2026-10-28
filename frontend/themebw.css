@@ -71,6 +71,7 @@ body {
 .status-DRIVING,
 .status-STRANDED,
 .status-REFUELING,
+.status-LOADING,
 .status-READY,
 .status-SOLD {
     color: white;
@@ -80,6 +81,15 @@ body {
 .status-READY,
 .status-SOLD {
     background: #777;
+}
+
+.load-board {
+    border-top-color: #111;
+}
+
+.load-row:hover {
+    border-color: #111;
+    background: #f2f2f2;
 }
 
 .budget-direction button.active {

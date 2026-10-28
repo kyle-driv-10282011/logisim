@@ -492,13 +492,14 @@ function clearFocus() {
 
     clearRestingVehicleMarker();
     clearSavedGasStationMarker();
+    clearLoadPreview();
 }
 
 
 function renderFocusDependentViews() {
 
     renderVehicleList();
-    renderDriveForm();
+    renderLoadBoard();
 }
 
 
@@ -1413,7 +1414,7 @@ async function loadVehicles() {
     }
 
     renderVehicleList();
-    renderDriveForm();
+    renderLoadBoard();
 
     //
     // A model's map icon may have been added or changed since the markers
@@ -1460,7 +1461,7 @@ function renderVehicleList() {
         //
         const displayStatus = trip ? trip.status : vehicle.status;
 
-        const driving = displayStatus === "DRIVING" || displayStatus === "STRANDED" || displayStatus === "REFUELING";
+        const driving = ["DRIVING", "STRANDED", "REFUELING", "LOADING"].includes(displayStatus);
         const ready = displayStatus === "READY";
 
         item.className = "vehicle-item vehicle-row vehicle-card" +
@@ -1509,6 +1510,9 @@ function renderVehicleList() {
             (vehicle.vehicle_model ? ` (${vehicleModelLabel(vehicle.vehicle_model)})` : "") +
             `</div>` +
             `<div class="vehicle-card-location">${vehicle.current_location}</div>` +
+            (vehicle.load
+                ? `<div class="vehicle-card-load">&#128230; ${escapeLoadText(activeLoadSummary(vehicle.load))}</div>`
+                : "") +
             `</div>` +
             `<span class="status-badge status-${displayStatus}">${displayStatus}</span>` +
             `</div>` +
@@ -1519,7 +1523,11 @@ function renderVehicleList() {
                   fuelGauge +
                   `</div>`
                 : "") +
-            (displayStatus === "READY"
+            //
+            // Nothing to do with a vehicle that's on a load (even in the
+            // moment between its legs) - it's busy until it delivers.
+            //
+            (displayStatus === "READY" && !vehicle.load
                 ? `<div class="vehicle-card-actions">` +
                   (refuelInFlightVehicleId === vehicle.id
                       ? `<button class="refuel-button" disabled>Refueling...</button>`
@@ -1597,7 +1605,7 @@ function renderVehicleList() {
 //
 // When the vehicle isn't already at a gas station, POST .../refuel starts
 // a background job (drive there, refuel, park - see app.py) instead of
-// refueling instantly, so this has to poll it the same way driveToDestination()
+// refueling instantly, so this has to poll it the same way acceptLoad() (loads.js)
 // and divertToGasStation() do rather than treating every response as
 // already finished.
 //
@@ -1691,111 +1699,11 @@ function selectTripVehicle(vehicleId) {
 
 
 //
-// Paths are behind the scenes now (see forget_unused_paths() in app.py):
-// selecting a READY vehicle shows a destination box, and driving there
-// creates the path from the vehicle's current place and starts the trip
-// in one background job - nothing to pick, and nothing left behind once
-// it arrives.
-//
-function renderDriveForm() {
-
-    const form = document.getElementById("drive-form");
-    const vehicle = vehiclesById.get(selectedTripVehicleId);
-
-    if (!vehicle) {
-        form.style.display = "none";
-        return;
-    }
-
-    form.style.display = "";
-
-    document.getElementById("drive-form-label").textContent =
-        `Drive ${vehicle.name} from ${vehicle.current_location} to:`;
-}
-
-
-//
-// The vehicle a drive is being set up for (the job routing it hasn't
-// started its trip yet), so its card doesn't offer Sell meanwhile.
+// The vehicle a load's first leg is being set up for (the job routing it
+// hasn't started its trip yet), so its card doesn't offer Sell meanwhile -
+// set by acceptLoad() in loads.js.
 //
 let driveInFlightVehicleId = null;
-
-async function driveToDestination() {
-
-    const vehicleId = selectedTripVehicleId;
-
-    if (vehicleId === null) {
-        return;
-    }
-
-    driveInFlightVehicleId = vehicleId;
-    renderVehicleList();
-
-    try {
-        await driveVehicle(vehicleId);
-    } finally {
-        driveInFlightVehicleId = null;
-        renderVehicleList();
-    }
-}
-
-
-async function driveVehicle(vehicleId) {
-
-    const input = document.getElementById("drive-destination");
-
-    const response = await apiFetch(API + "/api/vehicles/" + vehicleId + "/drive", {
-
-        method: "POST",
-
-        headers: {
-            "Content-Type": "application/json"
-        },
-
-        body: JSON.stringify({ destination: input.value })
-
-    });
-
-    const submitted = await response.json();
-
-    if (!response.ok) {
-        alert(submitted.detail || "Could not start trip");
-        return;
-    }
-
-    try {
-        await pollJob(submitted.job_id);
-    } catch (e) {
-
-        alert(e.message);
-
-        //
-        // A refused drive (e.g. "Vehicle already on a trip") usually means
-        // this page's view of the vehicle is out of date - re-fetch so the
-        // card shows what it's really doing instead of inviting a retry.
-        //
-        await refreshLiveData();
-        await loadVehicles();
-        return;
-    }
-
-    input.value = "";
-
-    await refreshLiveData();
-    await loadVehicles();
-
-    //
-    // Keep following the same vehicle, now as a driving one (its live
-    // card and map position) rather than dropping back to the full list.
-    //
-    selectVehicle(vehicleId);
-
-    const trip = activeTripsById.get(vehicleId);
-
-    if (trip) {
-        map.fitBounds(L.latLngBounds(trip.route), { paddingBottomRight: vehicleOverlayInset() });
-    }
-}
 
 
 function selectVehicle(vehicleId) {
@@ -2281,6 +2189,10 @@ function vehicleDetailHtml(vehicle, trip) {
 
         statusLine = `&#9981; Refueling - back on the road to ${trip.resume_destination} shortly`;
 
+    } else if (trip.status === "LOADING") {
+
+        statusLine = `&#128230; Loading up - heading for ${vehicle.load ? vehicle.load.destination : "the delivery"} shortly`;
+
     } else if (trip.status === "STRANDED") {
 
         statusLine =
@@ -2355,6 +2267,9 @@ function vehicleDetailHtml(vehicle, trip) {
               `Cost: $${Math.round(vehicleModel.cost).toLocaleString()} &middot; ${vehicleModel.mpg} mpg<br>` +
               (engineSummary(vehicleModel) ? `Engine: ${engineSummary(vehicleModel)}<br>` : "") +
               (vehicleModel.tire_count ? `Tires: ${vehicleModel.tire_count}<br>` : "")
+            : "") +
+        (vehicle.load
+            ? `Load: ${escapeLoadText(activeLoadSummary(vehicle.load))} &middot; pays ${formatDoubloons(vehicle.load.pay)}<br>`
             : "") +
         cityLine +
         `Position: ${trip.position[0].toFixed(4)}, ${trip.position[1].toFixed(4)}<br>` +
@@ -2439,8 +2354,7 @@ async function roadsideRefuel(vehicleId) {
 
 ` +
         `Costs a full tank${tankGallons ? ` (${tankGallons} gal)` : ""} at the nearest gas station's price, ` +
-        `plus a ${formatDoubloons(ROADSIDE_ASSIST_FEE)} assistance fee. The gas is refunded when the trip ` +
-        `finishes; the fee isn't.`
+        `plus a ${formatDoubloons(ROADSIDE_ASSIST_FEE)} assistance fee.`
     )) {
         return;
     }
@@ -2553,7 +2467,7 @@ async function pollActiveTrips() {
             continue;
         }
 
-        if (previous.status === "REFUELING") {
+        if (previous.status === "REFUELING" || previous.status === "LOADING") {
 
             if (Date.now() - previous.refuelingSince < PENDING_LEG_TIMEOUT_MS) {
                 activeTripsById.set(vehicleId, previous);
@@ -2561,7 +2475,17 @@ async function pollActiveTrips() {
 
         } else if (previous.status === "DRIVING" && previous.resume_destination) {
 
-            activeTripsById.set(vehicleId, refuelingPlaceholder(previous));
+            activeTripsById.set(vehicleId, refuelingPlaceholder(previous, "REFUELING"));
+            newPlaceholder = true;
+
+        } else if (previous.status === "DRIVING" && vehiclesById.get(vehicleId)?.load) {
+
+            //
+            // The same gap at a load's pickup: picked up, with the leg to
+            // the delivery still being routed (handle_load_arrival() in
+            // app.py).
+            //
+            activeTripsById.set(vehicleId, refuelingPlaceholder(previous, "LOADING"));
             newPlaceholder = true;
         }
     }
@@ -2619,6 +2543,8 @@ async function pollActiveTrips() {
                 ? `${trip.vehicle_name}: Arrived`
                 : trip.status === "REFUELING"
                 ? `${trip.vehicle_name}: refueling`
+                : trip.status === "LOADING"
+                ? `${trip.vehicle_name}: loading up`
                 : trip.status === "STRANDED"
                 ? `${trip.vehicle_name}: Out of fuel - stranded`
                 : `${trip.vehicle_name}: arriving in ${formatHMS(trip.remaining_sim_seconds)}`
@@ -2682,21 +2608,22 @@ const PENDING_LEG_TIMEOUT_MS = 10 * 60 * 1000;
 // two); the trip meter keeps counting the whole journey. trip_id is kept,
 // so the route line isn't redrawn until the real next leg arrives.
 //
-function refuelingPlaceholder(trip) {
+function refuelingPlaceholder(trip, status) {
 
     const vehicle = vehiclesById.get(trip.vehicle_id);
     const detourMiles = trip.distance_miles + (trip.remaining_miles || 0);
+    const refueled = status === "REFUELING";
 
     return {
         ...trip,
-        status: "REFUELING",
+        status,
         refuelingSince: Date.now(),
         position: trip.route[trip.route.length - 1],
         speed_mph: 0,
         distance_miles: 0,
         remaining_miles: null,
         trip_meter_miles: (trip.trip_meter_miles ?? trip.distance_miles) - trip.distance_miles + detourMiles,
-        fuel_gallons_remaining: vehicle && vehicle.vehicle_model
+        fuel_gallons_remaining: refueled && vehicle && vehicle.vehicle_model
             ? vehicle.vehicle_model.fuel_tank_gallons
             : trip.fuel_gallons_remaining
     };
