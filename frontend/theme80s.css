@@ -654,6 +654,13 @@ body {
     border-bottom-color: var(--neon-line);
 }
 
+.budget-table-wrap,
+.models-sheet,
+.model-editor-fields,
+.model-editor-controls {
+    scrollbar-color: var(--neon-pink) var(--neon-panel);
+}
+
 .budget-table tbody tr:hover {
     background: rgba(45, 226, 230, 0.06);
 }

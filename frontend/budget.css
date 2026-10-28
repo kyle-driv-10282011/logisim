@@ -183,3 +183,33 @@
     color: white;
     background: #3388ff;
 }
+
+/*
+ * Full screen, like the vehicle model editor: header and filters stay put
+ * at the top, and the table (with its status line and "Load older") fills
+ * the rest and scrolls on its own under its sticky column headings.
+ */
+#budget-page {
+    padding: 0;
+    overflow: hidden;
+}
+
+#budget-page .budget-sheet {
+    display: flex;
+    flex-direction: column;
+    width: 100vw;
+    max-width: none;
+    height: 100vh;
+    align-self: stretch;
+    border-radius: 0;
+}
+
+#budget-page .budget-table-wrap {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+}
+
+#budget-page .budget-table th {
+    z-index: 1;
+}
