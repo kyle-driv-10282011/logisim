@@ -5064,7 +5064,60 @@ def delete_vehicle_model(id: int, _admin: None = Depends(require_admin)):
         conn.close()
         raise HTTPException(status_code=409, detail="The starter van can't be deleted - every new file starts with one")
 
+    #
+    # Only vehicles still in someone's fleet hold a model back - named by
+    # save file, since the model is shared by all four and the admin may
+    # be looking at a different one.
+    #
+    cur.execute(
+        """
+        SELECT s.id, s.name, COUNT(*)
+        FROM vehicles v
+        JOIN save_slots s ON s.id = v.slot_id
+        WHERE v.vehicle_model_id = %s AND NOT v.sold
+        GROUP BY s.id, s.name
+        ORDER BY s.id
+        """,
+        (id,)
+    )
+
+    in_use = cur.fetchall()
+
+    if in_use:
+        cur.close()
+        conn.close()
+        raise HTTPException(
+            status_code=409,
+            detail="Still in use by " + ", ".join(
+                f"{count} vehicle{'' if count == 1 else 's'} in File {slot_id} ({name})"
+                for slot_id, name, count in in_use
+            ) + " - sell them first"
+        )
+
     try:
+
+        #
+        # Selling keeps a vehicle's row (sold = TRUE) as history, and that
+        # row still points at its model - so a model whose vehicles have all
+        # been sold couldn't be deleted. Those rows go with it: nothing shows
+        # sold vehicles, and the Budget keeps each vehicle's name on its own
+        # ledger rows (ledger.vehicle_id just goes NULL). Their trips cascade,
+        # and the paths and places only they used are forgotten.
+        #
+        cur.execute(
+            "SELECT DISTINCT t.path_id FROM trips t JOIN vehicles v ON v.id = t.vehicle_id WHERE v.vehicle_model_id = %s",
+            (id,)
+        )
+        sold_path_ids = [path_row[0] for path_row in cur.fetchall()]
+
+        cur.execute(
+            "DELETE FROM vehicles WHERE vehicle_model_id = %s AND sold RETURNING place_id",
+            (id,)
+        )
+        sold_place_ids = [place_row[0] for place_row in cur.fetchall()]
+
+        forget_unused_paths(cur, sold_path_ids)
+        forget_unused_places(cur, sold_place_ids)
 
         cur.execute(
             "DELETE FROM vehicle_models WHERE id=%s RETURNING id",
