@@ -11,7 +11,7 @@
     <link rel="stylesheet" href="styles.css">
     <link rel="stylesheet" href="fileselect.css">
     <link rel="stylesheet" href="budget.css">
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Share+Tech+Mono&display=swap">
 
     <style>
         #app {
@@ -321,6 +321,14 @@
             border-bottom: none;
         }
 
+        /* Between the user tabs and the locked admin tabs below them. */
+        .tab-menu-separator {
+            flex: none;
+            height: 0;
+            margin-top: -1px;
+            border-top: 2px solid #c8c8c8;
+        }
+
         .tab-button:hover {
             background: #f5f5f5;
         }
@@ -443,11 +451,9 @@
 
         /*
          * Admin-only UI (admin.js): .admin-only shows only while unlocked,
-         * .admin-locked-only only while locked, and an admin tab's lock
-         * icon only while locked.
+         * and an admin tab's lock icon only while locked.
          */
         body:not(.admin) .admin-only,
-        body.admin .admin-locked-only,
         body.admin .admin-lock {
             display: none !important;
         }
@@ -826,6 +832,9 @@
             color: #333;
         }
     </style>
+
+    <!-- After the block above, so the 80s theme wins where both set something. -->
+    <link rel="stylesheet" href="theme80s.css">
 </head>
 
 <body>
@@ -963,12 +972,14 @@
             <span class="tab-menu-arrow">&#9662;</span>
         </button>
         <div class="tab-menu-list" id="tab-menu-list">
-            <button class="tab-button admin-tab" id="tab-button-vehiclemodels" onclick="openAdminTab('vehiclemodels')">Vehicle Models <span class="admin-lock" title="Admin only - asks for the password">&#128274;</span></button>
             <button class="tab-button active" id="tab-button-myvehicles" onclick="withSpinner(this, () => showTab('myvehicles'))">My Vehicles</button>
-            <button class="tab-button admin-tab" id="tab-button-gasprices" onclick="openAdminTab('gasprices')">Gas Prices <span class="admin-lock" title="Admin only - asks for the password">&#128274;</span></button>
-            <button class="tab-button admin-tab" id="tab-button-jobs" onclick="openAdminTab('jobs')">Background Jobs <span class="admin-lock" title="Admin only - asks for the password">&#128274;</span></button>
             <button class="tab-button" id="tab-button-config" onclick="withSpinner(this, () => showTab('config'))">Config</button>
             <button class="tab-button" id="tab-button-budget" onclick="openBudgetPage()">Budget</button>
+            <!-- Admin-only (admin.js): asks for the password when opened. -->
+            <div class="tab-menu-separator" role="separator"></div>
+            <button class="tab-button admin-tab" id="tab-button-vehiclemodels" onclick="openAdminTab('vehiclemodels')">Vehicle Models <span class="admin-lock" title="Admin only - asks for the password">&#128274;</span></button>
+            <button class="tab-button admin-tab" id="tab-button-gasprices" onclick="openAdminTab('gasprices')">Gas Prices <span class="admin-lock" title="Admin only - asks for the password">&#128274;</span></button>
+            <button class="tab-button admin-tab" id="tab-button-jobs" onclick="openAdminTab('jobs')">Background Jobs <span class="admin-lock" title="Admin only - asks for the password">&#128274;</span></button>
         </div>
     </div>
 
@@ -1008,6 +1019,19 @@
             <input autocomplete="off" id="vehicle-model-image" placeholder="Image filename (frontend/images/...)" value="2026-Chevy-Express.png">
 
             <button onclick="withSpinner(this, addVehicleModel)">Add Vehicle Model</button>
+        </div>
+
+        <div class="panel-form">
+            <span class="config-label"><b>Vehicle models backup</b></span>
+            <a class="config-button" data-admin-href="/api/vehicle-models/export" download>Export all vehicle models (CSV)</a>
+            <label for="vehicle-model-file-input" class="config-hint">Restore from an export (models with the same year, brand and model are updated, not duplicated):</label>
+            <input id="vehicle-model-file-input" type="file" accept=".csv,text/csv">
+            <button onclick="withSpinner(this, uploadVehicleModels)">Import vehicle models</button>
+            <div id="vehicle-model-upload-result" class="form-result"></div>
+            <div class="config-hint">
+                Shared by all save files. Only each model's image filename is exported - the pictures
+                themselves live in frontend/images/.
+            </div>
         </div>
 
     </div>
@@ -1056,10 +1080,21 @@
         </div>
 
         <div class="panel-form">
-            <label for="gasprice-file-input" style="font-size:11px;color:#555;">Bulk import from CSV/JSON (columns/keys: description or address, price_per_gallon or price, brand or name. CSV header row is optional - if omitted, columns are read in that order. Or use a "city" column instead of description/address to add every real gas station found in that city at the given price - requires a header row. A file from Config &rarr; Export all gas stations restores as-is: rows with lat/lng columns skip the address lookup)</label>
+            <label for="gasprice-file-input" style="font-size:11px;color:#555;">Bulk import from CSV/JSON (columns/keys: description or address, price_per_gallon or price, brand or name. CSV header row is optional - if omitted, columns are read in that order. Or use a "city" column instead of description/address to add every real gas station found in that city at the given price - requires a header row. A file from Export all gas stations below restores as-is: rows with lat/lng columns skip the address lookup)</label>
             <input id="gasprice-file-input" type="file" accept=".csv,.json,application/json,text/csv">
             <button onclick="withSpinner(this, uploadGasPrices)">Upload</button>
             <div id="gasprice-upload-result" style="font-size:11px;color:#555;"></div>
+        </div>
+
+        <div class="panel-form">
+            <span class="config-label"><b>Gas stations backup</b></span>
+            <a class="config-button" data-admin-href="/api/gas-prices/export" download>Export all gas stations (CSV)</a>
+            <div class="config-hint">
+                Downloads every gas station - name, brand, price and exact location - as one CSV file.
+                Shared by all save files. To restore it, upload the file with Bulk import above:
+                stations come back at their saved locations with no address lookups, so even tens of
+                thousands reload in minutes.
+            </div>
         </div>
 
     </div>
@@ -1085,36 +1120,6 @@
                 When the map and vehicle list update on their own. The &#128225; badge on the map
                 pauses or resumes this - it only ever switches between off and the setting here.
                 While off (paused, or set to Never), it still refreshes every 20 minutes.
-            </div>
-        </div>
-
-        <div class="panel-form admin-locked-only">
-            <span class="config-label"><b>Gas stations &amp; vehicle models backups</b></span>
-            <button onclick="unlockConfigBackups()">&#128274; Unlock backups</button>
-            <div class="config-hint">Admin only - asks for the admin password.</div>
-        </div>
-
-        <div class="panel-form admin-only">
-            <span class="config-label"><b>Gas stations backup</b></span>
-            <a class="config-button" data-admin-href="/api/gas-prices/export" download>Export all gas stations (CSV)</a>
-            <div class="config-hint">
-                Downloads every gas station - name, brand, price and exact location - as one CSV file.
-                Shared by all save files. To restore it, upload the file under Gas Prices &rarr; Bulk import:
-                stations come back at their saved locations with no address lookups, so even tens of
-                thousands reload in minutes.
-            </div>
-        </div>
-
-        <div class="panel-form admin-only">
-            <span class="config-label"><b>Vehicle models backup</b></span>
-            <a class="config-button" data-admin-href="/api/vehicle-models/export" download>Export all vehicle models (CSV)</a>
-            <label for="vehicle-model-file-input" class="config-hint">Restore from an export (models with the same year, brand and model are updated, not duplicated):</label>
-            <input id="vehicle-model-file-input" type="file" accept=".csv,text/csv">
-            <button onclick="withSpinner(this, uploadVehicleModels)">Import vehicle models</button>
-            <div id="vehicle-model-upload-result" class="form-result"></div>
-            <div class="config-hint">
-                Shared by all save files. Only each model's image filename is exported - the pictures
-                themselves live in frontend/images/.
             </div>
         </div>
 

@@ -230,7 +230,7 @@ async function setTimeMultiplier() {
     updateSimClock();
 }
 
-const tripLayers = new Map();      // vehicle_id -> { marker, routeLine, tripId }
+const tripLayers = new Map();      // vehicle_id -> { marker, routeGlow, routeLine, tripId }
 let vehicleModelsById = new Map();         // vehicle_model_id -> vehicle model (from GET /api/vehicle-models)
 let vehiclesById = new Map();      // vehicle_id -> vehicle - current fleet, not sold (from GET /api/vehicles)
 let activeTripsById = new Map();   // vehicle_id -> trip (from the last poll)
@@ -260,7 +260,11 @@ let gasPriceOverlayVisible = false; // toggled by the gas pump icon floating ove
 // Create the map
 map = L.map("map", { preferCanvas: true }).setView([44.977, -93.265], 6);
 
-// Add OpenStreetMap tiles
+//
+// OpenStreetMap tiles, turned into a dark neon map by theme80s.css (an
+// inverted, violet-tinted filter on the tile pane) - routes and markers
+// glow on top of it.
+//
 L.tileLayer(
     "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
     {
@@ -268,6 +272,25 @@ L.tileLayer(
         attribution: "&copy; OpenStreetMap contributors"
     }
 ).addTo(map);
+
+//
+// A driving vehicle's marker: a pulsing neon dot (.neon-vehicle-marker in
+// theme80s.css) instead of Leaflet's default blue pin.
+//
+const vehicleMarkerIcon = L.divIcon({
+    className: "",
+    html: '<div class="neon-vehicle-marker"></div>',
+    iconSize: [18, 18],
+    iconAnchor: [9, 9],
+    tooltipAnchor: [0, -2]
+});
+
+//
+// Route lines: a wide faint pink glow under a bright core, since a canvas
+// path can't take a CSS glow.
+//
+const ROUTE_GLOW_STYLE = { color: "#ff4fd8", weight: 12, opacity: 0.25 };
+const ROUTE_CORE_STYLE = { color: "#ff4fd8", weight: 4, opacity: 0.95 };
 
 
 //
@@ -282,9 +305,9 @@ function showRestingVehicleMarker(vehicle) {
     restingVehicleMarker = L.circleMarker([vehicle.current_lat, vehicle.current_lng], {
 
         radius: 8,
-        color: "#3388ff",
-        weight: 2,
-        fillColor: "#3388ff",
+        color: "#fff1a8",
+        weight: 3,
+        fillColor: "#2de2e6",
         fillOpacity: 1
 
     }).addTo(map);
@@ -2425,15 +2448,10 @@ async function pollActiveTrips() {
 
         if (!layer) {
 
-            const routeLine = L.polyline(journeyRoute, {
+            const routeGlow = L.polyline(journeyRoute, { ...ROUTE_GLOW_STYLE, interactive: false }).addTo(map);
+            const routeLine = L.polyline(journeyRoute, ROUTE_CORE_STYLE).addTo(map);
 
-                color: "blue",
-
-                weight: 5
-
-            }).addTo(map);
-
-            const marker = L.marker(trip.position).addTo(map);
+            const marker = L.marker(trip.position, { icon: vehicleMarkerIcon }).addTo(map);
 
             marker.bindTooltip(
                 "", { permanent: true, direction: "top", offset: [0, -10] }
@@ -2441,7 +2459,7 @@ async function pollActiveTrips() {
 
             marker.on("click", () => selectVehicle(trip.vehicle_id));
 
-            layer = { marker, routeLine, tripId: trip.trip_id };
+            layer = { marker, routeGlow, routeLine, tripId: trip.trip_id };
 
             tripLayers.set(trip.vehicle_id, layer);
         }
@@ -2453,6 +2471,7 @@ async function pollActiveTrips() {
         // drawn for.
         //
         if (layer.tripId !== trip.trip_id) {
+            layer.routeGlow.setLatLngs(journeyRoute);
             layer.routeLine.setLatLngs(journeyRoute);
             layer.tripId = trip.trip_id;
         }
@@ -2488,6 +2507,7 @@ async function pollActiveTrips() {
         if (!seen.has(vehicleId)) {
 
             map.removeLayer(layer.marker);
+            map.removeLayer(layer.routeGlow);
             map.removeLayer(layer.routeLine);
 
             tripLayers.delete(vehicleId);

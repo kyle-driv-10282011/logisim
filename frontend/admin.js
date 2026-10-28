@@ -6,9 +6,9 @@
 // token from POST /api/admin/elevate, which apiFetch() sends along as
 // X-Admin-Token.
 //
-// Admin is scoped to the one area that was unlocked: the admin tabs
-// (Vehicle Models, Gas Prices, Background Jobs) and Config's backups stay
-// listed with a lock (.admin-locked, see index.html), ask for the password
+// Admin is scoped to the one tab that was unlocked: the admin tabs
+// (Vehicle Models, Gas Prices, Background Jobs, each with its own backup
+// and restore) stay listed with a lock (.admin-locked, see index.html), ask for the password
 // when opened, and lock again as soon as another tab is shown (showTab()
 // calls relockAdminUnless()). The token is only kept in memory, so a
 // reload locks everything too.
@@ -117,22 +117,6 @@ function openAdminTab(tab) {
             setAdminSession({ token, expires }, tab);
             showTab(tab);
         }
-    });
-}
-
-
-//
-// Config's backups (export/import): unlocked in place - Config itself is
-// for everyone - until Config is left.
-//
-function unlockConfigBackups() {
-
-    openAdminPrompt({
-        title: "Unlock backups",
-        hint: "Exporting and importing gas stations and vehicle models is admin only. " +
-            "It locks again when you leave Config.",
-        submitLabel: "Unlock",
-        onToken: (token, expires) => setAdminSession({ token, expires }, "config")
     });
 }
 

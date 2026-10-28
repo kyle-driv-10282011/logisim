@@ -1,0 +1,689 @@
+/*
+ * The game screen's 80s look, matching the file-select screen and the intro
+ * splash: deep violet panels, neon pink and cyan edges, a dark map (the
+ * OpenStreetMap tiles inverted and tinted below), Press Start 2P for headings, the menu,
+ * buttons and badges, and Share Tech Mono for running text so the dense
+ * panels stay readable. Loaded after index.html's own <style> block, so
+ * these win wherever both set the same thing.
+ */
+
+:root {
+    --neon-bg: #0b0220;
+    --neon-panel: #1a0633;
+    --neon-panel-2: #24094a;
+    --neon-raised: #2d0b52;
+    --neon-line: #4a1d7a;
+    --neon-pink: #ff4fd8;
+    --neon-cyan: #2de2e6;
+    --neon-yellow: #ffd23f;
+    --neon-cream: #fff1a8;
+    --neon-text: #f4e9ff;
+    --neon-muted: #b9a6d9;
+    --neon-green: #39ff9a;
+    --neon-red: #ff4d6d;
+    --neon-orange: #ff9a3c;
+    --pixel-font: "Press Start 2P", "Courier New", monospace;
+    --mono-font: "Share Tech Mono", "Courier New", monospace;
+}
+
+body {
+    font-family: var(--mono-font);
+    color: var(--neon-text);
+    background: var(--neon-bg);
+}
+
+/* ---------- Side panel ---------- */
+
+#vehicle-panel {
+    color: var(--neon-text);
+    background:
+        repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.14) 0 2px, transparent 2px 4px),
+        linear-gradient(180deg, #1d0838 0%, #12002b 100%);
+    border-left: 2px solid var(--neon-pink);
+    box-shadow: -4px 0 18px rgba(255, 79, 216, 0.25);
+    scrollbar-color: var(--neon-pink) var(--neon-panel);
+}
+
+#vehicle-panel b,
+#vehicle-panel label b,
+.config-label b {
+    font-family: var(--pixel-font);
+    font-size: 10px;
+    font-weight: normal;
+    letter-spacing: 1px;
+    color: var(--neon-yellow);
+    text-shadow: 2px 2px 0 #b3361b;
+}
+
+.config-label,
+#tab-vehiclemodels label,
+#vehicle-panel label {
+    color: var(--neon-muted);
+}
+
+.config-hint,
+.list-item-details,
+.vehicle-card-location,
+.fuel-gauge-label,
+#gasprice-legend,
+#refresh-interval-ticks,
+#time-multiplier-control,
+#auto-refuel-control,
+#vehicle-panel [style*="color:#555"] {
+    color: var(--neon-muted) !important;
+}
+
+/* Inputs, selects and plain buttons everywhere on the game screen. */
+#vehicle-panel input,
+#vehicle-panel select,
+#sim-clock input,
+.budget-page select,
+.admin-dialog-box input {
+    font-family: var(--mono-font);
+    font-size: 13px;
+    color: var(--neon-cream);
+    background: #05011a;
+    border: 1px solid var(--neon-line);
+    border-radius: 3px;
+    padding: 4px 6px;
+    outline: none;
+}
+
+#vehicle-panel input:focus,
+#vehicle-panel select:focus,
+#sim-clock input:focus,
+.budget-page select:focus,
+.admin-dialog-box input:focus {
+    border-color: var(--neon-cyan);
+    box-shadow: 0 0 6px rgba(45, 226, 230, 0.6);
+}
+
+#vehicle-panel input::placeholder,
+.admin-dialog-box input::placeholder {
+    color: #7a6a99;
+}
+
+#vehicle-panel input[type="file"] {
+    padding: 3px;
+    color: var(--neon-muted);
+}
+
+#vehicle-panel input[type="range"] {
+    padding: 0;
+    border: none;
+    background: transparent;
+    accent-color: var(--neon-pink);
+}
+
+#auto-refuel-control input {
+    accent-color: var(--neon-pink);
+}
+
+#vehicle-panel button,
+#sim-clock button:not(.current-file),
+#vehicle-overlay button:not(.vehicle-overlay-close),
+.budget-page button:not(.budget-close),
+.admin-dialog-actions button,
+.config-button {
+    font-family: var(--pixel-font);
+    font-size: 9px;
+    line-height: 1.4;
+    letter-spacing: 1px;
+    padding: 7px 10px;
+    color: var(--neon-cream);
+    background: linear-gradient(180deg, #3b1670 0%, #2a0d55 100%);
+    border: 2px solid var(--neon-pink);
+    border-radius: 4px;
+    box-shadow: 0 3px 0 #0b0220, 0 0 8px rgba(255, 79, 216, 0.35);
+    cursor: pointer;
+    text-decoration: none;
+}
+
+#vehicle-panel button:hover:not(:disabled),
+#sim-clock button:not(.current-file):hover:not(:disabled),
+#vehicle-overlay button:not(.vehicle-overlay-close):hover:not(:disabled),
+.budget-page button:not(.budget-close):hover:not(:disabled),
+.admin-dialog-actions button:hover,
+.config-button:hover {
+    background: linear-gradient(180deg, #5a1f9e 0%, #3b1670 100%);
+    box-shadow: 0 3px 0 #0b0220, 0 0 14px rgba(255, 79, 216, 0.7);
+}
+
+#vehicle-panel button:active:not(:disabled),
+.admin-dialog-actions button:active {
+    transform: translateY(2px);
+    box-shadow: 0 1px 0 #0b0220, 0 0 8px rgba(255, 79, 216, 0.35);
+}
+
+#vehicle-panel button:disabled,
+#sim-clock button:disabled,
+#vehicle-overlay button:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+#sim-clock #time-multiplier-control button {
+    padding: 4px 6px;
+    font-size: 8px;
+}
+
+.sell-button,
+.refuel-button,
+.remove-gasprice-button,
+.remove-vehicle-model-button {
+    padding: 5px 7px !important;
+    font-size: 8px !important;
+}
+
+.sell-button,
+.remove-gasprice-button,
+.remove-vehicle-model-button {
+    border-color: var(--neon-red) !important;
+    box-shadow: 0 3px 0 #0b0220, 0 0 8px rgba(255, 77, 109, 0.35) !important;
+}
+
+.config-button {
+    display: block;
+    text-align: center;
+}
+
+/* ---------- Tab menu ---------- */
+
+#vehicle-panel .tab-menu-toggle {
+    font-family: var(--pixel-font);
+    font-size: 10px;
+    letter-spacing: 1px;
+    padding: 11px 10px;
+    color: var(--neon-cream) !important;
+    background: linear-gradient(180deg, var(--neon-pink) 0%, #8a2be2 100%) !important;
+    border: 2px solid var(--neon-cream) !important;
+    box-shadow: 0 0 14px rgba(255, 79, 216, 0.6) !important;
+    text-shadow: 0 0 6px var(--neon-pink);
+}
+
+.tab-menu-list {
+    background: var(--neon-panel);
+    border: 2px solid var(--neon-pink);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.6), 0 0 14px rgba(255, 79, 216, 0.4);
+}
+
+#vehicle-panel .tab-menu-list .tab-button {
+    font-family: var(--pixel-font);
+    font-size: 9px;
+    letter-spacing: 1px;
+    line-height: 1.6;
+    padding: 10px 12px;
+    color: var(--neon-text);
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--neon-line);
+    border-radius: 0;
+    box-shadow: none;
+    text-shadow: none;
+}
+
+#vehicle-panel .tab-menu-list .tab-button:hover {
+    color: var(--neon-cyan);
+    background: rgba(45, 226, 230, 0.08);
+    box-shadow: none;
+}
+
+#vehicle-panel .tab-menu-list .tab-button.active {
+    color: var(--neon-yellow);
+    background: rgba(255, 79, 216, 0.15);
+    font-weight: normal;
+}
+
+#vehicle-panel .tab-menu-list .tab-button.active::before {
+    content: "\25B6  ";
+    color: var(--neon-pink);
+}
+
+.tab-menu-separator {
+    border-top: 2px solid var(--neon-pink);
+    box-shadow: 0 0 6px var(--neon-pink);
+}
+
+/* ---------- Vehicle cards and lists ---------- */
+
+.vehicle-item {
+    color: var(--neon-text);
+    background: rgba(26, 6, 51, 0.85);
+    border: 1px solid var(--neon-line);
+    border-radius: 6px;
+}
+
+.vehicle-item:hover,
+.vehicle-row.clickable:hover {
+    background: var(--neon-panel-2);
+    border-color: var(--neon-cyan);
+}
+
+.vehicle-row:hover {
+    background: rgba(26, 6, 51, 0.85);
+}
+
+.vehicle-item.selected {
+    background: linear-gradient(180deg, rgba(255, 79, 216, 0.18), rgba(138, 43, 226, 0.18));
+    border-color: var(--neon-pink);
+    box-shadow: 0 0 12px rgba(255, 79, 216, 0.45);
+}
+
+.vehicle-card-name {
+    color: var(--neon-cream);
+}
+
+.vehicle-card-detail {
+    color: var(--neon-text);
+    border-top-color: var(--neon-line);
+}
+
+.list-item-thumb {
+    background: #05011a;
+    border: 1px solid var(--neon-line);
+}
+
+.list-loading {
+    color: var(--neon-muted);
+}
+
+.list-loading-error {
+    color: var(--neon-red);
+}
+
+.collapsible-header {
+    color: var(--neon-cream);
+    background: var(--neon-panel-2);
+    border: 1px solid var(--neon-line);
+}
+
+.collapsible-header:hover {
+    background: var(--neon-raised);
+    border-color: var(--neon-cyan);
+}
+
+.collapsible-arrow {
+    color: var(--neon-pink);
+}
+
+/* ---------- Badges ---------- */
+
+.status-badge,
+.gas-badge,
+.miles-badge,
+.fuel-badge,
+.rush-badge,
+.admin-indicator {
+    font-family: var(--pixel-font);
+    font-size: 7px;
+    font-weight: normal;
+    letter-spacing: 1px;
+    line-height: 1.4;
+    padding: 4px 6px;
+    border-radius: 3px;
+    color: #0b0220;
+}
+
+.status-READY {
+    color: var(--neon-text);
+    background: #5b4a7a;
+}
+
+.status-DRIVING {
+    background: var(--neon-green);
+    box-shadow: 0 0 8px rgba(57, 255, 154, 0.6);
+}
+
+.status-STRANDED {
+    color: white;
+    background: var(--neon-red);
+    box-shadow: 0 0 8px rgba(255, 77, 109, 0.7);
+}
+
+.status-REFUELING {
+    background: var(--neon-orange);
+    box-shadow: 0 0 8px rgba(255, 154, 60, 0.6);
+}
+
+.status-SOLD {
+    color: var(--neon-muted);
+    background: #3a2a55;
+}
+
+.gas-badge {
+    background: var(--neon-orange);
+}
+
+.miles-badge {
+    background: var(--neon-cyan);
+}
+
+.fuel-badge {
+    background: #7aa7ff;
+}
+
+.rush-badge {
+    color: white;
+    background: var(--neon-red);
+}
+
+.admin-indicator {
+    color: var(--neon-cream);
+    background: linear-gradient(180deg, var(--neon-pink), #8a2be2);
+    box-shadow: 0 0 8px rgba(255, 79, 216, 0.7);
+}
+
+.fuel-gauge-bar {
+    background: #05011a;
+    border: 1px solid var(--neon-line);
+    box-sizing: border-box;
+}
+
+/* ---------- Form results ---------- */
+
+.form-result.success {
+    color: var(--neon-green);
+    background: rgba(57, 255, 154, 0.08);
+    border-color: rgba(57, 255, 154, 0.5);
+}
+
+.form-result.error {
+    color: var(--neon-red);
+    background: rgba(255, 77, 109, 0.1);
+    border-color: rgba(255, 77, 109, 0.5);
+}
+
+.form-result.pending {
+    color: var(--neon-muted);
+}
+
+/* ---------- Clock box and map badges ---------- */
+
+#sim-clock {
+    color: var(--neon-text);
+    background: rgba(26, 6, 51, 0.92);
+    border: 2px solid var(--neon-pink);
+    border-radius: 6px;
+    box-shadow: 0 0 16px rgba(255, 79, 216, 0.45);
+}
+
+#sim-clock-text {
+    font-family: var(--pixel-font);
+    font-size: 9px;
+    line-height: 1.8;
+    color: var(--neon-cyan);
+    text-shadow: 0 0 6px rgba(45, 226, 230, 0.8);
+}
+
+.current-file {
+    font-family: var(--pixel-font);
+    font-size: 8px;
+    font-weight: normal;
+    letter-spacing: 1px;
+    padding: 4px 6px;
+    color: #12002b;
+    background: var(--neon-yellow);
+    border: none;
+    box-shadow: 0 0 8px rgba(255, 210, 63, 0.6);
+}
+
+.current-file:hover {
+    background: var(--neon-cream);
+}
+
+.balance-display {
+    font-family: var(--pixel-font);
+    font-size: 11px;
+    font-weight: normal;
+    margin: 6px 0 4px;
+    color: var(--neon-yellow);
+    text-shadow: 2px 2px 0 #b3361b;
+}
+
+.balance-display.negative {
+    color: var(--neon-red);
+    text-shadow: 2px 2px 0 #5a0016;
+}
+
+#time-multiplier-input {
+    width: 55px;
+}
+
+#gasprice-overlay-toggle,
+#live-updates-toggle {
+    background: rgba(26, 6, 51, 0.92);
+    border: 2px solid var(--neon-line);
+    box-shadow: 0 0 8px rgba(0, 0, 0, 0.6);
+}
+
+#gasprice-overlay-toggle.active,
+#live-updates-toggle.active {
+    background: rgba(26, 6, 51, 0.92);
+    border-color: var(--neon-green);
+    box-shadow: 0 0 12px rgba(57, 255, 154, 0.8);
+}
+
+/* ---------- Vehicle spotlight ---------- */
+
+#vehicle-overlay {
+    color: var(--neon-text);
+    background: rgba(18, 0, 43, 0.94);
+    border: 2px solid var(--neon-cyan);
+    border-radius: 8px;
+    box-shadow: 0 0 18px rgba(45, 226, 230, 0.45);
+    scrollbar-color: var(--neon-cyan) var(--neon-panel);
+}
+
+.vehicle-overlay-name {
+    font-family: var(--pixel-font);
+    font-size: 9px;
+    font-weight: normal;
+    color: var(--neon-cream);
+}
+
+.vehicle-overlay-toggle,
+.vehicle-overlay-close {
+    color: var(--neon-cyan) !important;
+}
+
+.dashboard {
+    border-color: var(--neon-pink);
+    box-shadow:
+        0 0 12px rgba(255, 79, 216, 0.35),
+        inset 0 0 0 1px #000,
+        inset 0 6px 14px rgba(0, 0, 0, 0.8);
+}
+
+.gauge-value,
+.odometer-digit {
+    color: var(--neon-cyan);
+    text-shadow: 0 0 6px rgba(45, 226, 230, 0.8);
+}
+
+/* ---------- Map ---------- */
+
+#map {
+    background: var(--neon-bg);
+}
+
+/*
+ * Inverting the light OpenStreetMap tiles makes them dark (water and land
+ * swap to deep tones, roads to light lines), and the hue-rotate/sepia/
+ * saturate pull everything toward violet so it sits in the palette.
+ * Leaflet's own stylesheet loads after this one, so the map rules below
+ * are scoped under #map to outrank it.
+ */
+#map .leaflet-tile-pane {
+    filter: invert(1) grayscale(0.4) sepia(0.5) hue-rotate(220deg) saturate(2.4) brightness(0.75) contrast(1.15);
+}
+
+#map .leaflet-bar a,
+#map .leaflet-bar a:hover {
+    color: var(--neon-cyan);
+    background: var(--neon-panel);
+    border-bottom-color: var(--neon-line);
+}
+
+#map .leaflet-bar {
+    border: 2px solid var(--neon-pink) !important;
+    box-shadow: 0 0 10px rgba(255, 79, 216, 0.45) !important;
+}
+
+#map .leaflet-control-attribution {
+    color: var(--neon-muted);
+    background: rgba(11, 2, 32, 0.75);
+}
+
+#map .leaflet-control-attribution a {
+    color: var(--neon-cyan);
+}
+
+#map .leaflet-tooltip {
+    font-family: var(--mono-font);
+    color: var(--neon-cream);
+    background: rgba(18, 0, 43, 0.92);
+    border: 1px solid var(--neon-pink);
+    box-shadow: 0 0 8px rgba(255, 79, 216, 0.5);
+}
+
+#map .leaflet-tooltip-top::before {
+    border-top-color: var(--neon-pink);
+}
+
+#map .leaflet-tooltip-bottom::before {
+    border-bottom-color: var(--neon-pink);
+}
+
+#map .leaflet-tooltip-left::before {
+    border-left-color: var(--neon-pink);
+}
+
+#map .leaflet-tooltip-right::before {
+    border-right-color: var(--neon-pink);
+}
+
+/* A driving vehicle's map marker (vehicleMarkerIcon in app.js). */
+.neon-vehicle-marker {
+    width: 18px;
+    height: 18px;
+    box-sizing: border-box;
+    border-radius: 50%;
+    background: var(--neon-cyan);
+    border: 3px solid var(--neon-cream);
+    box-shadow: 0 0 10px var(--neon-cyan), 0 0 22px rgba(45, 226, 230, 0.6);
+    animation: neon-marker-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes neon-marker-pulse {
+    50% { box-shadow: 0 0 16px var(--neon-cyan), 0 0 34px rgba(45, 226, 230, 0.8); }
+}
+
+/* ---------- Budget page ---------- */
+
+.budget-page {
+    background: rgba(11, 2, 32, 0.75);
+}
+
+.budget-sheet {
+    color: var(--neon-text);
+    background:
+        repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.14) 0 2px, transparent 2px 4px),
+        var(--neon-panel);
+    border: 2px solid var(--neon-pink);
+    box-shadow: 0 0 24px rgba(255, 79, 216, 0.45);
+}
+
+.budget-title {
+    font-family: var(--pixel-font);
+    font-size: 16px;
+    font-weight: normal;
+    letter-spacing: 2px;
+    color: var(--neon-yellow);
+    text-shadow: 3px 3px 0 #b3361b;
+}
+
+.budget-subtitle,
+.budget-filters label,
+.budget-status,
+.budget-detail {
+    color: var(--neon-muted);
+}
+
+#budget-balance {
+    font-family: var(--pixel-font);
+    font-size: 11px;
+    color: var(--neon-yellow);
+}
+
+#budget-balance.negative,
+.budget-balance-after.negative,
+.budget-amount.charge {
+    color: var(--neon-red);
+}
+
+.budget-amount.refund {
+    color: var(--neon-green);
+}
+
+.budget-close {
+    color: var(--neon-cyan);
+    background: transparent;
+    border: 2px solid var(--neon-cyan);
+    border-radius: 4px;
+}
+
+.budget-table th {
+    font-family: var(--pixel-font);
+    font-size: 8px;
+    letter-spacing: 1px;
+    color: var(--neon-cyan);
+    background: var(--neon-panel-2);
+    border-bottom: 2px solid var(--neon-pink);
+}
+
+.budget-table td {
+    border-bottom-color: var(--neon-line);
+}
+
+.budget-table tbody tr:hover {
+    background: rgba(45, 226, 230, 0.06);
+}
+
+/* ---------- Admin password prompt ---------- */
+
+.admin-dialog {
+    background: rgba(11, 2, 32, 0.75);
+}
+
+.admin-dialog-box {
+    font-family: var(--mono-font);
+    color: var(--neon-text);
+    background:
+        repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.14) 0 2px, transparent 2px 4px),
+        var(--neon-panel);
+    border: 2px solid var(--neon-pink);
+    box-shadow: 0 0 24px rgba(255, 79, 216, 0.5);
+}
+
+.admin-dialog-title {
+    font-family: var(--pixel-font);
+    font-size: 12px;
+    font-weight: normal;
+    line-height: 1.6;
+    color: var(--neon-yellow);
+    text-shadow: 2px 2px 0 #b3361b;
+}
+
+.admin-dialog-hint {
+    color: var(--neon-muted);
+}
+
+.admin-dialog-error {
+    color: var(--neon-red);
+}
+
+#admin-dialog-submit.danger {
+    color: white;
+    background: linear-gradient(180deg, #ff4d6d 0%, #a51d4a 100%);
+    border-color: var(--neon-cream);
+}

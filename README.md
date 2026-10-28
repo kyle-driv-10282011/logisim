@@ -60,8 +60,10 @@ delete, import, export), **Gas Prices** (add, delete, bulk import, export),
 **Background Jobs**, and erasing files. It isn't a login. Admin tabs are
 listed for everyone with a 🔒. Opening one asks for the instance's
 `ADMIN_PASSWORD` (set in `.env`), and switching to another tab locks it again.
-Config's backups unlock the same way, with **Unlock backups**, until you leave
-Config. Leave `ADMIN_PASSWORD` empty to turn admin off.
+Each admin tab has its own backup and restore at the bottom: **Export all
+vehicle models (CSV)** and **Import vehicle models** under Vehicle Models, and
+**Export all gas stations (CSV)** under Gas Prices, which restores through its
+**Bulk import**. Leave `ADMIN_PASSWORD` empty to turn admin off.
 
 **ERASE SELECTED FILE** on the file-select screen erases the file under the
 cursor. It asks for the admin password every time, as the confirmation. The
