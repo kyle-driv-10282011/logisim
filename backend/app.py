@@ -7631,7 +7631,8 @@ def _run_resume_trip_job(
 # drives to the delivery city and is paid on arrival, less if it's late.
 #
 # Cities come from data/us_cities.csv: every US city and town of 10,000+
-# people (Hawaii aside - no road there) from GeoNames' cities5000 list
+# people - less Hawaii and Juneau, AK, which no road reaches - from
+# GeoNames' cities5000 list
 # (CC BY 4.0, https://www.geonames.org), bundled so nothing is looked up
 # live. A load's pickup and delivery become places only once it's accepted
 # (ensure_city_place()), and the legs drive between them like any other
@@ -7682,6 +7683,17 @@ def miles_to_us_cities(lat, lng):
 
 LOAD_BOARD_RADIUS_MILES = 120
 LOAD_BOARD_TARGET = 8
+
+#
+# Somewhere remote (a refuel stop in the backcountry, a vehicle bought out
+# in the sticks, over the border), the board looks further out rather than
+# leaving the vehicle with nothing to do: each radius in turn until one has
+# work, and failing all of them the LOAD_NEAREST_CITIES nearest cities
+# anywhere (None). The long empty drive to the pickup is the price of being
+# out there - the deadline allows for it.
+#
+LOAD_SEARCH_RADII = (LOAD_BOARD_RADIUS_MILES, 250, 500, None)
+LOAD_NEAREST_CITIES = 10
 
 #
 # Roads aren't straight: the board's mileage estimates are the straight-line
@@ -7789,17 +7801,22 @@ def slot_game_time(cur, slot_id):
 
 #
 # Adds `count` new loads near (lat, lng) sized to fit `capacity` (see
-# load_capacity()): pickups in cities within the board's radius (bigger
-# cities more often), deliveries 30-700 miles on (bigger cities, and
-# medium-length runs, more often).
+# load_capacity()): pickups in cities within radius_miles (or the nearest
+# LOAD_NEAREST_CITIES anywhere, for None) - bigger cities more often -
+# and deliveries 30-700 miles on (bigger cities, and medium-length runs,
+# more often). Returns how many it made: none if there's no city in reach.
 #
-def generate_loads(cur, slot_id, lat, lng, game_now, capacity, count):
+def generate_loads(cur, slot_id, lat, lng, game_now, capacity, count, radius_miles=LOAD_BOARD_RADIUS_MILES):
 
     nearby = miles_to_us_cities(lat, lng)
-    pickup_candidates = np.flatnonzero(nearby <= LOAD_BOARD_RADIUS_MILES)
+
+    if radius_miles is None:
+        pickup_candidates = np.argsort(nearby)[:LOAD_NEAREST_CITIES]
+    else:
+        pickup_candidates = np.flatnonzero(nearby <= radius_miles)
 
     if not len(pickup_candidates):
-        pickup_candidates = np.argsort(nearby)[:5]
+        return 0
 
     cargo_choices = [
         cargo for cargo in LOAD_CARGO
@@ -7921,9 +7938,11 @@ def vehicle_position(cur, vehicle_id):
 
 #
 # The load board for one vehicle: available loads it can carry, picked up
-# within LOAD_BOARD_RADIUS_MILES of where it's parked - nearest pickup
-# first - with what each would mean for this vehicle: the empty miles to the
-# pickup and the time it would have to deliver if accepted now.
+# within LOAD_BOARD_RADIUS_MILES of where it's parked - or further out
+# (LOAD_SEARCH_RADII) if there's nothing that close - nearest pickup first,
+# with what each would mean for this vehicle: the empty miles to the pickup
+# and the time it would have to deliver if accepted now. search_radius_miles
+# says how far out it had to look.
 #
 @app.get("/api/vehicles/{id}/loads")
 def vehicle_load_board(id: int, slot: int = Depends(current_slot)):
@@ -7950,7 +7969,7 @@ def vehicle_load_board(id: int, slot: int = Depends(current_slot)):
             (slot, game_now)
         )
 
-        def board():
+        def board(radius_miles):
 
             cur.execute(
                 f"SELECT {LOAD_COLUMNS} FROM loads WHERE slot_id = %s AND status = 'available'",
@@ -7968,7 +7987,7 @@ def vehicle_load_board(id: int, slot: int = Depends(current_slot)):
 
                 pickup_miles = haversine_miles(lat, lng, load["origin_lat"], load["origin_lng"])
 
-                if pickup_miles > LOAD_BOARD_RADIUS_MILES:
+                if radius_miles is not None and pickup_miles > radius_miles:
                     continue
 
                 pickup_miles = 0.0 if pickup_miles <= LOAD_AT_PICKUP_MILES else pickup_miles * LOAD_ROAD_FACTOR
@@ -7983,17 +8002,41 @@ def vehicle_load_board(id: int, slot: int = Depends(current_slot)):
 
             return entries
 
-        entries = board()
+        #
+        # The nearest radius with any work in it - topped up to
+        # LOAD_BOARD_TARGET as it goes - wins. Its last step, "the nearest
+        # cities anywhere", still only lists pickups about that far out - not
+        # every load on the board, wherever the file's other vehicles are.
+        #
+        for radius_miles in LOAD_SEARCH_RADII:
 
-        if len(entries) < LOAD_BOARD_TARGET:
-            generate_loads(cur, slot, lat, lng, game_now, capacity, LOAD_BOARD_TARGET - len(entries))
-            entries = board()
+            board_radius = radius_miles
+
+            if board_radius is None:
+                nearest = np.sort(miles_to_us_cities(lat, lng))[LOAD_NEAREST_CITIES - 1]
+                board_radius = float(nearest) + 50
+
+            entries = board(board_radius)
+
+            if len(entries) < LOAD_BOARD_TARGET:
+                generate_loads(
+                    cur, slot, lat, lng, game_now, capacity, LOAD_BOARD_TARGET - len(entries), radius_miles
+                )
+                entries = board(board_radius)
+
+            if entries:
+                break
 
         conn.commit()
 
         entries.sort(key=lambda load: (load["pickup_miles"], -load["pay"]))
 
-        return {"location": location, "game_time": game_now.isoformat(), "loads": entries}
+        return {
+            "location": location,
+            "game_time": game_now.isoformat(),
+            "loads": entries,
+            "search_radius_miles": round(board_radius),
+        }
 
     finally:
         cur.close()

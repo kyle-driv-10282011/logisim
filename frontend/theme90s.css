@@ -728,6 +728,13 @@ body {
     color: #222;
 }
 
+.load-board-widened {
+    color: #000;
+    background: #ffffe1;
+    border: 1px solid #000;
+    border-radius: 0;
+}
+
 .load-row {
     background: var(--w95-face);
     border: none;

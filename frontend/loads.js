@@ -15,6 +15,12 @@ let loadBoard = { vehicleId: null, loads: [], location: "", status: "idle", erro
 
 let loadPreviewLayer = null;
 
+//
+// How far the board usually looks for pickups (LOAD_BOARD_RADIUS_MILES in
+// app.py) - further only when there's nothing that close.
+//
+const LOAD_BOARD_USUAL_RADIUS_MILES = 120;
+
 
 function renderLoadBoard() {
 
@@ -65,7 +71,19 @@ function renderLoadBoard() {
     } else if (!loadBoard.loads.length) {
         body = `<div class="load-board-empty">Nothing this vehicle can carry nearby right now - check back soon.</div>`;
     } else {
-        body = loadBoard.loads.map(loadRowHtml).join("");
+
+        //
+        // Out in the sticks the board looks further than its usual 120 mi
+        // (LOAD_SEARCH_RADII in app.py) - say so, since the drive to the
+        // pickup will be a long, unpaid one.
+        //
+        const nearest = loadBoard.loads[0].pickup_miles;
+        const widened = loadBoard.searchRadius > LOAD_BOARD_USUAL_RADIUS_MILES
+            ? `<div class="load-board-widened">Nothing within ${LOAD_BOARD_USUAL_RADIUS_MILES} mi - ` +
+              `the nearest work is about ${Math.round(nearest)} mi away (an unpaid drive).</div>`
+            : "";
+
+        body = widened + loadBoard.loads.map(loadRowHtml).join("");
     }
 
     container.innerHTML = header + body;
@@ -160,7 +178,10 @@ async function fetchLoadBoard(vehicleId) {
         if (!response.ok) {
             loadBoard = { ...loadBoard, status: "error", error: data.detail || "Couldn't load the board." };
         } else {
-            loadBoard = { vehicleId, loads: data.loads, location: data.location, status: "ready", error: "" };
+            loadBoard = {
+                vehicleId, loads: data.loads, location: data.location, status: "ready", error: "",
+                searchRadius: data.search_radius_miles
+            };
         }
 
     } catch (e) {

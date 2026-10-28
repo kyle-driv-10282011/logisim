@@ -158,14 +158,19 @@ with a summary of counts and total earnings (`GET /api/loads`). An
 available load can be accepted from here by any parked vehicle that fits
 it, wherever its pickup is. The deadline allows for the drive there.
 
-- **Cities:** every US city and town of 10,000+ people, Hawaii aside,
-  bundled in `backend/data/us_cities.csv` (4,297 rows). It's from
+- **Cities:** every US city and town of 10,000+ people, except Hawaii and
+  Juneau, AK, which no road reaches, bundled in
+  `backend/data/us_cities.csv` (4,296 rows). It's from
   [GeoNames](https://www.geonames.org)' `cities5000` list, licensed
   [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Nothing is
   looked up live. Bigger cities get more loads. A load's cities become
   places only when it's accepted.
 - **Board:** made on demand. Opening a vehicle's board
   (`GET /api/vehicles/{id}/loads`) tops it up to 8 loads that fit it.
+  Somewhere remote, it widens the search instead of coming up empty: 120
+  miles, then 250, then 500, then the 10 nearest cities anywhere
+  (`LOAD_SEARCH_RADII`). A note tells you the nearest work is far off, so
+  the unpaid drive there is the cost of being out there.
   Offers expire 8–36 game hours after they're posted. Each save file has
   its own board.
 - **Fit:** freight fits up to the model's cargo cu ft, and passengers up to

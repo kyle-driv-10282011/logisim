@@ -843,6 +843,12 @@ body {
     color: var(--neon-muted);
 }
 
+.load-board-widened {
+    color: var(--neon-orange);
+    background: rgba(255, 154, 60, 0.1);
+    border-color: rgba(255, 154, 60, 0.5);
+}
+
 .load-row {
     color: var(--neon-text);
     background: rgba(26, 6, 51, 0.85);

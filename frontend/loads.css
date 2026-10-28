@@ -30,6 +30,16 @@
     line-height: 1.2;
 }
 
+.load-board-widened {
+    margin-bottom: 8px;
+    padding: 6px 8px;
+    font-size: 11px;
+    color: #8a5a00;
+    background: #fff4e0;
+    border: 1px solid #f0c27a;
+    border-radius: 4px;
+}
+
 .load-board-empty {
     padding: 10px 2px;
     font-size: 12px;
