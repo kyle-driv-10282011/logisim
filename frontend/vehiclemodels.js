@@ -218,7 +218,8 @@ const MODEL_ENGINE_SELECTS = [
     ["model-field-turbo", "engine_turbo", (v) => (v ? v === "yes" : null), (v) => (v === null || v === undefined ? "" : v ? "yes" : "no")],
     ["model-field-fuel", "fuel_type", (v) => v || null, (v) => v || ""],
     ["model-field-transmission", "transmission", (v) => v || null, (v) => v || ""],
-    ["model-field-tires", "tire_count", (v) => (v ? Number(v) : null), (v) => (v ?? "")]
+    ["model-field-tires", "tire_count", (v) => (v ? Number(v) : null), (v) => (v ?? "")],
+    ["model-field-icon-front", "icon_front", (v) => v || "left", (v) => v || "left"]
 ];
 
 
@@ -258,7 +259,8 @@ const NEW_MODEL_DEFAULTS = {
     engine_turbo: null,
     fuel_type: null,
     transmission: null,
-    tire_count: 4
+    tire_count: 4,
+    icon_front: "left"
 };
 
 

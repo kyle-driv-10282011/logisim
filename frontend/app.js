@@ -333,6 +333,13 @@ function mapStyle() {
 }
 
 
+map.on("zoomend", () => {
+    for (const layer of tripLayers.values()) {
+        orientVehicleMarker(layer);
+    }
+});
+
+
 //
 // A driving vehicle's label (its name and ETA) only shows with the view's
 // own marker - a model's icon already shows which vehicle it is, and the
@@ -368,9 +375,14 @@ function vehicleMapIcon(vehicleId) {
         return mapStyle().vehicleIcon;
     }
 
+    //
+    // A wrapper with the picture inside, not a plain L.icon: Leaflet
+    // positions a marker by setting its element's transform, so the
+    // picture needs an element of its own to flip and tilt (orientVehicleMarker()).
+    //
     if (!modelMapIcons.has(url)) {
-        modelMapIcons.set(url, L.icon({
-            iconUrl: url,
+        modelMapIcons.set(url, L.divIcon({
+            html: `<img class="model-map-icon-img" src="${url}" alt="">`,
             iconSize: [48, 48],
             iconAnchor: [24, 24],
             tooltipAnchor: [0, -14],
@@ -379,6 +391,60 @@ function vehicleMapIcon(vehicleId) {
     }
 
     return modelMapIcons.get(url);
+}
+
+
+//
+// Faces a model icon the way its vehicle is driving: flipped so its front
+// leads (the model's icon_front says which way the front points in the
+// picture), and tilted with the road - up to MAX_ICON_TILT_DEGREES - so
+// it climbs or dips heading north or south but never ends up upside down.
+// The direction is the trip's heading (a short stretch of route around the
+// vehicle, from derive_position() in app.py), measured on screen so it
+// matches the map's projection. The view's own markers are left alone.
+//
+const MAX_ICON_TILT_DEGREES = 30;
+
+function orientVehicleMarker(layer) {
+
+    const element = layer.marker.getElement();
+    const picture = element && element.querySelector(".model-map-icon-img");
+    const trip = layer.trip;
+
+    if (!picture || !trip || !trip.heading) {
+        return;
+    }
+
+    const from = map.latLngToLayerPoint(trip.heading[0]);
+    const to = map.latLngToLayerPoint(trip.heading[1]);
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+
+    //
+    // Standing still on a single point (e.g. at the very start) - keep
+    // whatever way it was facing.
+    //
+    if (Math.abs(dx) < 0.01 && Math.abs(dy) < 0.01) {
+        return;
+    }
+
+    const vehicle = vehiclesById.get(trip.vehicle_id);
+    const embedded = vehicle && vehicle.vehicle_model;
+    const vehicleModel = embedded ? vehicleModelsById.get(embedded.id) || embedded : null;
+    const frontFacesRight = vehicleModel && vehicleModel.icon_front === "right";
+
+    const goingRight = dx >= 0;
+    const flip = goingRight !== frontFacesRight;
+
+    //
+    // The road's slope on screen (down is positive, as on screen), as the
+    // nose's tilt: clockwise when it's heading right and down, the other
+    // way when it's heading left and down.
+    //
+    const slope = Math.atan2(dy, Math.abs(dx)) * 180 / Math.PI;
+    const tilt = Math.max(-MAX_ICON_TILT_DEGREES, Math.min(MAX_ICON_TILT_DEGREES, slope)) * (goingRight ? 1 : -1);
+
+    picture.style.transform = `rotate(${tilt.toFixed(1)}deg)${flip ? " scaleX(-1)" : ""}`;
 }
 
 
@@ -753,7 +819,7 @@ async function loadVehicleModels() {
         const option = document.createElement("option");
 
         option.value = vehicleModel.id;
-        option.textContent = vehicleModelLabel(vehicleModel);
+        option.textContent = `${vehicleModelLabel(vehicleModel)} - ${formatDoubloons(vehicleModel.cost)}`;
 
         select.appendChild(option);
     }
@@ -1458,7 +1524,14 @@ function renderVehicleList() {
                   (refuelInFlightVehicleId === vehicle.id
                       ? `<button class="refuel-button" disabled>Refueling...</button>`
                       : `<button class="refuel-button" data-id="${vehicle.id}">Refuel</button>`) +
-                  `<button class="sell-button" data-id="${vehicle.id}">Sell</button>` +
+                  //
+                  // Not while a drive or refuel run for it is being set
+                  // up - it's about to be on a trip (the backend refuses
+                  // too, see vehicle_is_busy() in app.py).
+                  //
+                  (refuelInFlightVehicleId === vehicle.id || driveInFlightVehicleId === vehicle.id
+                      ? ""
+                      : `<button class="sell-button" data-id="${vehicle.id}">Sell</button>`) +
                   `</div>`
                 : "");
 
@@ -1564,7 +1637,15 @@ async function sellVehicle(vehicleId) {
 
     const vehicle = vehiclesById.get(vehicleId);
 
-    if (!confirm(`Sell ${vehicle ? vehicle.name : "this vehicle"}?`)) {
+    //
+    // Refunds what was paid for it - nothing for the inherited starter van.
+    //
+    const refund = vehicle ? vehicle.purchase_price : 0;
+
+    if (!confirm(
+        `Sell ${vehicle ? vehicle.name : "this vehicle"}?\n\n` +
+        (refund > 0 ? `You'll get back ${formatDoubloons(refund)}, what it was bought for.` : "It was free, so it sells for nothing.")
+    )) {
         return;
     }
 
@@ -1578,6 +1659,7 @@ async function sellVehicle(vehicleId) {
     }
 
     loadVehicles();
+    loadSettings();
 }
 
 
@@ -1632,6 +1714,12 @@ function renderDriveForm() {
 }
 
 
+//
+// The vehicle a drive is being set up for (the job routing it hasn't
+// started its trip yet), so its card doesn't offer Sell meanwhile.
+//
+let driveInFlightVehicleId = null;
+
 async function driveToDestination() {
 
     const vehicleId = selectedTripVehicleId;
@@ -1639,6 +1727,20 @@ async function driveToDestination() {
     if (vehicleId === null) {
         return;
     }
+
+    driveInFlightVehicleId = vehicleId;
+    renderVehicleList();
+
+    try {
+        await driveVehicle(vehicleId);
+    } finally {
+        driveInFlightVehicleId = null;
+        renderVehicleList();
+    }
+}
+
+
+async function driveVehicle(vehicleId) {
 
     const input = document.getElementById("drive-destination");
 
@@ -2370,6 +2472,16 @@ async function addVehicle() {
         return;
     }
 
+    //
+    // Charged the model's price (create_vehicle() in app.py), refunded in
+    // full if it's sold.
+    //
+    const vehicleModel = vehicleModelsById.get(Number(vehicleModelId));
+
+    if (vehicleModel && !confirm(`Buy a ${vehicleModelLabel(vehicleModel)} for ${formatDoubloons(vehicleModel.cost)}?`)) {
+        return;
+    }
+
     const response = await apiFetch(API + "/api/vehicles", {
 
         method: "POST",
@@ -2398,6 +2510,7 @@ async function addVehicle() {
     }
 
     loadVehicles();
+    loadSettings();
 }
 
 
@@ -2498,6 +2611,8 @@ async function pollActiveTrips() {
         }
 
         layer.marker.setLatLng(trip.position);
+        layer.trip = trip;
+        orientVehicleMarker(layer);
 
         layer.marker.setTooltipContent(
             trip.status === "ARRIVED"
@@ -2921,6 +3036,8 @@ function restyleMap() {
             layer.marker.setIcon(icon);
             syncVehicleLabel(layer.marker);
         }
+
+        orientVehicleMarker(layer);
     }
 
     if (restingVehicleMarker) {

@@ -118,6 +118,14 @@ real destination. Every charge and refund is on the **Budget** page (tab
 menu → Budget, `GET /api/ledger`): vehicle, location, trip, cost and the
 balance after it. The balance can go negative; nothing is blocked yet.
 
+Vehicles cost money too. **Buy Vehicle** charges the model's price, and
+**Sell** refunds what was paid (`vehicles.purchase_price`). The inherited
+starter van was free, so it sells for nothing. Each vehicle also records
+its model's price when acquired (`list_price`), for depreciation later. A
+vehicle can only be sold while it's parked. It can't be sold while it's
+driving, stranded, mid-detour, between a refuel and the next leg, or while
+a drive or refuel run for it is still being set up (`vehicle_is_busy()`).
+
 Diesel costs more. Stations have a single price. A vehicle whose model's
 fuel type is **diesel** pays that price plus a markup at every fill-up,
 roadside refuels included. The markup starts at 18% and is set on the
@@ -986,7 +994,14 @@ side panel since they don't all fit as a row:
     with a transparent background, previewed on a light and a dark map.
 
   That icon becomes the map marker for the model's driving vehicles in
-  every view. Models without one keep the view's own marker. Icons are
+  every view, and it turns to face the way the vehicle is driving. It
+  flips so the front leads, east or west, and tilts up to 30° with the road
+  heading north or south, so it never ends up upside down. The editor's
+  **Front of the vehicle in its icon faces** setting (Left or Right,
+  `icon_front`) says which way the picture's front points. Direction comes
+  from the trip's `heading`: a 0.6-mile stretch of route around the
+  vehicle, computed in `derive_position()`. Models without an icon keep the
+  view's own marker. Icons are
   stored in `vehicle_model_icons` and served from
   `GET /api/vehicle-models/{id}/icon` (`PUT` and `DELETE` for admins).
 - **Places** — the saved-places bank (see [`places`](#places)). Add one

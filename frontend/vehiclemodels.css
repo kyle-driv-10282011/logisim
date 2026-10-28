@@ -616,9 +616,35 @@
     background: rgba(255, 255, 255, 0.85);
 }
 
-/* A model's own icon as a map marker (vehicleMapIcon() in app.js). */
+/*
+ * A model's own icon as a map marker (vehicleMapIcon() in app.js). The
+ * picture inside turns to face the way the vehicle's driving
+ * (orientVehicleMarker()), easing between turns.
+ */
 .model-map-icon {
     filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.55));
+}
+
+.model-map-icon-img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    transition: transform 0.4s ease;
+}
+
+.model-icon-front {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+}
+
+#model-editor .model-icon-front select {
+    width: auto;
+}
+
+.model-icon-front-note {
+    margin: 2px 0 10px;
 }
 
 /*

@@ -98,6 +98,10 @@ CREATE TABLE vehicle_models (
     -- 4, 6, 8, 10 or 18. Optional, like the engine specs.
     tire_count INTEGER,
 
+    -- Which way the vehicle's front points in its map icon, 'left' or
+    -- 'right', so the map can face it the way it's driving.
+    icon_front TEXT NOT NULL DEFAULT 'left',
+
     created TIMESTAMP DEFAULT NOW()
 );
 
@@ -268,6 +272,13 @@ CREATE TABLE vehicles (
     sold BOOLEAN NOT NULL DEFAULT FALSE,
     sold_at TIMESTAMP,
 
+    -- What it was bought for (its model's price; 0 for the inherited
+    -- starter van) - charged when it's added, refunded when it's sold.
+    purchase_price NUMERIC(14,2) NOT NULL DEFAULT 0,
+
+    -- Its model's price when it was acquired, for depreciation later.
+    list_price NUMERIC(14,2),
+
     created TIMESTAMP DEFAULT NOW()
 );
 
@@ -337,6 +348,10 @@ CREATE TABLE jobs (
     -- each file's Background Jobs tab shows its own; NULL for shared-world
     -- jobs (gas price uploads, place backfill), shown in every file.
     slot_id INTEGER REFERENCES save_slots(id) ON DELETE CASCADE,
+
+    -- The vehicle a trip-starting job (drive, refuel run, divert, resume) is
+    -- about to put on the road, so it reads as busy before its trip exists.
+    vehicle_id INTEGER,
 
     status TEXT NOT NULL DEFAULT 'pending', -- pending, running, done, error
 

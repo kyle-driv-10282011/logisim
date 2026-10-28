@@ -356,8 +356,9 @@ def ensure_starter_place(cur):
 
 
 #
-# A new file's first vehicle: the starter van, free (it was inherited),
-# parked at STARTER_PLACE with a full tank. Doesn't commit.
+# A new file's first vehicle: the starter van, free (it was inherited -
+# purchase_price 0, so selling it refunds nothing), parked at STARTER_PLACE
+# with a full tank. Doesn't commit.
 #
 def give_starter_vehicle(cur, slot_id):
 
@@ -373,10 +374,15 @@ def give_starter_vehicle(cur, slot_id):
 
     cur.execute(
         """
-        INSERT INTO vehicles (slot_id, name, vehicle_model_id, place_id, starting_mileage, fuel_gallons)
-        VALUES (%s, %s, %s, %s, %s, %s)
+        INSERT INTO vehicles (
+            slot_id, name, vehicle_model_id, place_id, starting_mileage, fuel_gallons, purchase_price, list_price
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, 0, (SELECT cost FROM vehicle_models WHERE id = %s))
         """,
-        (slot_id, f"{year} {brand} {model} 1", vehicle_model_id, place_id, STARTER_VEHICLE_MILEAGE, fuel_tank_gallons)
+        (
+            slot_id, f"{year} {brand} {model} 1", vehicle_model_id, place_id, STARTER_VEHICLE_MILEAGE,
+            fuel_tank_gallons, vehicle_model_id
+        )
     )
 
 
@@ -1032,7 +1038,8 @@ def settle_arrived_vehicles(conn, cur):
     # vehicle looked READY while actually driving.
     #
     resume_job_ids = [
-        create_job("resume_trip_after_refuel", cur=cur, slot_id=resume[-1]) for resume in pending_resumes
+        create_job("resume_trip_after_refuel", cur=cur, slot_id=resume[-1], vehicle_id=resume[0])
+        for resume in pending_resumes
     ]
 
     conn.commit()
@@ -1255,7 +1262,7 @@ def maybe_auto_divert_to_gas_station(conn, cur, vehicle_id, trip_id, progress):
 
     lat, lng = interpolate_position_at_distance(route, distances_miles, progress["distance_miles"])
 
-    job_id = create_job("auto_divert_to_gas_station", slot_id=vehicle_slot_id(cur, vehicle_id))
+    job_id = create_job("auto_divert_to_gas_station", slot_id=vehicle_slot_id(cur, vehicle_id), vehicle_id=vehicle_id)
 
     job_executor.submit(
         _run_auto_divert_job, job_id, vehicle_id, trip_id, lat, lng,
@@ -2073,6 +2080,12 @@ def interpolate_position_at_distance(route, distances_miles, target_distance_mil
 
 EARTH_RADIUS_MILES = 3958.7613
 
+#
+# How long a stretch of route a vehicle's map heading is taken across
+# (derive_position()).
+#
+HEADING_SPAN_MILES = 0.6
+
 
 def haversine_miles(lat1, lon1, lat2, lon2):
 
@@ -2507,6 +2520,20 @@ def derive_position(
 
     road_name = current_road_name(road_names, road_name_boundary_miles, progress["distance_miles"])
 
+    #
+    # Which way it's going: the route a little behind and ahead of it
+    # (HEADING_SPAN_MILES across), so the map can turn its icon - spanning a
+    # stretch rather than the one segment it's on smooths out tiny zigzags
+    # in the road geometry.
+    #
+    heading_from_miles = max(0.0, progress["distance_miles"] - HEADING_SPAN_MILES / 2)
+    heading_to_miles = min(distances_miles[-1], heading_from_miles + HEADING_SPAN_MILES)
+
+    heading = [
+        interpolate_position_at_distance(route, distances_miles, heading_from_miles),
+        interpolate_position_at_distance(route, distances_miles, heading_to_miles)
+    ]
+
     speed_mph = 0
 
     if progress["status"] == "DRIVING":
@@ -2533,6 +2560,8 @@ def derive_position(
     return {
 
         "position": position,
+
+        "heading": heading,
 
         "status": progress["status"],
 
@@ -2907,6 +2936,23 @@ def run_migrations():
     cur.execute("ALTER TABLE vehicle_models ADD COLUMN IF NOT EXISTS fuel_type TEXT")
     cur.execute("ALTER TABLE vehicle_models ADD COLUMN IF NOT EXISTS transmission TEXT")
     cur.execute("ALTER TABLE vehicle_models ADD COLUMN IF NOT EXISTS tire_count INTEGER")
+    cur.execute("ALTER TABLE vehicle_models ADD COLUMN IF NOT EXISTS icon_front TEXT NOT NULL DEFAULT 'left'")
+
+    #
+    # Buying and selling (create_vehicle(), sell_vehicle()). Vehicles from
+    # before were free, so they refund nothing; their list price is their
+    # model's price now. Jobs learn their vehicle (create_job()).
+    #
+    cur.execute("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS purchase_price NUMERIC(14,2) NOT NULL DEFAULT 0")
+    cur.execute("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS list_price NUMERIC(14,2)")
+    cur.execute(
+        """
+        UPDATE vehicles v SET list_price = vm.cost
+        FROM vehicle_models vm
+        WHERE vm.id = v.vehicle_model_id AND v.list_price IS NULL
+        """
+    )
+    cur.execute("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS vehicle_id INTEGER")
 
     cur.execute(
         """
@@ -3114,13 +3160,17 @@ def start_settle_ticker():
 # slot_id ties a vehicle job to its save file (see jobs.slot_id); None for a
 # shared-world job every file's Background Jobs tab shows.
 #
-def create_job(job_type, total=0, cur=None, slot_id=None):
+#
+# vehicle_id: the vehicle a trip-starting job is about to put on the road,
+# so it reads as busy (vehicle_is_busy()) before its trip row exists.
+#
+def create_job(job_type, total=0, cur=None, slot_id=None, vehicle_id=None):
 
     if cur is not None:
 
         cur.execute(
-            "INSERT INTO jobs (job_type, progress_total, slot_id) VALUES (%s, %s, %s) RETURNING id",
-            (job_type, total, slot_id)
+            "INSERT INTO jobs (job_type, progress_total, slot_id, vehicle_id) VALUES (%s, %s, %s, %s) RETURNING id",
+            (job_type, total, slot_id, vehicle_id)
         )
 
         return cur.fetchone()[0]
@@ -3129,8 +3179,8 @@ def create_job(job_type, total=0, cur=None, slot_id=None):
     cur = conn.cursor()
 
     cur.execute(
-        "INSERT INTO jobs (job_type, progress_total, slot_id) VALUES (%s, %s, %s) RETURNING id",
-        (job_type, total, slot_id)
+        "INSERT INTO jobs (job_type, progress_total, slot_id, vehicle_id) VALUES (%s, %s, %s, %s) RETURNING id",
+        (job_type, total, slot_id, vehicle_id)
     )
 
     job_id = cur.fetchone()[0]
@@ -3345,7 +3395,14 @@ def vehicle_model_dict(row):
         #
         "icon_url": f"api/vehicle-models/{row[0]}/icon?v={row[16][:12]}" if row[16] else None,
 
-        "tire_count": row[17]
+        "tire_count": row[17],
+
+        #
+        # Which way the vehicle's front points in its map icon ("left" or
+        # "right") - so the map can face it the way it's driving (flipped
+        # for the other way, tilted for north/south).
+        #
+        "icon_front": row[18]
     }
 
 
@@ -3354,7 +3411,7 @@ VEHICLE_MODEL_COLUMNS = """
     (SELECT i.sha256 FROM vehicle_model_images i WHERE i.vehicle_model_id = vehicle_models.id),
     engine_liters, engine_cylinders, engine_turbo, fuel_type, transmission,
     (SELECT c.sha256 FROM vehicle_model_icons c WHERE c.vehicle_model_id = vehicle_models.id),
-    tire_count
+    tire_count, icon_front
 """
 
 
@@ -3633,6 +3690,8 @@ ENGINE_COLUMNS = ("engine_liters", "engine_cylinders", "engine_turbo", "fuel_typ
 #
 TIRE_COUNTS = (4, 6, 8, 10, 18)
 
+ICON_FRONTS = ("left", "right")
+
 SPEC_COLUMNS = (*ENGINE_COLUMNS, "tire_count")
 
 
@@ -3653,6 +3712,9 @@ def validate_engine(req):
 
     if req.transmission is not None and req.transmission not in TRANSMISSIONS:
         raise HTTPException(status_code=400, detail=f"Transmission must be {' or '.join(TRANSMISSIONS)}")
+
+    if req.icon_front is not None and req.icon_front not in ICON_FRONTS:
+        raise HTTPException(status_code=400, detail="The icon's front must face left or right")
 
     if req.tire_count is not None and req.tire_count not in TIRE_COUNTS:
         raise HTTPException(status_code=400, detail=f"Tires must be one of {', '.join(map(str, TIRE_COUNTS))}")
@@ -3715,6 +3777,7 @@ class CreateVehicleModelRequest(BaseModel):
     fuel_type: Optional[str] = None
     transmission: Optional[str] = None
     tire_count: Optional[int] = None
+    icon_front: Optional[str] = None
 
 
 
@@ -4398,16 +4461,30 @@ def create_vehicle(req: CreateVehicleRequest, slot: int = Depends(current_slot))
     #
     fuel_gallons = vehicle_model["fuel_tank_gallons"]
 
+    #
+    # Bought at the model's price, charged now and recorded on the vehicle
+    # (purchase_price) - that's what selling it refunds. list_price is the
+    # model's price at the time, kept for depreciation later.
+    #
+    price = float(vehicle_model["cost"])
+
     cur.execute(
         """
-        INSERT INTO vehicles (slot_id, name, vehicle_model_id, place_id, starting_mileage, fuel_gallons)
-        VALUES (%s, %s, %s, %s, %s, %s)
+        INSERT INTO vehicles (
+            slot_id, name, vehicle_model_id, place_id, starting_mileage, fuel_gallons, purchase_price, list_price
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
-        (slot, name, req.vehicle_model_id, place_id, req.starting_mileage, fuel_gallons)
+        (slot, name, req.vehicle_model_id, place_id, req.starting_mileage, fuel_gallons, price, price)
     )
 
     vehicle_id = cur.fetchone()[0]
+
+    record_money(
+        cur, slot, -price, "vehicle_purchase", f"Bought {name}",
+        vehicle_id, name, fetch_places_by_id(cur, [place_id])[place_id]["description"]
+    )
 
     conn.commit()
 
@@ -4472,8 +4549,8 @@ def create_vehicle_model(req: CreateVehicleModelRequest, _admin: None = Depends(
         """
         INSERT INTO vehicle_models
         (year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, image, fuel_tank_gallons,
-         engine_liters, engine_cylinders, engine_turbo, fuel_type, transmission, tire_count)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+         engine_liters, engine_cylinders, engine_turbo, fuel_type, transmission, tire_count, icon_front)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
         (
@@ -4491,7 +4568,8 @@ def create_vehicle_model(req: CreateVehicleModelRequest, _admin: None = Depends(
             req.engine_turbo,
             req.fuel_type,
             req.transmission,
-            req.tire_count
+            req.tire_count,
+            req.icon_front or "left"
         )
     )
 
@@ -4542,14 +4620,14 @@ def update_vehicle_model(id: int, req: CreateVehicleModelRequest, _admin: None =
             SET year = %s, brand = %s, model = %s, person_capacity = %s, cargo_capacity_cuft = %s,
                 cost = %s, mpg = %s, image = %s, fuel_tank_gallons = %s,
                 engine_liters = %s, engine_cylinders = %s, engine_turbo = %s, fuel_type = %s, transmission = %s,
-                tire_count = %s
+                tire_count = %s, icon_front = COALESCE(%s, icon_front)
             WHERE id = %s
             """,
             (
                 req.year, req.brand.strip(), req.model.strip(), req.person_capacity, req.cargo_capacity_cuft,
                 req.cost, req.mpg, req.image or None, req.fuel_tank_gallons,
                 req.engine_liters, req.engine_cylinders, req.engine_turbo, req.fuel_type, req.transmission,
-                req.tire_count, id
+                req.tire_count, req.icon_front, id
             )
         )
 
@@ -5418,7 +5496,8 @@ def list_vehicles(include_sold: bool = False, slot: int = Depends(current_slot))
             END,
             COALESCE(ctm.miles, 0),
             latest_trip.destination_place_id IS NOT NULL
-                AND v.place_id IS DISTINCT FROM latest_trip.destination_place_id
+                AND v.place_id IS DISTINCT FROM latest_trip.destination_place_id,
+            v.purchase_price
         FROM vehicles v
         LEFT JOIN (
             SELECT t.vehicle_id, SUM(COALESCE(t.distance_miles, 0)) AS miles
@@ -5502,6 +5581,11 @@ def list_vehicles(include_sold: bool = False, slot: int = Depends(current_slot))
 
             "starting_mileage": row[4],
 
+            #
+            # What it was bought for - what selling it refunds.
+            #
+            "purchase_price": float(row[11]),
+
             "total_miles_traveled": row[4] + row[9],
 
             "sold": row[5],
@@ -5524,6 +5608,49 @@ def list_vehicles(include_sold: bool = False, slot: int = Depends(current_slot))
 
 
 
+#
+# On a trip in any sense, so it can't be sold out from under it: its latest
+# trip still has its route (a trip's path is only forgotten once it
+# arrives - see forget_unused_paths()), which covers driving, stranded and
+# mid-detour alike; or a job is about to start one (a drive, a refuel run,
+# a divert, the leg after a refuel) and its trip doesn't exist yet. Settle
+# first, so a trip that's just arrived counts as over.
+#
+def vehicle_is_busy(cur, vehicle_id):
+
+    cur.execute(
+        """
+        SELECT t.path_id IS NOT NULL
+        FROM trips t
+        WHERE t.vehicle_id = %s AND t.cancelled_at IS NULL
+        ORDER BY t.started_at DESC
+        LIMIT 1
+        """,
+        (vehicle_id,)
+    )
+
+    latest = cur.fetchone()
+
+    if latest is not None and latest[0]:
+        return True
+
+    cur.execute(
+        """
+        SELECT 1 FROM jobs
+        WHERE vehicle_id = %s AND status IN ('pending', 'running') AND job_type = ANY(%s)
+        LIMIT 1
+        """,
+        (vehicle_id, list(TRIP_STARTING_JOB_TYPES))
+    )
+
+    return cur.fetchone() is not None
+
+
+#
+# Refunds what was paid for it (purchase_price - nothing for the inherited
+# starter van). Depreciation can come later, from list_price and the
+# vehicle's age and miles.
+#
 @app.post("/api/vehicles/{id}/sell")
 def sell_vehicle(id: int, slot: int = Depends(current_slot)):
 
@@ -5531,6 +5658,8 @@ def sell_vehicle(id: int, slot: int = Depends(current_slot)):
 
     conn = db()
     cur = conn.cursor()
+
+    settle_arrived_vehicles(conn, cur)
 
     cur.execute("SELECT sold FROM vehicles WHERE id=%s", (id,))
 
@@ -5546,27 +5675,22 @@ def sell_vehicle(id: int, slot: int = Depends(current_slot)):
         conn.close()
         raise HTTPException(status_code=409, detail="Vehicle already sold")
 
-    time_multiplier, _ = get_settings(conn, cur, slot)
-
-    cur.execute(
-        """
-        SELECT 1
-        FROM trips t
-        WHERE t.vehicle_id = %s
-        AND t.cancelled_at IS NULL
-        AND (EXTRACT(EPOCH FROM (NOW() - t.started_at)) * %s - t.paused_seconds) < t.realized_duration_seconds
-        """,
-        (id, time_multiplier)
-    )
-
-    if cur.fetchone() is not None:
+    if vehicle_is_busy(cur, id):
         cur.close()
         conn.close()
-        raise HTTPException(status_code=409, detail="Vehicle is currently on a trip")
+        raise HTTPException(status_code=409, detail="Vehicle is on a trip - it can be sold once it's parked")
 
     cur.execute(
-        "UPDATE vehicles SET sold = TRUE, sold_at = NOW() WHERE id=%s",
+        "UPDATE vehicles SET sold = TRUE, sold_at = NOW() WHERE id=%s RETURNING name, purchase_price, place_id",
         (id,)
+    )
+
+    name, purchase_price, place_id = cur.fetchone()
+    refund = float(purchase_price)
+
+    record_money(
+        cur, slot, refund, "vehicle_sale", f"Sold {name}",
+        id, name, fetch_places_by_id(cur, [place_id])[place_id]["description"]
     )
 
     conn.commit()
@@ -5574,7 +5698,7 @@ def sell_vehicle(id: int, slot: int = Depends(current_slot)):
     cur.close()
     conn.close()
 
-    return {"id": id, "sold": True}
+    return {"id": id, "sold": True, "refund": refund}
 
 
 
@@ -5673,7 +5797,7 @@ def refuel_vehicle(id: int, slot: int = Depends(current_slot)):
     cur.close()
     conn.close()
 
-    job_id = create_job("drive_to_refuel", slot_id=slot)
+    job_id = create_job("drive_to_refuel", slot_id=slot, vehicle_id=id)
 
     job_executor.submit(_run_resume_trip_job, job_id, id, place_id, station["place_id"], True)
 
@@ -6019,7 +6143,7 @@ def divert_to_gas_station(id: int, req: DivertToGasStationRequest, slot: int = D
     cur.close()
     conn.close()
 
-    job_id = create_job("divert_to_gas_station", slot_id=slot)
+    job_id = create_job("divert_to_gas_station", slot_id=slot, vehicle_id=id)
 
     job_executor.submit(
         _run_divert_job, job_id, id, context["trip_id"], lat, lng,
@@ -7525,7 +7649,7 @@ def drive_vehicle(id: int, req: DriveRequest, slot: int = Depends(current_slot))
     if not destination:
         raise HTTPException(status_code=400, detail="Enter a destination")
 
-    job_id = create_job("drive_to_destination", slot_id=slot)
+    job_id = create_job("drive_to_destination", slot_id=slot, vehicle_id=id)
 
     job_executor.submit(_run_drive_job, job_id, id, destination)
 
