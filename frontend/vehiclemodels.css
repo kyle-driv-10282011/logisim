@@ -361,6 +361,74 @@
     pointer-events: none;
 }
 
+/* The eraser: a taller box, a scrolling stage (for zoom) and a brush-sized ring cursor. */
+.model-image-preview.erasing {
+    aspect-ratio: 4 / 3;
+}
+
+.erase-stage {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    overflow: auto;
+    cursor: none;
+    touch-action: none;
+    user-select: none;
+}
+
+.erase-surface {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 100%;
+    min-height: 100%;
+    width: max-content;
+    height: max-content;
+    padding: 4px;
+    box-sizing: border-box;
+}
+
+.erase-stage canvas {
+    display: block;
+    max-width: none;
+    max-height: none;
+    image-rendering: pixelated;
+}
+
+.erase-cursor {
+    position: absolute;
+    border: 1px solid #fff;
+    border-radius: 50%;
+    outline: 1px solid rgba(0, 0, 0, 0.7);
+    pointer-events: none;
+}
+
+.eraser-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+}
+
+.eraser-modes,
+.eraser-zooms {
+    display: inline-flex;
+    gap: 2px;
+}
+
+.eraser-modes button.active,
+.eraser-zooms button.active {
+    font-weight: bold;
+    outline: 2px solid #3388ff;
+}
+
+.eraser-size-value,
+.eraser-softness-value {
+    min-width: 42px;
+    font-size: 11px;
+    text-align: right;
+}
+
 .icon-stage {
     display: flex;
     align-items: center;

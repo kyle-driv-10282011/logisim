@@ -555,13 +555,13 @@ async function saveModelEditor() {
 }
 
 
-// ---------- Picture tools: crop, remove background, create icon ----------
+// ---------- Picture tools: crop, remove background, eraser, create icon ----------
 
 //
-// All three work on whatever the preview shows (editorPicture()) in a
+// They all work on whatever the preview shows (editorPicture()) in a
 // canvas, right here in the browser, so each can be adjusted and looked at
-// before it's applied. Crop and Remove background replace the pending
-// picture with their result (still only saved with the model); Create icon
+// before it's applied. Crop, Remove background and the eraser replace the
+// pending picture with their result (still only saved with the model); Create icon
 // makes the map icon from it. Every picture here is same-origin (a blob,
 // /api or images/), so the canvas can always be read back.
 //
@@ -686,6 +686,8 @@ async function openImageTool(tool) {
         startCrop();
     } else if (tool === "background") {
         startBackgroundRemoval();
+    } else if (tool === "erase") {
+        startEraser();
     } else {
         startIcon();
     }
@@ -703,7 +705,7 @@ function closeImageTool() {
 
     panel.style.display = "none";
     panel.innerHTML = "";
-    document.getElementById("model-image-preview").classList.remove("tool-open");
+    document.getElementById("model-image-preview").classList.remove("tool-open", "erasing");
 
     renderModelEditorPreview();
 }
@@ -1069,6 +1071,305 @@ function startIcon() {
         }
     );
 }
+
+
+// --- Eraser: paint transparency by hand, GIMP-style ---
+
+//
+// A brush over the picture: Erase clears what it passes over, Restore
+// paints the original back (GIMP's "anti-erase") - for tidying up after
+// Remove background, or outlining a vehicle by hand. Size is in the
+// picture's own pixels and Softness feathers the brush edge. Zoom makes
+// the stage scroll so an outline can be traced closely. Every stroke can be
+// undone (Undo, or Ctrl+Z); [ and ] change the size; holding Alt while
+// painting flips Erase and Restore for that stroke.
+//
+const ERASER_UNDO_LIMIT = 30;
+const ERASER_ZOOMS = [1, 2, 3, 4];
+
+
+function startEraser() {
+
+    const source = imageToCanvas(modelToolState.image);
+    const work = imageToCanvas(modelToolState.image);
+
+    Object.assign(modelToolState, {
+        source,
+        work,
+        undo: [],
+        mode: "erase",
+        size: Math.max(4, Math.round(Math.max(work.width, work.height) / 40)),
+        softness: 30,
+        zoom: 1
+    });
+
+    const preview = document.getElementById("model-image-preview");
+
+    preview.classList.add("erasing");
+    preview.innerHTML =
+        `<div class="erase-stage">` +
+        `<div class="erase-surface"></div>` +
+        `<div class="erase-cursor" hidden></div>` +
+        `</div>`;
+
+    const stage = preview.querySelector(".erase-stage");
+    const surface = stage.querySelector(".erase-surface");
+    const cursor = stage.querySelector(".erase-cursor");
+
+    surface.appendChild(work);
+
+    const panel = toolPanel(
+        `<div class="eraser-row">` +
+        `<div class="eraser-modes" role="group" aria-label="Brush">` +
+        `<button type="button" data-mode="erase" class="active">Erase</button>` +
+        `<button type="button" data-mode="restore">Restore</button>` +
+        `</div>` +
+        `<div class="eraser-zooms" role="group" aria-label="Zoom">` +
+        ERASER_ZOOMS.map((zoom) => `<button type="button" data-zoom="${zoom}"${zoom === 1 ? ' class="active"' : ""}>${zoom}×</button>`).join("") +
+        `</div>` +
+        `<button type="button" class="eraser-undo" disabled>Undo</button>` +
+        `</div>` +
+        `<label class="model-tool-slider">Size <input type="range" class="eraser-size" min="1" max="200"> <span class="eraser-size-value"></span></label>` +
+        `<label class="model-tool-slider">Softness <input type="range" class="eraser-softness" min="0" max="100"> <span class="eraser-softness-value"></span></label>` +
+        `<div class="model-tool-hint">Paint over what to clear. Restore brings the original back. ` +
+        `[ and ] change the size, Ctrl+Z undoes, Alt flips the brush while held.</div>`,
+        () => applyPictureResult(modelToolState.work)
+    );
+
+    const sizeSlider = panel.querySelector(".eraser-size");
+    const softnessSlider = panel.querySelector(".eraser-softness");
+    const undoButton = panel.querySelector(".eraser-undo");
+
+    const renderControls = () => {
+
+        const state = modelToolState;
+
+        sizeSlider.value = state.size;
+        softnessSlider.value = state.softness;
+        panel.querySelector(".eraser-size-value").textContent = `${state.size}px`;
+        panel.querySelector(".eraser-softness-value").textContent = `${state.softness}%`;
+        undoButton.disabled = !state.undo.length;
+
+        for (const button of panel.querySelectorAll("[data-mode]")) {
+            button.classList.toggle("active", button.dataset.mode === state.mode);
+        }
+
+        for (const button of panel.querySelectorAll("[data-zoom]")) {
+            button.classList.toggle("active", Number(button.dataset.zoom) === state.zoom);
+        }
+    };
+
+    //
+    // How big the picture is drawn: fit to the stage at 1x, then zoomed -
+    // the stage scrolls once it's bigger than the box.
+    //
+    const layout = () => {
+
+        const state = modelToolState;
+        const fit = Math.min((stage.clientWidth - 8) / work.width, (stage.clientHeight - 8) / work.height, 1);
+
+        state.displayScale = fit * state.zoom;
+
+        work.style.width = `${work.width * state.displayScale}px`;
+        work.style.height = `${work.height * state.displayScale}px`;
+    };
+
+    const toPicture = (event) => {
+        const rect = work.getBoundingClientRect();
+        return {
+            x: (event.clientX - rect.left) / modelToolState.displayScale,
+            y: (event.clientY - rect.top) / modelToolState.displayScale
+        };
+    };
+
+    const moveCursor = (event) => {
+
+        const stageRect = stage.getBoundingClientRect();
+        const diameter = modelToolState.size * modelToolState.displayScale;
+
+        Object.assign(cursor.style, {
+            width: `${diameter}px`,
+            height: `${diameter}px`,
+            left: `${event.clientX - stageRect.left + stage.scrollLeft - diameter / 2}px`,
+            top: `${event.clientY - stageRect.top + stage.scrollTop - diameter / 2}px`
+        });
+        cursor.hidden = false;
+    };
+
+    let last = null;
+    let strokeMode = null;
+
+    stage.onpointerdown = (event) => {
+
+        if (event.button !== 0) {
+            return;
+        }
+
+        event.preventDefault();
+        stage.setPointerCapture(event.pointerId);
+
+        const state = modelToolState;
+
+        state.undo.push(work.getContext("2d").getImageData(0, 0, work.width, work.height));
+
+        if (state.undo.length > ERASER_UNDO_LIMIT) {
+            state.undo.shift();
+        }
+
+        strokeMode = event.altKey ? (state.mode === "erase" ? "restore" : "erase") : state.mode;
+        last = toPicture(event);
+
+        eraserStamp(last.x, last.y, strokeMode);
+        renderControls();
+    };
+
+    stage.onpointermove = (event) => {
+
+        moveCursor(event);
+
+        if (!last) {
+            return;
+        }
+
+        const now = toPicture(event);
+        const step = Math.max(1, modelToolState.size / 5);
+        const distance = Math.hypot(now.x - last.x, now.y - last.y);
+
+        for (let travelled = step; travelled <= distance; travelled += step) {
+            const t = travelled / distance;
+            eraserStamp(last.x + (now.x - last.x) * t, last.y + (now.y - last.y) * t, strokeMode);
+        }
+
+        if (distance >= step) {
+            last = now;
+        }
+    };
+
+    stage.onpointerup = () => {
+        last = null;
+    };
+
+    stage.onpointerleave = () => {
+        cursor.hidden = true;
+    };
+
+    for (const button of panel.querySelectorAll("[data-mode]")) {
+        button.onclick = () => {
+            modelToolState.mode = button.dataset.mode;
+            renderControls();
+        };
+    }
+
+    for (const button of panel.querySelectorAll("[data-zoom]")) {
+        button.onclick = () => {
+            modelToolState.zoom = Number(button.dataset.zoom);
+            layout();
+            renderControls();
+        };
+    }
+
+    sizeSlider.oninput = () => {
+        modelToolState.size = Number(sizeSlider.value);
+        renderControls();
+    };
+
+    softnessSlider.oninput = () => {
+        modelToolState.softness = Number(softnessSlider.value);
+        renderControls();
+    };
+
+    undoButton.onclick = eraserUndo;
+
+    modelToolState.renderControls = renderControls;
+
+    layout();
+    renderControls();
+}
+
+
+//
+// One dab of the brush at (x, y) in picture pixels. Softness is how much
+// of the radius fades out (a radial gradient); Restore copies that same
+// dab of the original back in.
+//
+function eraserStamp(x, y, mode) {
+
+    const { source, work, size, softness } = modelToolState;
+    const radius = size / 2;
+    const context = work.getContext("2d");
+
+    const brush = (target, ox, oy) => {
+
+        const gradient = target.createRadialGradient(ox, oy, 0, ox, oy, radius);
+        const hard = Math.min(0.99, 1 - softness / 100);
+
+        gradient.addColorStop(0, "rgba(0, 0, 0, 1)");
+        gradient.addColorStop(hard, "rgba(0, 0, 0, 1)");
+        gradient.addColorStop(1, "rgba(0, 0, 0, 0)");
+
+        target.fillStyle = gradient;
+        target.beginPath();
+        target.arc(ox, oy, radius, 0, Math.PI * 2);
+        target.fill();
+    };
+
+    if (mode === "erase") {
+
+        context.save();
+        context.globalCompositeOperation = "destination-out";
+        brush(context, x, y);
+        context.restore();
+        return;
+    }
+
+    const diameter = Math.ceil(size) + 2;
+    const stamp = document.createElement("canvas");
+
+    stamp.width = diameter;
+    stamp.height = diameter;
+
+    const stampContext = stamp.getContext("2d");
+    const left = x - diameter / 2;
+    const top = y - diameter / 2;
+
+    stampContext.drawImage(source, -left, -top);
+    stampContext.globalCompositeOperation = "destination-in";
+    brush(stampContext, diameter / 2, diameter / 2);
+
+    context.drawImage(stamp, left, top);
+}
+
+
+function eraserUndo() {
+
+    const state = modelToolState;
+
+    if (!state || !state.undo || !state.undo.length) {
+        return;
+    }
+
+    state.work.getContext("2d").putImageData(state.undo.pop(), 0, 0);
+    state.renderControls();
+}
+
+
+document.addEventListener("keydown", (event) => {
+
+    if (modelImageTool !== "erase" || event.target.matches("input:not([type=range]), select, textarea")) {
+        return;
+    }
+
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
+        event.preventDefault();
+        eraserUndo();
+    } else if (event.key === "[" || event.key === "]") {
+        event.preventDefault();
+        const state = modelToolState;
+        const factor = event.key === "]" ? 1.25 : 0.8;
+        state.size = Math.min(200, Math.max(1, Math.round(state.size * factor + (event.key === "]" ? 1 : -1))));
+        state.renderControls();
+    }
+});
 
 
 // ---------- Import ----------
