@@ -334,6 +334,22 @@ function mapStyle() {
 
 
 //
+// A driving vehicle's label (its name and ETA) only shows with the view's
+// own marker - a model's icon already shows which vehicle it is, and the
+// label would just sit on top of it. Its text is still kept up to date
+// either way (pollActiveTrips()), so it's right the moment it shows again.
+//
+function syncVehicleLabel(marker) {
+
+    if (marker.options.icon === mapStyle().vehicleIcon) {
+        marker.openTooltip();
+    } else {
+        marker.closeTooltip();
+    }
+}
+
+
+//
 // A driving vehicle's marker: its model's own map icon when one's been made
 // (the Vehicle Models editor's Create icon), in every view - otherwise the
 // view's marker. One L.icon per icon URL, shared by every vehicle of that
@@ -2235,7 +2251,8 @@ function vehicleDetailHtml(vehicle, trip) {
         (vehicleModel
             ? `Capacity: ${vehicleModel.person_capacity} people, ${vehicleModel.cargo_capacity_cuft} cu ft cargo<br>` +
               `Cost: $${Math.round(vehicleModel.cost).toLocaleString()} &middot; ${vehicleModel.mpg} mpg<br>` +
-              (engineSummary(vehicleModel) ? `Engine: ${engineSummary(vehicleModel)}<br>` : "")
+              (engineSummary(vehicleModel) ? `Engine: ${engineSummary(vehicleModel)}<br>` : "") +
+              (vehicleModel.tire_count ? `Tires: ${vehicleModel.tire_count}<br>` : "")
             : "") +
         cityLine +
         `Position: ${trip.position[0].toFixed(4)}, ${trip.position[1].toFixed(4)}<br>` +
@@ -2458,9 +2475,8 @@ async function pollActiveTrips() {
 
             const marker = L.marker(trip.position, { icon: vehicleMapIcon(trip.vehicle_id) }).addTo(map);
 
-            marker.bindTooltip(
-                "", { permanent: true, direction: "top", offset: [0, -10] }
-            ).openTooltip();
+            marker.bindTooltip("", { permanent: true, direction: "top", offset: [0, -10] });
+            syncVehicleLabel(marker);
 
             marker.on("click", () => selectVehicle(trip.vehicle_id));
 
@@ -2903,6 +2919,7 @@ function restyleMap() {
 
         if (layer.marker.options.icon !== icon) {
             layer.marker.setIcon(icon);
+            syncVehicleLabel(layer.marker);
         }
     }
 

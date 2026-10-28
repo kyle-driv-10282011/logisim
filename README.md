@@ -952,7 +952,10 @@ side panel since they don't all fit as a row:
   line in the vehicle spotlight, and they travel in the CSV
   (`engine_liters`, `engine_cylinders`, `engine_turbo` as yes or no,
   `fuel_type`, `transmission`). An older CSV without those columns leaves
-  existing specs alone. Fuel type is recorded only for now.
+  existing specs alone. Fuel type affects refueling (see Gold Doubloons).
+  **Tires** (4, 6, 8, 10 or 18, optional) sits next to Fuel tank. It shows
+  on each card and as a **Tires:** line in the spotlight, and travels in
+  the CSV as `tire_count`. New models default to 4.
   The picture has three tools, which run in the browser on a canvas and only
   save with the model:
   - **Crop:** drag a box over what to keep.

@@ -242,7 +242,8 @@ STARTER_VEHICLE_MODEL = {
     "engine_cylinders": 8,
     "engine_turbo": False,
     "fuel_type": "gasoline",
-    "transmission": "automatic"
+    "transmission": "automatic",
+    "tire_count": 4
 }
 
 #
@@ -302,15 +303,15 @@ def ensure_starter_vehicle_model(cur):
         """
         INSERT INTO vehicle_models
         (year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, fuel_tank_gallons, image,
-         engine_liters, engine_cylinders, engine_turbo, fuel_type, transmission)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+         engine_liters, engine_cylinders, engine_turbo, fuel_type, transmission, tire_count)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
         (
             starter["year"], starter["brand"], starter["model"], starter["person_capacity"],
             starter["cargo_capacity_cuft"], starter["cost"], starter["mpg"], starter["fuel_tank_gallons"],
             starter["image"], starter["engine_liters"], starter["engine_cylinders"], starter["engine_turbo"],
-            starter["fuel_type"], starter["transmission"]
+            starter["fuel_type"], starter["transmission"], starter["tire_count"]
         )
     )
 
@@ -2905,6 +2906,18 @@ def run_migrations():
     cur.execute("ALTER TABLE vehicle_models ADD COLUMN IF NOT EXISTS engine_turbo BOOLEAN")
     cur.execute("ALTER TABLE vehicle_models ADD COLUMN IF NOT EXISTS fuel_type TEXT")
     cur.execute("ALTER TABLE vehicle_models ADD COLUMN IF NOT EXISTS transmission TEXT")
+    cur.execute("ALTER TABLE vehicle_models ADD COLUMN IF NOT EXISTS tire_count INTEGER")
+
+    cur.execute(
+        """
+        UPDATE vehicle_models SET tire_count = %s
+        WHERE year = %s AND LOWER(brand) = LOWER(%s) AND LOWER(model) = LOWER(%s) AND tire_count IS NULL
+        """,
+        (
+            STARTER_VEHICLE_MODEL["tire_count"],
+            STARTER_VEHICLE_MODEL["year"], STARTER_VEHICLE_MODEL["brand"], STARTER_VEHICLE_MODEL["model"]
+        )
+    )
 
     cur.execute(
         """
@@ -3330,7 +3343,9 @@ def vehicle_model_dict(row):
         # Vehicle Models editor's Create icon), versioned like image_url.
         # None means the view's normal marker.
         #
-        "icon_url": f"api/vehicle-models/{row[0]}/icon?v={row[16][:12]}" if row[16] else None
+        "icon_url": f"api/vehicle-models/{row[0]}/icon?v={row[16][:12]}" if row[16] else None,
+
+        "tire_count": row[17]
     }
 
 
@@ -3338,7 +3353,8 @@ VEHICLE_MODEL_COLUMNS = """
     id, year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, image, fuel_tank_gallons,
     (SELECT i.sha256 FROM vehicle_model_images i WHERE i.vehicle_model_id = vehicle_models.id),
     engine_liters, engine_cylinders, engine_turbo, fuel_type, transmission,
-    (SELECT c.sha256 FROM vehicle_model_icons c WHERE c.vehicle_model_id = vehicle_models.id)
+    (SELECT c.sha256 FROM vehicle_model_icons c WHERE c.vehicle_model_id = vehicle_models.id),
+    tire_count
 """
 
 
@@ -3610,6 +3626,15 @@ TRANSMISSIONS = ("manual", "automatic")
 
 ENGINE_COLUMNS = ("engine_liters", "engine_cylinders", "engine_turbo", "fuel_type", "transmission")
 
+#
+# How many tires a model rides on - a van or car, a dually or box truck, up
+# to a semi. Optional like the engine specs; together they're SPEC_COLUMNS,
+# the optional columns a vehicle model CSV can carry.
+#
+TIRE_COUNTS = (4, 6, 8, 10, 18)
+
+SPEC_COLUMNS = (*ENGINE_COLUMNS, "tire_count")
+
 
 def validate_engine(req):
 
@@ -3629,9 +3654,12 @@ def validate_engine(req):
     if req.transmission is not None and req.transmission not in TRANSMISSIONS:
         raise HTTPException(status_code=400, detail=f"Transmission must be {' or '.join(TRANSMISSIONS)}")
 
+    if req.tire_count is not None and req.tire_count not in TIRE_COUNTS:
+        raise HTTPException(status_code=400, detail=f"Tires must be one of {', '.join(map(str, TIRE_COUNTS))}")
+
 
 #
-# A CSV cell for one of ENGINE_COLUMNS -> its value (blank -> None).
+# A CSV cell for one of SPEC_COLUMNS -> its value (blank -> None).
 #
 def parse_engine_csv_value(column, text):
 
@@ -3643,7 +3671,7 @@ def parse_engine_csv_value(column, text):
     if column == "engine_liters":
         return float(text)
 
-    if column == "engine_cylinders":
+    if column in ("engine_cylinders", "tire_count"):
         return int(float(text))
 
     if column == "engine_turbo":
@@ -3686,6 +3714,7 @@ class CreateVehicleModelRequest(BaseModel):
     engine_turbo: Optional[bool] = None
     fuel_type: Optional[str] = None
     transmission: Optional[str] = None
+    tire_count: Optional[int] = None
 
 
 
@@ -4443,8 +4472,8 @@ def create_vehicle_model(req: CreateVehicleModelRequest, _admin: None = Depends(
         """
         INSERT INTO vehicle_models
         (year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, image, fuel_tank_gallons,
-         engine_liters, engine_cylinders, engine_turbo, fuel_type, transmission)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+         engine_liters, engine_cylinders, engine_turbo, fuel_type, transmission, tire_count)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
         (
@@ -4461,7 +4490,8 @@ def create_vehicle_model(req: CreateVehicleModelRequest, _admin: None = Depends(
             req.engine_cylinders,
             req.engine_turbo,
             req.fuel_type,
-            req.transmission
+            req.transmission,
+            req.tire_count
         )
     )
 
@@ -4511,13 +4541,15 @@ def update_vehicle_model(id: int, req: CreateVehicleModelRequest, _admin: None =
             UPDATE vehicle_models
             SET year = %s, brand = %s, model = %s, person_capacity = %s, cargo_capacity_cuft = %s,
                 cost = %s, mpg = %s, image = %s, fuel_tank_gallons = %s,
-                engine_liters = %s, engine_cylinders = %s, engine_turbo = %s, fuel_type = %s, transmission = %s
+                engine_liters = %s, engine_cylinders = %s, engine_turbo = %s, fuel_type = %s, transmission = %s,
+                tire_count = %s
             WHERE id = %s
             """,
             (
                 req.year, req.brand.strip(), req.model.strip(), req.person_capacity, req.cargo_capacity_cuft,
                 req.cost, req.mpg, req.image or None, req.fuel_tank_gallons,
-                req.engine_liters, req.engine_cylinders, req.engine_turbo, req.fuel_type, req.transmission, id
+                req.engine_liters, req.engine_cylinders, req.engine_turbo, req.fuel_type, req.transmission,
+                req.tire_count, id
             )
         )
 
@@ -4970,7 +5002,7 @@ def get_vehicle_model_icon(id: int):
 #
 VEHICLE_MODEL_EXPORT_COLUMNS = [
     "year", "brand", "model", "person_capacity", "cargo_capacity_cuft",
-    "cost", "mpg", "fuel_tank_gallons", "image", *ENGINE_COLUMNS,
+    "cost", "mpg", "fuel_tank_gallons", "image", *SPEC_COLUMNS,
 ]
 
 
@@ -5041,16 +5073,16 @@ async def upload_vehicle_models(file: UploadFile = File(...), _admin: None = Dep
     wanted = {normalize_csv_header_cell(column): column for column in VEHICLE_MODEL_EXPORT_COLUMNS}
 
     #
-    # image and the engine columns are optional - an older export has no
-    # engine columns, and restoring it leaves models' engine specs as
+    # image and the spec columns are optional - an older export has no
+    # spec (engine and tire) columns, and restoring it leaves those specs as
     # they are rather than blanking them.
     #
-    optional_columns = ("image", *ENGINE_COLUMNS)
+    optional_columns = ("image", *SPEC_COLUMNS)
 
     missing = [column for key, column in wanted.items() if key not in header and column not in optional_columns]
 
-    engine_columns_present = [
-        column for column in ENGINE_COLUMNS if normalize_csv_header_cell(column) in header
+    spec_columns_present = [
+        column for column in SPEC_COLUMNS if normalize_csv_header_cell(column) in header
     ]
 
     if missing:
@@ -5087,7 +5119,7 @@ async def upload_vehicle_models(file: UploadFile = File(...), _admin: None = Dep
                 image=entry.get("image") or None,
                 **{
                     column: parse_engine_csv_value(column, entry.get(column, ""))
-                    for column in engine_columns_present
+                    for column in spec_columns_present
                 }
             )
 
@@ -5102,8 +5134,8 @@ async def upload_vehicle_models(file: UploadFile = File(...), _admin: None = Dep
             except HTTPException as e:
                 raise ValueError(e.detail)
 
-            engine_set_sql = "".join(f", {column} = %s" for column in engine_columns_present)
-            engine_values = tuple(getattr(model, column) for column in engine_columns_present)
+            spec_set_sql = "".join(f", {column} = %s" for column in spec_columns_present)
+            spec_values = tuple(getattr(model, column) for column in spec_columns_present)
 
             values = (
                 model.person_capacity, model.cargo_capacity_cuft, model.cost,
@@ -5114,7 +5146,7 @@ async def upload_vehicle_models(file: UploadFile = File(...), _admin: None = Dep
                 """
                 UPDATE vehicle_models
                 SET person_capacity = %s, cargo_capacity_cuft = %s, cost = %s,
-                    mpg = %s, fuel_tank_gallons = %s, image = %s""" + engine_set_sql + """
+                    mpg = %s, fuel_tank_gallons = %s, image = %s""" + spec_set_sql + """
                 WHERE id = (
                     SELECT id FROM vehicle_models
                     WHERE year = %s AND LOWER(brand) = LOWER(%s) AND LOWER(model) = LOWER(%s)
@@ -5123,7 +5155,7 @@ async def upload_vehicle_models(file: UploadFile = File(...), _admin: None = Dep
                 )
                 RETURNING id
                 """,
-                (*values, *engine_values, model.year, model.brand, model.model)
+                (*values, *spec_values, model.year, model.brand, model.model)
             )
 
             if cur.fetchone() is not None:
@@ -5133,12 +5165,12 @@ async def upload_vehicle_models(file: UploadFile = File(...), _admin: None = Dep
                     """
                     INSERT INTO vehicle_models
                     (year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, fuel_tank_gallons, image,
-                     engine_liters, engine_cylinders, engine_turbo, fuel_type, transmission)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     engine_liters, engine_cylinders, engine_turbo, fuel_type, transmission, tire_count)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         model.year, model.brand, model.model, *values,
-                        *(getattr(model, column) for column in ENGINE_COLUMNS)
+                        *(getattr(model, column) for column in SPEC_COLUMNS)
                     )
                 )
                 created += 1

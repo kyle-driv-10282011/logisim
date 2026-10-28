@@ -132,6 +132,7 @@ function renderVehicleModelsPage() {
             `<span>${vehicleModel.cargo_capacity_cuft} cu ft</span>` +
             `<span>${vehicleModel.mpg} mpg</span>` +
             `<span>${vehicleModel.fuel_tank_gallons} gal tank</span>` +
+            (vehicleModel.tire_count ? `<span>${vehicleModel.tire_count} tires</span>` : "") +
             `</div>` +
             `<div class="model-card-engine"></div>` +
             `<div class="model-card-cost">${formatDoubloons(vehicleModel.cost)}</div>` +
@@ -209,14 +210,15 @@ const MODEL_EDITOR_FIELDS = [
 ];
 
 //
-// The engine selects: element id -> model field, with how a select's value
-// maps to and from the stored one ("" is "not set").
+// The spec selects (engine, and tires): element id -> model field, with how
+// a select's value maps to and from the stored one ("" is "not set").
 //
 const MODEL_ENGINE_SELECTS = [
     ["model-field-cylinders", "engine_cylinders", (v) => (v ? Number(v) : null), (v) => (v ?? "")],
     ["model-field-turbo", "engine_turbo", (v) => (v ? v === "yes" : null), (v) => (v === null || v === undefined ? "" : v ? "yes" : "no")],
     ["model-field-fuel", "fuel_type", (v) => v || null, (v) => v || ""],
-    ["model-field-transmission", "transmission", (v) => v || null, (v) => v || ""]
+    ["model-field-transmission", "transmission", (v) => v || null, (v) => v || ""],
+    ["model-field-tires", "tire_count", (v) => (v ? Number(v) : null), (v) => (v ?? "")]
 ];
 
 
@@ -255,7 +257,8 @@ const NEW_MODEL_DEFAULTS = {
     engine_cylinders: null,
     engine_turbo: null,
     fuel_type: null,
-    transmission: null
+    transmission: null,
+    tire_count: 4
 };
 
 

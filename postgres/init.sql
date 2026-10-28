@@ -95,6 +95,9 @@ CREATE TABLE vehicle_models (
     -- 'manual' or 'automatic'.
     transmission TEXT,
 
+    -- 4, 6, 8, 10 or 18. Optional, like the engine specs.
+    tire_count INTEGER,
+
     created TIMESTAMP DEFAULT NOW()
 );
 
