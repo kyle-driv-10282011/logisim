@@ -7,7 +7,8 @@
 // open, so a file card's clock and on-the-road count are live.
 //
 // Mouse or keyboard, like the real thing: arrows move the cursor, Enter
-// picks, Esc backs out of naming/erasing.
+// picks, Esc backs out of naming. ERASE SELECTED FILE erases the file under
+// the cursor once the admin password is given (eraseSelectedFile()).
 //
 
 const LAST_SLOT_STORAGE_KEY = "lastSaveSlot";
@@ -18,9 +19,7 @@ let fileSelectCursor = 0;
 
 //
 // "select": pick a file to play (or an empty one to start).
-// "erase": the next file picked asks to be erased instead.
 // "name": entering a name for the empty file under the cursor.
-// "confirm-erase": the YES/NO question for the file under the cursor.
 //
 let fileSelectMode = "select";
 
@@ -38,12 +37,7 @@ async function showFileSelect() {
 
     document.addEventListener("keydown", handleFileSelectKey);
 
-    //
-    // Admin-only (admin.js) - the button is hidden otherwise.
-    //
-    document.getElementById("fs-erase-button").onclick = () => {
-        setFileSelectMode(fileSelectMode === "erase" || !isAdmin() ? "select" : "erase");
-    };
+    document.getElementById("fs-erase-button").onclick = eraseSelectedFile;
 
     await refreshFileSelect();
 }
@@ -74,10 +68,7 @@ function setFileSelectMode(mode) {
 
     fileSelectMode = mode;
 
-    setFileSelectMessage(
-        mode === "erase" ? "Choose a file to erase." : "",
-        false
-    );
+    setFileSelectMessage("", false);
 
     renderFileSelect();
 }
@@ -115,10 +106,6 @@ function escapeFileText(text) {
 function renderFileSelect() {
 
     const container = document.getElementById("fs-files");
-    const eraseButton = document.getElementById("fs-erase-button");
-
-    eraseButton.classList.toggle("active", fileSelectMode === "erase");
-    eraseButton.textContent = fileSelectMode === "erase" ? "CANCEL" : "ERASE";
 
     container.innerHTML = "";
 
@@ -129,8 +116,7 @@ function renderFileSelect() {
 
         card.className = "fs-file" +
             (slot.started ? "" : " empty") +
-            (atCursor ? " cursor" : "") +
-            (atCursor && (fileSelectMode === "erase" || fileSelectMode === "confirm-erase") ? " erasing" : "");
+            (atCursor ? " cursor" : "");
 
         let body;
 
@@ -143,17 +129,6 @@ function renderFileSelect() {
                 `<div class="fs-choices">` +
                 `<button class="fs-button" data-action="start">START</button>` +
                 `<button class="fs-button" data-action="cancel">CANCEL</button>` +
-                `</div>`;
-
-        } else if (atCursor && fileSelectMode === "confirm-erase") {
-
-            body =
-                `<div class="fs-file-label">FILE ${slot.id}</div>` +
-                `<div class="fs-prompt">ERASE ${escapeFileText(slot.name)}?</div>` +
-                `<div class="fs-warning">This can't be undone.</div>` +
-                `<div class="fs-choices">` +
-                `<button class="fs-button danger" data-action="erase-yes">YES</button>` +
-                `<button class="fs-button" data-action="cancel">NO</button>` +
                 `</div>`;
 
         } else if (slot.started) {
@@ -190,10 +165,9 @@ function renderFileSelect() {
             }
 
             //
-            // Clicking inside the name box (or anywhere on a card mid-question)
-            // shouldn't re-trigger the card itself.
+            // Clicking inside the name box shouldn't re-trigger the card itself.
             //
-            if (atCursor && (fileSelectMode === "name" || fileSelectMode === "confirm-erase")) {
+            if (atCursor && fileSelectMode === "name") {
                 return;
             }
 
@@ -220,20 +194,6 @@ function activateFileUnderCursor() {
         return;
     }
 
-    if (fileSelectMode === "erase") {
-
-        if (!slot.started) {
-            setFileSelectMessage(`File ${slot.id} is already empty.`, false);
-            renderFileSelect();
-            return;
-        }
-
-        fileSelectMode = "confirm-erase";
-        setFileSelectMessage("", false);
-        renderFileSelect();
-        return;
-    }
-
     if (slot.started) {
         playFile(slot);
         return;
@@ -249,8 +209,6 @@ function handleFileAction(action) {
 
     if (action === "start") {
         startNewFile();
-    } else if (action === "erase-yes") {
-        eraseFileUnderCursor();
     } else if (action === "cancel") {
         setFileSelectMode("select");
     }
@@ -270,7 +228,11 @@ async function startNewFile() {
 
     try {
 
-        const response = await fetch(API + "/api/slots/" + slot.id, {
+        //
+        // apiFetch() so an elevated page's admin token goes along - the
+        // backend won't start a game in admin mode.
+        //
+        const response = await apiFetch(API + "/api/slots/" + slot.id, {
 
             method: "POST",
 
@@ -328,31 +290,54 @@ function showIntroSplash() {
 }
 
 
-async function eraseFileUnderCursor() {
+//
+// Erasing is admin-only, so the admin password prompt doubles as the
+// "are you sure?" - it's asked every time, even while elevated, and the
+// token it gets is used for this one erase only rather than elevating
+// the page.
+//
+function eraseSelectedFile() {
 
     const slot = fileSelectSlots[fileSelectCursor];
 
-    try {
-
-        //
-        // apiFetch() for the admin token - erasing a file is admin-only.
-        //
-        const response = await apiFetch(API + "/api/slots/" + slot.id, { method: "DELETE" });
-
-        if (!response.ok) {
-            const data = await response.json();
-            setFileSelectMessage(data.detail || "Couldn't erase that file.", true);
-            return;
-        }
-
-        fileSelectMode = "select";
-        setFileSelectMessage(`File ${slot.id} erased.`, false);
-
-        await refreshFileSelect();
-
-    } catch (e) {
-        setFileSelectMessage("Couldn't reach the server - try again.", true);
+    if (!slot) {
+        return;
     }
+
+    if (!slot.started) {
+        setFileSelectMessage(`File ${slot.id} is already empty.`, false);
+        return;
+    }
+
+    setFileSelectMessage("", false);
+
+    openAdminPrompt({
+        title: `Erase File ${slot.id}?`,
+        hint: `Erase ${slot.name}'s game - vehicles, trips, money and clock. This can't be undone. ` +
+            "Enter the admin password to confirm.",
+        submitLabel: "Erase",
+        danger: true,
+        onToken: (token) => eraseFile(slot, token)
+    });
+}
+
+
+async function eraseFile(slot, token) {
+
+    const response = await fetch(API + "/api/slots/" + slot.id, {
+        method: "DELETE",
+        headers: { "X-Admin-Token": token }
+    });
+
+    if (!response.ok) {
+        const data = await response.json();
+        setFileSelectMessage(data.detail || "Couldn't erase that file.", true);
+        return;
+    }
+
+    setFileSelectMessage(`File ${slot.id} erased.`, false);
+
+    await refreshFileSelect();
 }
 
 
@@ -401,10 +386,6 @@ function handleFileSelectKey(event) {
         return;
     }
 
-    if (fileSelectMode === "confirm-erase") {
-        return;
-    }
-
     const moves = {
         ArrowLeft: -1,
         ArrowRight: 1,
@@ -427,7 +408,7 @@ function handleFileSelectKey(event) {
     }
 
     //
-    // A focused button (ERASE/CANCEL, YES/NO) already handles its own Enter
+    // A focused button (ERASE SELECTED FILE, START/CANCEL) already handles its own Enter
     // as a click - acting on the file under the cursor too would do both.
     //
     if (event.key === "Enter" && event.target.tagName !== "BUTTON") {

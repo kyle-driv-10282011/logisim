@@ -1,27 +1,27 @@
 //
 // The admin role. Everyone plays as a "user" (save files, My Vehicles,
-// Budget); anyone who knows the instance's ADMIN_PASSWORD (.env) can
-// elevate to "admin" for what every save file shares - gas stations,
-// vehicle models, background jobs, erasing files. Not a login: elevating
-// just gets a signed, expiring token from POST /api/admin/elevate, which
-// apiFetch() sends along as X-Admin-Token.
+// Budget); anyone who knows the instance's ADMIN_PASSWORD (.env) can unlock
+// what every save file shares - gas stations, vehicle models, background
+// jobs, erasing files. Not a login: unlocking just gets a signed, expiring
+// token from POST /api/admin/elevate, which apiFetch() sends along as
+// X-Admin-Token.
 //
-// Admin-only UI carries the .admin-only class and is hidden unless <body>
-// has .admin (see index.html). The token lives in sessionStorage, so it
-// lasts through the file-select reload but not past closing the tab.
+// Admin is scoped to the one area that was unlocked: the admin tabs
+// (Vehicle Models, Gas Prices, Background Jobs) and Config's backups stay
+// listed with a lock (.admin-locked, see index.html), ask for the password
+// when opened, and lock again as soon as another tab is shown (showTab()
+// calls relockAdminUnless()). The token is only kept in memory, so a
+// reload locks everything too.
 //
-
-const ADMIN_STORAGE_KEY = "logisim-admin";
 
 let adminSession = null; // { token, expires } - expires in epoch seconds
 
-let adminExpiryTimer = null;
+//
+// The tab admin was unlocked for - leaving it locks admin again.
+//
+let adminUnlockedTab = null;
 
-try {
-    adminSession = JSON.parse(sessionStorage.getItem(ADMIN_STORAGE_KEY));
-} catch (e) {
-    // not elevated
-}
+let adminExpiryTimer = null;
 
 
 function adminToken() {
@@ -36,36 +36,36 @@ function isAdmin() {
 }
 
 
-function setAdminSession(session) {
+function setAdminSession(session, unlockedTab = null) {
 
     adminSession = session;
-
-    try {
-        if (session) {
-            sessionStorage.setItem(ADMIN_STORAGE_KEY, JSON.stringify(session));
-        } else {
-            sessionStorage.removeItem(ADMIN_STORAGE_KEY);
-        }
-    } catch (e) {
-        // admin just won't survive a reload
-    }
+    adminUnlockedTab = session ? unlockedTab : null;
 
     applyAdminState();
 }
 
 
 //
-// Shows or hides everything admin-only, and steps off anything admin-only
-// that was open when admin ended.
+// Locks admin again unless the tab now showing is the one it was unlocked
+// for.
+//
+function relockAdminUnless(tab) {
+
+    if (adminSession && tab !== adminUnlockedTab) {
+        setAdminSession(null);
+    }
+}
+
+
+//
+// Shows or locks everything admin-only, and steps off an admin tab that
+// was open when admin ended (expired, or the password changed).
 //
 function applyAdminState() {
 
     const admin = isAdmin();
 
     document.body.classList.toggle("admin", admin);
-
-    document.getElementById("tab-button-admin").textContent = admin ? "Leave admin mode" : "Admin mode";
-    document.getElementById("fs-admin-button").textContent = admin ? "LEAVE ADMIN" : "ADMIN";
 
     //
     // Plain download links can't send a header, so they carry the token
@@ -89,29 +89,72 @@ function applyAdminState() {
 
         const activeTab = document.querySelector(".tab-button.active");
 
-        if (activeTab && activeTab.classList.contains("admin-only")) {
+        if (activeTab && activeTab.classList.contains("admin-tab")) {
             showTab("myvehicles");
-        }
-
-        if (fileSelectMode === "erase" || fileSelectMode === "confirm-erase") {
-            setFileSelectMode("select");
         }
     }
 }
 
 
 //
-// The tab menu's "Admin mode" entry and the file-select screen's ADMIN
-// button: asks for the password, or leaves admin if already elevated.
+// An admin tab's menu entry: asks for the password (unless that tab is
+// already unlocked), then opens it.
 //
-function toggleAdminMode() {
+function openAdminTab(tab) {
 
     closeTabMenu();
 
-    if (isAdmin()) {
-        setAdminSession(null);
+    if (isAdmin() && adminUnlockedTab === tab) {
+        showTab(tab);
         return;
     }
+
+    openAdminPrompt({
+        title: `Unlock ${TAB_LABELS[tab]}`,
+        hint: "Admin only - shared by every save file. It locks again when you leave this tab.",
+        submitLabel: "Unlock",
+        onToken: (token, expires) => {
+            setAdminSession({ token, expires }, tab);
+            showTab(tab);
+        }
+    });
+}
+
+
+//
+// Config's backups (export/import): unlocked in place - Config itself is
+// for everyone - until Config is left.
+//
+function unlockConfigBackups() {
+
+    openAdminPrompt({
+        title: "Unlock backups",
+        hint: "Exporting and importing gas stations and vehicle models is admin only. " +
+            "It locks again when you leave Config.",
+        submitLabel: "Unlock",
+        onToken: (token, expires) => setAdminSession({ token, expires }, "config")
+    });
+}
+
+
+//
+// The password prompt, for whatever needs admin: onToken(token, expires)
+// runs with a fresh admin token once the password checks out - elevating
+// the page, or a one-off like erasing a file (eraseSelectedFile()).
+//
+let adminPromptOnToken = null;
+
+function openAdminPrompt({ title, hint, submitLabel, danger = false, onToken }) {
+
+    adminPromptOnToken = onToken;
+
+    document.getElementById("admin-dialog-title").textContent = title;
+    document.getElementById("admin-dialog-hint").textContent = hint;
+
+    const submit = document.getElementById("admin-dialog-submit");
+
+    submit.textContent = submitLabel;
+    submit.classList.toggle("danger", danger);
 
     document.getElementById("admin-password").value = "";
     document.getElementById("admin-dialog-error").textContent = "";
@@ -123,6 +166,8 @@ function toggleAdminMode() {
 function closeAdminDialog() {
 
     document.getElementById("admin-dialog").style.display = "none";
+
+    adminPromptOnToken = null;
 }
 
 
@@ -132,6 +177,8 @@ async function submitAdminPassword() {
     const error = document.getElementById("admin-dialog-error");
 
     error.textContent = "";
+
+    let data;
 
     try {
 
@@ -147,19 +194,27 @@ async function submitAdminPassword() {
 
         });
 
-        const data = await response.json();
+        data = await response.json();
 
         if (!response.ok) {
-            error.textContent = data.detail || "Couldn't elevate";
+            error.textContent = data.detail || "Couldn't check the password";
             input.select();
             return;
         }
 
-        closeAdminDialog();
-        setAdminSession({ token: data.token, expires: data.expires });
-
     } catch (e) {
         error.textContent = "Couldn't reach the server - try again.";
+        return;
+    }
+
+    const onToken = adminPromptOnToken;
+
+    closeAdminDialog();
+
+    try {
+        await onToken(data.token, data.expires);
+    } catch (e) {
+        alert("Couldn't reach the server - try again.");
     }
 }
 

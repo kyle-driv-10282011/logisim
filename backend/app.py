@@ -3690,10 +3690,17 @@ def list_save_slots():
 
 
 @app.post("/api/slots/{slot_id}")
-def start_save_slot(slot_id: int, req: StartSaveSlotRequest):
+def start_save_slot(slot_id: int, req: StartSaveSlotRequest, x_admin_token: Optional[str] = Header(None)):
 
     if not 1 <= slot_id <= SAVE_SLOT_COUNT:
         raise HTTPException(status_code=404, detail="No such save file")
+
+    #
+    # Admin is for managing what the files share, not for playing - not 403,
+    # which the frontend reads as admin having lapsed (see require_admin()).
+    #
+    if is_valid_admin_token(x_admin_token):
+        raise HTTPException(status_code=409, detail="New games can't be started in admin mode - leave admin first")
 
     name = req.name.strip()
 

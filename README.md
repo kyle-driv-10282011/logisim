@@ -57,23 +57,30 @@ slider in Config and the gas station map overlay.
 
 **Admin** manages what every save file shares: **Vehicle Models** (add,
 delete, import, export), **Gas Prices** (add, delete, bulk import, export),
-**Background Jobs**, and **Erase** on the file-select screen. It isn't a
-login. Anyone who knows the instance's `ADMIN_PASSWORD` (set in `.env`) can
-elevate from **Admin mode** in the tab menu or **ADMIN** on the file-select
-screen. Leave `ADMIN_PASSWORD` empty to turn admin off.
+**Background Jobs**, and erasing files. It isn't a login. Admin tabs are
+listed for everyone with a 🔒. Opening one asks for the instance's
+`ADMIN_PASSWORD` (set in `.env`), and switching to another tab locks it again.
+Config's backups unlock the same way, with **Unlock backups**, until you leave
+Config. Leave `ADMIN_PASSWORD` empty to turn admin off.
 
-Elevating returns a signed token that lasts 12 hours. The browser keeps it
-until the tab closes and sends it as an `X-Admin-Token` header, or as
-`?admin_token=` on export download links. Changing the password revokes every
-token. On the backend, admin-only endpoints take `Depends(require_admin)` in
-`app.py`. On the frontend, admin-only UI has the `admin-only` class, which is
-hidden unless the page is elevated (`admin.js`).
+**ERASE SELECTED FILE** on the file-select screen erases the file under the
+cursor. It asks for the admin password every time, as the confirmation. The
+backend also refuses to start a new game on a request that carries an admin
+token.
+
+Unlocking returns a signed token that lasts 12 hours at most. The page keeps
+it only in memory, so it's gone on reload, and sends it as an
+`X-Admin-Token` header, or as `?admin_token=` on export download links.
+Changing the password revokes every token. On the backend, admin-only
+endpoints take `Depends(require_admin)` in `app.py`. On the frontend
+(`admin.js`), admin-only UI has the `admin-only` class and is hidden while
+locked, and admin tabs have the `admin-tab` class and a lock icon.
 
 ### Save files
 
 Opening the site shows a console-style **Select File** screen with four
 save files that everyone shares. Pick a started file to play it, or an empty
-one to start a new game (you name it). **Erase** wipes a file back to empty.
+one to start a new game (you name it). **ERASE SELECTED FILE** wipes a file back to empty.
 The **FILE n · NAME** chip in the clock box goes back to this screen.
 
 Each file has its own vehicles, trips, game clock, time multiplier and

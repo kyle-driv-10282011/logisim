@@ -441,13 +441,20 @@
             background: #c92a2a;
         }
 
-        /* Admin-only UI (admin.js) - hidden until the page is elevated. */
-        body:not(.admin) .admin-only {
+        /*
+         * Admin-only UI (admin.js): .admin-only shows only while unlocked,
+         * .admin-locked-only only while locked, and an admin tab's lock
+         * icon only while locked.
+         */
+        body:not(.admin) .admin-only,
+        body.admin .admin-locked-only,
+        body.admin .admin-lock {
             display: none !important;
         }
 
-        .tab-menu-list .tab-button-admin {
-            color: #8a2be2;
+        .admin-lock {
+            font-size: 11px;
+            margin-left: 4px;
         }
 
         .admin-indicator {
@@ -506,6 +513,13 @@
             min-height: 14px;
             font-size: 12px;
             color: #c92a2a;
+        }
+
+        #admin-dialog-submit.danger {
+            color: white;
+            background: #c92a2a;
+            border: 1px solid #a51d1d;
+            border-radius: 3px;
         }
 
         .admin-dialog-actions {
@@ -840,21 +854,18 @@
 </div>
 
 <!--
-    The admin password prompt (admin.js), above everything - it's reachable
-    from the file-select screen too.
+    The admin password prompt (admin.js), above everything: elevating to
+    admin, and confirming ERASE SELECTED FILE on the file-select screen.
 -->
 <div id="admin-dialog" class="admin-dialog" style="display:none">
     <form class="admin-dialog-box" onsubmit="event.preventDefault(); withSpinner(this.querySelector('[type=submit]'), submitAdminPassword)">
-        <div class="admin-dialog-title">Admin mode</div>
-        <div class="admin-dialog-hint">
-            Manage what every save file shares: gas stations, vehicle models, background jobs
-            and erasing files.
-        </div>
+        <div id="admin-dialog-title" class="admin-dialog-title"></div>
+        <div id="admin-dialog-hint" class="admin-dialog-hint"></div>
         <input id="admin-password" type="password" autocomplete="current-password" placeholder="Admin password">
         <div id="admin-dialog-error" class="admin-dialog-error"></div>
         <div class="admin-dialog-actions">
             <button type="button" onclick="closeAdminDialog()">Cancel</button>
-            <button type="submit">Elevate</button>
+            <button id="admin-dialog-submit" type="submit"></button>
         </div>
     </form>
 </div>
@@ -865,8 +876,7 @@
         <div class="fs-subtitle">SELECT FILE</div>
         <div id="fs-files" class="fs-files"></div>
         <div class="fs-actions">
-            <button id="fs-erase-button" class="fs-button admin-only">ERASE</button>
-            <button id="fs-admin-button" class="fs-button" onclick="toggleAdminMode()">ADMIN</button>
+            <button id="fs-erase-button" class="fs-button">ERASE SELECTED FILE</button>
         </div>
         <div id="fs-message" class="fs-message"></div>
         <div class="fs-hint">ARROWS: CHOOSE &middot; ENTER: SELECT &middot; ESC: BACK</div>
@@ -921,7 +931,7 @@
     <div id="map-controls">
     <div id="sim-clock">
         <button id="current-file-label" class="current-file" onclick="returnToFileSelect()" title="Back to file select"></button>
-        <div class="admin-indicator admin-only" title="Admin mode - leave it from the tab menu">ADMIN</div>
+        <div class="admin-indicator admin-only" title="Admin unlocked - locks again when you leave this tab">ADMIN</div>
         <div id="balance-display" class="balance-display" title="Gold Doubloons"></div>
         <div id="sim-clock-text"></div>
         <div id="time-multiplier-control">
@@ -953,13 +963,12 @@
             <span class="tab-menu-arrow">&#9662;</span>
         </button>
         <div class="tab-menu-list" id="tab-menu-list">
-            <button class="tab-button admin-only" id="tab-button-vehiclemodels" onclick="withSpinner(this, () => showTab('vehiclemodels'))">Vehicle Models</button>
+            <button class="tab-button admin-tab" id="tab-button-vehiclemodels" onclick="openAdminTab('vehiclemodels')">Vehicle Models <span class="admin-lock" title="Admin only - asks for the password">&#128274;</span></button>
             <button class="tab-button active" id="tab-button-myvehicles" onclick="withSpinner(this, () => showTab('myvehicles'))">My Vehicles</button>
-            <button class="tab-button admin-only" id="tab-button-gasprices" onclick="withSpinner(this, () => showTab('gasprices'))">Gas Prices</button>
-            <button class="tab-button admin-only" id="tab-button-jobs" onclick="withSpinner(this, () => showTab('jobs'))">Background Jobs</button>
+            <button class="tab-button admin-tab" id="tab-button-gasprices" onclick="openAdminTab('gasprices')">Gas Prices <span class="admin-lock" title="Admin only - asks for the password">&#128274;</span></button>
+            <button class="tab-button admin-tab" id="tab-button-jobs" onclick="openAdminTab('jobs')">Background Jobs <span class="admin-lock" title="Admin only - asks for the password">&#128274;</span></button>
             <button class="tab-button" id="tab-button-config" onclick="withSpinner(this, () => showTab('config'))">Config</button>
             <button class="tab-button" id="tab-button-budget" onclick="openBudgetPage()">Budget</button>
-            <button class="tab-button tab-button-admin" id="tab-button-admin" onclick="toggleAdminMode()">Admin mode</button>
         </div>
     </div>
 
@@ -1077,6 +1086,12 @@
                 pauses or resumes this - it only ever switches between off and the setting here.
                 While off (paused, or set to Never), it still refreshes every 20 minutes.
             </div>
+        </div>
+
+        <div class="panel-form admin-locked-only">
+            <span class="config-label"><b>Gas stations &amp; vehicle models backups</b></span>
+            <button onclick="unlockConfigBackups()">&#128274; Unlock backups</button>
+            <div class="config-hint">Admin only - asks for the admin password.</div>
         </div>
 
         <div class="panel-form admin-only">

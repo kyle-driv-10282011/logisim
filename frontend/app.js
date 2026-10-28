@@ -533,6 +533,11 @@ document.addEventListener("click", (event) => {
 
 function showTab(tab) {
 
+    //
+    // Admin is scoped to the tab it was unlocked for (admin.js).
+    //
+    relockAdminUnless(tab);
+
     for (const name of ["vehiclemodels", "myvehicles", "gasprices", "jobs", "config"]) {
 
         document.getElementById(`tab-${name}`).classList.toggle("active", name === tab);
