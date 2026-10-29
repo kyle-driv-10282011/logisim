@@ -1,0 +1,23 @@
+year,brand,model,body,hitch_type,cargo_capacity_cuft,empty_weight_lbs,gross_weight_lbs,cost
+2020,Carry-On,4x6 Utility,utility,class1,72,290,1800,1100
+2022,Carry-On,5x8 Utility,utility,class2,120,450,2990,1700
+2023,Big Tex,30SA 6x10 Utility,utility,class2,180,900,3500,2900
+2021,Big Tex,35SA 6.5x12 Utility,utility,class3,234,1200,5000,3600
+2022,Wells Cargo,FastTrac 5x8 Enclosed,enclosed,class2,160,900,2990,4500
+2023,Pace American,Journey 6x12 Enclosed,enclosed,class2,400,1500,2990,6800
+2023,Haulmark,Passport 7x14 Enclosed,enclosed,class3,640,2400,7000,10500
+2022,Look Trailers,Vision 8.5x20 Enclosed,enclosed,class4,1100,3300,9990,15500
+2021,Haulmark,Grizzly 8.5x24 Enclosed,enclosed,class5,1400,4200,11990,19000
+2023,Big Tex,70CH 18ft Car Hauler,car_hauler,class3,0,1950,7000,5200
+2022,PJ Trailers,C5 20ft Car Hauler,car_hauler,class4,0,2300,9899,7500
+2023,Featherlite,4926 24ft Enclosed Car Trailer,car_hauler,class5,0,3900,9990,24000
+2021,Karavan,16ft Boat Trailer,boat,class2,0,600,3500,2400
+2022,Load Rite,22ft Tandem Boat Trailer,boat,class3,0,1100,6200,4300
+2022,Felling,FT-12 Tag Equipment Trailer,equipment,class4,0,2300,9990,8000
+2023,Big Tex,14ET 20ft Equipment Trailer,equipment,class5,0,2900,14000,9500
+2023,Big Tex,22GN 25ft Gooseneck Flatbed,flatbed,gooseneck,0,6000,25900,15500
+2022,PJ Trailers,LD 32ft Low-Pro Gooseneck,flatbed,gooseneck,0,7000,25000,17000
+2019,Wabash,DuraPlate 53ft Dry Van,dry_van,fifth_wheel,3800,14500,65000,38000
+2020,Great Dane,Champion 53ft Dry Van,dry_van,fifth_wheel,3800,15000,65000,45000
+2018,Fontaine,Infinity 48ft Flatbed,flatbed,fifth_wheel,0,10000,65000,32000
+2021,Fontaine,Magnitude 55H Lowboy,equipment,fifth_wheel,0,19000,65000,85000

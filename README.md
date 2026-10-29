@@ -176,6 +176,73 @@ adding rows), so admins can edit or delete them like any model and their
 changes stick. They come without pictures; the Marketplace shows an emoji
 for the kind of vehicle until an admin adds one.
 
+Trailers are listed there too (Type → Trailers), `market_trailer_listing_count`
+of them per file (8 by default). A trailer has a condition and price like a
+vehicle, but no miles, and holds its value longer (88% after a year, 5% less
+each year after, never under 30%). Each card says which of your vehicles can
+pull it. A bought trailer waits in the seller's city for a vehicle to come
+hitch it up; see [Trailers](#trailers).
+
+### Trailers
+
+A vehicle model has a **hitch** and a **towing capacity** (lbs), set in its
+editor on the Vehicle Models page. The hitch is a Class I–V receiver, a
+gooseneck or a fifth wheel, or none. A trailer model needs one of those and
+has a body (utility, enclosed cargo, car hauler, boat, equipment, flatbed or
+dry van), cargo space, an empty and a loaded (gross) weight, and a price.
+
+A vehicle can pull a trailer when:
+
+- **The hitch fits.** A receiver takes its own class and every lighter one.
+  A gooseneck truck also has a Class V receiver. Gooseneck and fifth-wheel
+  trailers need exactly that hitch.
+- **It's rated for it.** Its towing capacity covers the trailer's loaded
+  weight.
+
+Grandpa's van has a Class II hitch rated 3,500 lbs. That's enough for the
+small utility, enclosed and boat trailers.
+
+**Hitching.** Trailers you own are listed under **Trailers** in My Vehicles.
+Pick a vehicle and **Hitch**. Every vehicle is in the list; the ones that
+can't hitch right now are greyed out with the reason. The vehicle has to be
+parked within 15 miles of the trailer and not out on a trip or a load, and
+it can pull one trailer at a time. A hitched trailer goes wherever the
+vehicle goes. **Unhitch** leaves it where the vehicle is parked. **Sell**
+refunds what was paid.
+
+While it's hitched, a trailer:
+
+- **Adds cargo space.** Its cu ft adds to the vehicle's for freight loads.
+- **Opens up towed loads.** Car haulers, boat trailers, and equipment and
+  flatbed trailers take loads only a trailer can carry: cars, boats, skid
+  steers, tractors, lumber, steel (`LOAD_TOWED_CARGO`). Each needs the right
+  body and a trailer rated heavy enough. With one hitched, about half the
+  vehicle's board is that kind of work.
+- **Costs fuel.** MPG drops by up to `towing_mpg_penalty_percent` (30% by
+  default), scaled by the trailer's weight against the vehicle's towing
+  capacity. The weight counts half-loaded, halfway between empty and gross,
+  because a leg doesn't know ahead whether it's loaded.
+- **Slows it down.** The vehicle can't go over `towing_speed_limit_mph`
+  (65 by default).
+
+Both towing costs are fixed when each leg sets out (`trips.towing_mpg_factor`
+and `speed_cap_mph`). Admins set them in the Towing row on the Vehicle
+Models page, and a change applies from each vehicle's next leg.
+
+Bigger freight loads came with trailers: pallets, store deliveries and full
+truckloads up to 3,800 cu ft. Pay per cu ft drops past 320 cu ft, so a full
+53 ft dry van pays about $6.70 a mile, not $18.
+
+The trailer catalog (`backend/data/trailer_catalog.csv`) has 22 real trailers,
+from a 4×6 utility to a 53 ft dry van and a lowboy. It's seeded into
+`trailer_models` once, like the vehicle catalog (`TRAILER_CATALOG_VERSION`).
+Admins edit them in the **Trailer Models** table at the bottom of the
+Vehicle Models page. The vehicle catalog (now version 2) gained hitches and
+towing capacities. Its semis are tractors, so their cargo space is 0 and
+they need a dry van to haul freight; that includes semis already in the
+database that were seeded earlier. The specs are approximate, typical
+figures, not manufacturer data.
+
 ### Loads
 
 Vehicles don't go anywhere on their own; they carry loads. Select a parked
@@ -222,11 +289,15 @@ so far and, once delivered, what it netted.
   the unpaid drive there is the cost of being out there.
   Offers expire 8–36 game hours after they're posted. Each save file has
   its own board.
-- **Fit:** freight fits up to the model's cargo cu ft, and passengers up to
-  its seats less the driver.
+- **Fit:** freight fits up to the model's cargo cu ft plus its trailer's,
+  and passengers up to its seats less the driver. A towed load needs a
+  hitched trailer of the right body, rated heavy enough (see
+  [Trailers](#trailers)).
 - **Pay:** per estimated loaded mile, $1.10 plus $0.0045 per cu ft for
-  freight, or $0.85 plus $0.15 per passenger, plus a $40 or $30 handling
-  fee. Estimated miles are the straight-line distance × 1.25.
+  freight ($0.0012 per cu ft past 320), or $0.85 plus $0.15 per passenger,
+  plus a $40 or $30 handling fee. A towed load pays its own rate, $1.80 to
+  $5.00 a mile, plus a fee. Estimated miles are the straight-line
+  distance × 1.25.
 - **Deadline:** set when accepted. The estimated miles (to the pickup plus
   loaded) at 45 mph, × 1.5, plus 2 hours.
 - **Accepting:** `POST /api/loads/{id}/accept` with `{vehicle_id}` starts
@@ -319,7 +390,13 @@ geocoded/routed once and reused by any number of trips.
 | `cost`                 | double precision |                         |
 | `mpg`                  | double precision |                         |
 | `image`                | text    | nullable; a filename under `frontend/images/` (e.g. `"1978-Ford-Econoline.png"`), not a URL — the frontend resolves it against its own origin |
+| `hitch_type`           | text    | nullable (no hitch); `class1`–`class5`, `gooseneck` or `fifth_wheel` — see [Trailers](#trailers) |
+| `towing_capacity_lbs`  | integer | nullable; the heaviest trailer (loaded) it can pull |
 | `created`              | timestamp | default `NOW()`                |
+
+`trailer_models` (the kinds of trailer, shared like `vehicle_models`) and
+`trailers` (each file's own, with the `vehicle_id` pulling it, if any) are
+described in `postgres/init.sql`.
 
 ### `places`
 
@@ -1000,7 +1077,15 @@ All endpoints are on the `backend` service, reached through nginx at
 | `GET /api/settings`             | Current game clock and perks: `{time_multiplier, game_time, auto_refuel_level, auto_refuel_max_level}` |
 | `PUT /api/settings`             | Change `time_multiplier` and/or `auto_refuel_level`. Body: `{time_multiplier?, auto_refuel_level?}` — a multiplier change re-anchors the game clock at its current value so it speeds up/slows down rather than jumping, and is rejected (409) if any vehicle is currently in route; `auto_refuel_level` (0 to `auto_refuel_max_level`) can be changed any time |
 | `GET /api/market`               | The file's Marketplace, topped up first: each listing's `vehicle_model`, `mileage`, `condition`, `price`, `location`/`lat`/`lng`, `expires_game_time`, and `distance_miles` to its `nearest_vehicle`; plus `balance` — see [Marketplace](#marketplace) |
-| `POST /api/market/{id}/buy`     | Buy a listing: adds the vehicle in the seller's city (name server-generated, `"<year> <brand> <model> <n>"`) and charges the price. 409 if it's gone or unaffordable |
+| `POST /api/market/{id}/buy`     | Buy a listing: adds the vehicle in the seller's city (name server-generated, `"<year> <brand> <model> <n>"`) and charges the price. 409 if it's gone or unaffordable. A trailer listing (`kind: "trailer"`, with `trailer_model` and no `mileage`) adds a trailer there instead and returns `trailer_id` |
+| `GET /api/trailers`              | The file's trailers: `trailer_model`, where each one is, the vehicle pulling it, and `candidates` — every vehicle, with the `reason` it can't hitch it right now (null if it can) |
+| `POST /api/trailers/{id}/hitch`  | Body: `{vehicle_id}`. Hitch a parked trailer to a parked vehicle within 15 miles whose hitch fits and is rated for it. 409 with the reason otherwise |
+| `POST /api/trailers/{id}/unhitch`| Leave it where its vehicle is parked. 409 while the vehicle's on a trip or load |
+| `POST /api/trailers/{id}/sell`   | Refund what was paid (`trailer_sale` in the ledger), unhitching it first if its vehicle is parked |
+| `GET /api/trailer-models`        | List the trailer models |
+| `POST /api/trailer-models`       | Admin. Body: `{year, brand, model, body, hitch_type, cargo_capacity_cuft, empty_weight_lbs, gross_weight_lbs, cost}` |
+| `PUT /api/trailer-models/{id}`   | Admin. Edit every field |
+| `DELETE /api/trailer-models/{id}`| Admin. 409 while any file still owns one |
 | `GET /api/vehicles`             | List vehicles with computed `status` (`READY`/`DRIVING`/`STRANDED`/`SOLD`), each vehicle's `vehicle_model`, `fuel_gallons`, `place_id`, and `current_location`/`current_lat`/`current_lng` derived from its place (settled first — see [Vehicle location](#vehicle-location)). `place_id` lets the frontend create a path straight from a vehicle's own place (`POST /api/paths`'s `origin_place_id`) without re-geocoding it. Defaults to the current fleet (`sold = false`, "My Vehicles"); `?include_sold=true` returns full history. No frontend tab currently surfaces the latter — the frontend only ever calls this without the flag |
 | `POST /api/vehicles/{id}/sell`  | Mark a vehicle sold (soft-delete). 409 if already sold or currently on a trip |
 | `DELETE /api/vehicles/{id}`     | Permanently delete a vehicle (cascades its trips) — distinct from selling; not used by the frontend |

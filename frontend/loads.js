@@ -121,9 +121,14 @@ function escapeLoadText(text) {
 
 function loadQuantity(load) {
 
+    if (load.kind === "towed") {
+        return `${load.trailer_body_labels.join(" or ").toLowerCase()} trailer` +
+            (load.min_trailer_lbs ? `, ${load.min_trailer_lbs.toLocaleString()}+ lbs` : "");
+    }
+
     return load.kind === "passengers"
         ? `${load.quantity} passenger${load.quantity === 1 ? "" : "s"}`
-        : `${load.quantity} cu ft`;
+        : `${load.quantity.toLocaleString()} cu ft`;
 }
 
 
@@ -444,20 +449,31 @@ function renderLoadsSummary(data) {
 
 
 //
-// Mirrors load_capacity() in app.py: freight up to the cargo space,
-// passengers up to the seats less the driver's.
+// Mirrors load_fits() in app.py, against the vehicle's capacity with the
+// trailer it's pulling (GET /api/vehicles): freight up to the cargo space,
+// passengers up to the seats less the driver's, and a towed load only on
+// the right kind and size of trailer.
 //
 function vehicleCanTakeLoad(vehicle, load) {
 
-    const vehicleModel = vehicle.vehicle_model;
+    const capacity = vehicle.capacity;
 
-    if (!vehicleModel || vehicle.status !== "READY" || vehicle.load || driveInFlightVehicleId === vehicle.id) {
+    if (!capacity || vehicle.status !== "READY" || vehicle.load || driveInFlightVehicleId === vehicle.id) {
         return false;
     }
 
-    return load.kind === "passengers"
-        ? load.quantity <= Math.max(0, vehicleModel.person_capacity - 1)
-        : load.quantity <= vehicleModel.cargo_capacity_cuft;
+    if (load.trailer_bodies) {
+
+        if (!load.trailer_bodies.includes(capacity.trailer_body)) {
+            return false;
+        }
+
+        if (capacity.trailer_lbs < (load.min_trailer_lbs || 0)) {
+            return false;
+        }
+    }
+
+    return load.quantity <= (capacity[load.kind] || 0);
 }
 
 

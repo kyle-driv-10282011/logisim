@@ -14,6 +14,7 @@
     <link rel="stylesheet" href="vehiclemodels.css">
     <link rel="stylesheet" href="loads.css">
     <link rel="stylesheet" href="market.css">
+    <link rel="stylesheet" href="trailers.css">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Share+Tech+Mono&display=swap">
 
     <style>
@@ -996,9 +997,18 @@
         <!-- The Marketplace's knobs (global_settings), for every save file. -->
         <div class="models-market-settings">
             <b>Marketplace</b>
-            <label><input id="market-setting-count" type="number" min="1" max="100" step="1" autocomplete="off"> listings per file</label>
+            <label><input id="market-setting-count" type="number" min="1" max="100" step="1" autocomplete="off"> vehicle listings</label>
+            <label><input id="market-setting-trailers" type="number" min="0" max="50" step="1" autocomplete="off"> trailer listings per file</label>
             <label>up to <input id="market-setting-days" type="number" min="0.5" max="60" step="0.5" autocomplete="off"> game days each</label>
             <label>prices &plusmn;<input id="market-setting-spread" type="number" min="0" max="50" step="1" autocomplete="off">%</label>
+            <button onclick="withSpinner(this, saveMarketSettings)">Save</button>
+        </div>
+
+        <!-- What towing a trailer does (global_settings, towing_*) - saved with the Marketplace's. -->
+        <div class="models-market-settings">
+            <b>Towing</b>
+            <label>costs up to <input id="towing-setting-mpg" type="number" min="0" max="80" step="1" autocomplete="off">% mpg at full capacity</label>
+            <label>top speed <input id="towing-setting-speed" type="number" min="35" max="85" step="1" autocomplete="off"> mph</label>
             <button onclick="withSpinner(this, saveMarketSettings)">Save</button>
         </div>
 
@@ -1008,7 +1018,92 @@
             Import updates models with the same year, brand and model instead of duplicating them.
             The CSV carries built-in image filenames only - uploaded pictures stay with their model.
         </div>
+
+        <!-- Trailer models (trailers.js): what the Marketplace sells to pull behind a hitch. -->
+        <div class="trailer-models">
+            <div class="models-toolbar">
+                <div>
+                    <div class="budget-title trailer-models-title">Trailer Models</div>
+                    <div class="budget-subtitle" id="trailer-models-count"></div>
+                </div>
+                <span class="models-toolbar-spacer"></span>
+                <button onclick="openTrailerEditor()">+ New trailer</button>
+            </div>
+            <div class="budget-table-wrap">
+                <table class="budget-table trailer-models-table">
+                    <thead>
+                        <tr>
+                            <th>Trailer</th>
+                            <th>Body</th>
+                            <th>Hitch</th>
+                            <th class="budget-cost">Cargo (cu ft)</th>
+                            <th class="budget-cost">Empty / loaded (lbs)</th>
+                            <th class="budget-cost">Price new</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody id="trailer-models-rows"></tbody>
+                </table>
+            </div>
+            <div class="models-footnote">
+                A vehicle can pull a trailer when its hitch fits (a receiver takes its own class and lighter ones;
+                a gooseneck truck has a Class V receiver too) and it tows at least the trailer's loaded weight.
+                Car hauler, boat, equipment and flatbed trailers carry the loads only a trailer can.
+            </div>
+        </div>
     </div>
+</div>
+
+<div id="trailer-editor" class="budget-page trailer-editor" style="display:none">
+    <form class="budget-sheet trailer-editor-sheet" onsubmit="event.preventDefault(); withSpinner(this.querySelector('[type=submit]'), saveTrailerEditor)">
+        <div class="budget-header">
+            <div class="budget-title" id="trailer-editor-title"></div>
+            <button type="button" class="budget-close" onclick="closeTrailerEditor()" title="Cancel (Esc)">&times;</button>
+        </div>
+
+        <div class="model-editor-fields trailer-editor-fields">
+            <label>Year <input id="trailer-field-year" type="number" min="1886" max="2100" required></label>
+            <label>Brand <input id="trailer-field-brand" autocomplete="off" required></label>
+            <label>Model <input id="trailer-field-model" autocomplete="off" required></label>
+            <label>Body
+                <select id="trailer-field-body">
+                    <option value="utility">Utility</option>
+                    <option value="enclosed">Enclosed cargo</option>
+                    <option value="car_hauler">Car hauler</option>
+                    <option value="boat">Boat</option>
+                    <option value="equipment">Equipment</option>
+                    <option value="flatbed">Flatbed</option>
+                    <option value="dry_van">Dry van</option>
+                </select>
+            </label>
+            <label>Needs hitch
+                <select id="trailer-field-hitch">
+                    <option value="class1">Class I receiver</option>
+                    <option value="class2">Class II receiver</option>
+                    <option value="class3">Class III receiver</option>
+                    <option value="class4">Class IV receiver</option>
+                    <option value="class5">Class V receiver</option>
+                    <option value="gooseneck">Gooseneck</option>
+                    <option value="fifth_wheel">Fifth wheel</option>
+                </select>
+            </label>
+            <label>Cargo (cu ft) <input id="trailer-field-cargo" type="number" min="0" step="1" required></label>
+            <label>Empty (lbs) <input id="trailer-field-empty" type="number" min="1" step="10" required></label>
+            <label>Loaded (lbs) <input id="trailer-field-gross" type="number" min="1" step="10" required></label>
+            <label>Cost ($) <input id="trailer-field-cost" type="number" min="0" step="0.01" required></label>
+            <div class="model-editor-note">
+                Cargo space adds to whatever pulls it. Loaded weight is what a vehicle's towing capacity has to cover,
+                and with empty weight sets how much mpg towing it costs.
+            </div>
+        </div>
+
+        <div id="trailer-editor-error" class="admin-dialog-error"></div>
+
+        <div class="model-editor-actions">
+            <button type="button" onclick="closeTrailerEditor()">Cancel</button>
+            <button type="submit">Save</button>
+        </div>
+    </form>
 </div>
 
 <div id="model-editor" class="budget-page model-editor" style="display:none">
@@ -1034,6 +1129,19 @@
                         <option>4</option><option>6</option><option>8</option><option>10</option><option>18</option>
                     </select>
                 </label>
+                <label>Hitch
+                    <select id="model-field-hitch">
+                        <option value="">None</option>
+                        <option value="class1">Class I receiver</option>
+                        <option value="class2">Class II receiver</option>
+                        <option value="class3">Class III receiver</option>
+                        <option value="class4">Class IV receiver</option>
+                        <option value="class5">Class V receiver</option>
+                        <option value="gooseneck">Gooseneck</option>
+                        <option value="fifth_wheel">Fifth wheel</option>
+                    </select>
+                </label>
+                <label>Tows (lbs) <input id="model-field-towing" type="number" min="0" max="200000" step="100" placeholder="3500"></label>
 
                 <div class="model-editor-section">Engine</div>
                 <label>Size (L) <input id="model-field-liters" type="number" min="0.5" max="20" step="0.01" placeholder="5.8"></label>
@@ -1170,6 +1278,7 @@
                     <option value="passenger">Passenger vans &amp; buses</option>
                     <option value="truck">Box trucks</option>
                     <option value="semi">Semis</option>
+                    <option value="trailer">Trailers</option>
                 </select>
             </label>
             <label>Sort
@@ -1191,7 +1300,8 @@
         <div id="market-grid" class="models-grid"></div>
         <div class="models-footnote">
             Listings come and go with game time. A vehicle you buy is yours where it's parked -
-            in the seller's city - with a full tank and the miles shown.
+            in the seller's city - with a full tank and the miles shown. A trailer waits there
+            for a vehicle that can pull it to come hitch it up.
         </div>
     </div>
 </div>
@@ -1349,6 +1459,9 @@
         <!-- The selected parked vehicle's load board (loads.js). -->
         <div id="load-board" class="load-board" style="display:none"></div>
 
+        <!-- The file's trailers, hitched or parked (trailers.js). -->
+        <div id="trailer-list" class="trailer-list"></div>
+
     </div>
 
     <div class="tab-content" id="tab-gasprices">
@@ -1490,6 +1603,7 @@
 <script src="budget.js"></script>
 <script src="loads.js"></script>
 <script src="market.js"></script>
+<script src="trailers.js"></script>
 <script src="vehiclemodels.js"></script>
 <script src="fileselect.js"></script>
 <script src="admin.js"></script>

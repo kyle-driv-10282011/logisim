@@ -66,20 +66,27 @@ function showVehicleModelsPage() {
 
     renderVehicleModelsPage();
     loadVehicleModels();
+    loadTrailerModels();
     loadMarketSettings();
 }
 
 
 //
 // The Marketplace's settings (global_settings in app.py, market_*): how
-// many listings each save file sees, how long one stays up at most, and
-// how far an asking price strays from what the vehicle's worth. A change
-// shows up as listings come and go - existing ones keep their terms.
+// many vehicle and trailer listings each save file sees, how long one stays
+// up at most, and how far an asking price strays from what it's worth. A
+// change shows up as listings come and go - existing ones keep their terms.
+// Towing's two (towing_*) are saved along with them: what pulling a trailer
+// at the vehicle's full capacity costs in mpg, and the speed it's held to.
+// Those apply from each vehicle's next leg.
 //
 const MARKET_SETTING_INPUTS = {
     market_listing_count: "market-setting-count",
+    market_trailer_listing_count: "market-setting-trailers",
     market_listing_days: "market-setting-days",
     market_price_spread_percent: "market-setting-spread",
+    towing_mpg_penalty_percent: "towing-setting-mpg",
+    towing_speed_limit_mph: "towing-setting-speed",
 };
 
 
@@ -141,8 +148,10 @@ async function saveMarketSettings() {
 
     setModelsResult(
         "success",
-        `Marketplace saved - ${data.market_listing_count} listings per file, up to ${data.market_listing_days} game days, ` +
-        `prices ±${data.market_price_spread_percent}%. Listings already up keep their terms.`
+        `Saved - ${data.market_listing_count} vehicle and ${data.market_trailer_listing_count} trailer listings per file, ` +
+        `up to ${data.market_listing_days} game days, prices ±${data.market_price_spread_percent}%; ` +
+        `towing costs up to ${data.towing_mpg_penalty_percent}% mpg, ${data.towing_speed_limit_mph} mph max. ` +
+        "Listings already up keep their terms, and trips under way their towing."
     );
 }
 
@@ -154,6 +163,7 @@ async function saveMarketSettings() {
 function closeVehicleModelsPage(relock = true) {
 
     closeModelEditor();
+    closeTrailerEditor();
 
     vehicleModelsPageOpen = false;
     document.getElementById("models-page").style.display = "none";
@@ -213,6 +223,7 @@ function renderVehicleModelsPage() {
             (vehicleModel.tire_count ? `<span>${vehicleModel.tire_count} tires</span>` : "") +
             `</div>` +
             `<div class="model-card-engine"></div>` +
+            `<div class="model-card-towing">${towingSummary(vehicleModel) || "No hitch"}</div>` +
             `<div class="model-card-cost">${formatDoubloons(vehicleModel.cost)}</div>` +
             `</div>` +
             `<div class="model-card-actions">` +
@@ -297,6 +308,8 @@ const MODEL_ENGINE_SELECTS = [
     ["model-field-fuel", "fuel_type", (v) => v || null, (v) => v || ""],
     ["model-field-transmission", "transmission", (v) => v || null, (v) => v || ""],
     ["model-field-tires", "tire_count", (v) => (v ? Number(v) : null), (v) => (v ?? "")],
+    ["model-field-hitch", "hitch_type", (v) => v || null, (v) => v || ""],
+    ["model-field-towing", "towing_capacity_lbs", (v) => (v ? Math.round(Number(v)) : null), (v) => (v ?? "")],
     ["model-field-icon-front", "icon_front", (v) => v || "left", (v) => v || "left"]
 ];
 
@@ -338,7 +351,9 @@ const NEW_MODEL_DEFAULTS = {
     fuel_type: null,
     transmission: null,
     tire_count: 4,
-    icon_front: "left"
+    icon_front: "left",
+    hitch_type: null,
+    towing_capacity_lbs: null
 };
 
 
@@ -1928,6 +1943,8 @@ document.addEventListener("keydown", (event) => {
         modelToolState.renderLinePreview(false);
     } else if (modelImageTool) {
         closeImageTool();
+    } else if (document.getElementById("trailer-editor").style.display !== "none") {
+        closeTrailerEditor();
     } else if (document.getElementById("model-editor").style.display !== "none") {
         closeModelEditor();
     } else {

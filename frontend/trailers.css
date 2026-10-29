@@ -1,0 +1,126 @@
+/*
+ * Trailers (trailers.js): My Vehicles' Trailers list, the trailer bits of
+ * vehicle and marketplace cards, and the Vehicle Models page's Trailer
+ * Models table and editor. The cards reuse the vehicle cards' classes and
+ * the table and editor Budget's and Vehicle Models', so every view themes
+ * them the same way; this is what's particular to trailers.
+ */
+
+/* The stand-in picture: a box on a wheel. Sized in em, colored by its text. */
+.trailer-glyph {
+    width: 1.75em;
+    height: 1em;
+    vertical-align: -0.1em;
+}
+
+.vehicle-card-trailer {
+    font-size: 11px;
+    color: #5a4a8a;
+}
+
+.trailer-list-heading {
+    margin: 14px 0 6px;
+    font-size: 13px;
+    font-weight: bold;
+}
+
+.trailer-card-glyph {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    flex-shrink: 0;
+    font-size: 15px;
+    color: #555;
+    background: #f0f0f0;
+    border-radius: 3px;
+}
+
+.trailer-card-specs {
+    font-size: 11px;
+    color: #777;
+}
+
+.trailer-card-actions {
+    margin-top: 6px;
+    align-items: center;
+}
+
+/* Beats #vehicle-panel select's full width, so the buttons fit beside it. */
+#vehicle-panel .trailer-card-actions select {
+    flex: 1;
+    width: auto;
+    min-width: 0;
+    font-size: 11px;
+}
+
+.trailer-card-note {
+    font-size: 11px;
+    color: #777;
+}
+
+/* Marketplace */
+.market-trailer-glyph {
+    color: #666;
+}
+
+.market-trailer-glyph .trailer-glyph {
+    width: 1.5em;
+    height: 0.86em;
+}
+
+.market-towing,
+.model-card-towing {
+    margin-top: 4px;
+    font-size: 12px;
+    color: #333;
+}
+
+.market-pullers {
+    margin-top: 4px;
+    font-size: 12px;
+    color: #2b6a3a;
+}
+
+.market-pullers-none {
+    color: #a33;
+}
+
+/* Vehicle Models page */
+.trailer-models {
+    margin-top: 28px;
+    padding-top: 14px;
+    border-top: 1px solid #ddd;
+}
+
+.trailer-models-title {
+    font-size: 18px;
+}
+
+.trailer-model-name {
+    font-weight: bold;
+}
+
+.trailer-model-actions {
+    text-align: right;
+    white-space: nowrap;
+}
+
+.trailer-model-actions button + button {
+    margin-left: 4px;
+}
+
+/* A small dialog over the Vehicle Models page - not full screen like the vehicle editor. */
+.trailer-editor {
+    z-index: 4100;
+    align-items: flex-start;
+}
+
+.trailer-editor-sheet {
+    max-width: 460px;
+}
+
+.trailer-editor-fields {
+    margin-bottom: 10px;
+}

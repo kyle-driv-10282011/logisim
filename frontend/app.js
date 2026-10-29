@@ -801,6 +801,63 @@ function engineSummary(vehicleModel) {
 }
 
 
+//
+// Mirrors HITCH_LABELS in app.py.
+//
+const HITCH_LABELS = {
+    class1: "Class I receiver",
+    class2: "Class II receiver",
+    class3: "Class III receiver",
+    class4: "Class IV receiver",
+    class5: "Class V receiver",
+    gooseneck: "Gooseneck",
+    fifth_wheel: "Fifth wheel",
+};
+
+//
+// Stands in for a trailer's picture - there's no emoji for one: a box on a
+// wheel, tongue out front.
+//
+const TRAILER_GLYPH =
+    `<svg class="trailer-glyph" viewBox="0 0 26 15" aria-hidden="true">` +
+    `<path d="M1 9.5h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>` +
+    `<rect x="6" y="1" width="19" height="10" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.6"/>` +
+    `<circle cx="15.5" cy="12.2" r="2.3" fill="currentColor"/>` +
+    `</svg>`;
+
+
+//
+// "Class III receiver, tows 5,000 lbs", or "" with no hitch.
+//
+function towingSummary(vehicleModel) {
+
+    if (!vehicleModel.hitch_type) {
+        return "";
+    }
+
+    return `${HITCH_LABELS[vehicleModel.hitch_type] || vehicleModel.hitch_type}` +
+        (vehicleModel.towing_capacity_lbs ? `, tows ${vehicleModel.towing_capacity_lbs.toLocaleString()} lbs` : "");
+}
+
+
+//
+// "a Class III receiver", "a gooseneck", "a fifth wheel" - like
+// hitch_phrase() in app.py.
+//
+function hitchPhrase(hitchType) {
+
+    const label = HITCH_LABELS[hitchType] || hitchType;
+
+    return "a " + (label.startsWith("Class") ? label : label.toLowerCase());
+}
+
+
+function formatMpg(mpg) {
+
+    return mpg ? String(Math.round(mpg * 10) / 10) : "?";
+}
+
+
 async function loadVehicleModels() {
 
     const response = await apiFetch(API + "/api/vehicle-models");
@@ -1396,6 +1453,11 @@ async function loadVehicles() {
     renderLoadBoard();
 
     //
+    // Where each trailer is (and what can hitch it) moves with the fleet.
+    //
+    loadTrailers();
+
+    //
     // A model's map icon may have been added or changed since the markers
     // were drawn.
     //
@@ -1463,7 +1525,7 @@ function renderVehicleList() {
         //
         const fuelRemaining = trip ? tripFuelRemaining(trip) : vehicle.fuel_gallons;
         const fuelGauge = fuelRemaining !== null && vehicle.vehicle_model
-            ? fuelGaugeHtml(fuelRemaining, vehicle.vehicle_model.fuel_tank_gallons, vehicle.vehicle_model.mpg)
+            ? fuelGaugeHtml(fuelRemaining, vehicle.vehicle_model.fuel_tank_gallons, (trip && trip.mpg) || vehicleMpg(vehicle))
             : "";
 
         //
@@ -1491,6 +1553,9 @@ function renderVehicleList() {
             `<div class="vehicle-card-location">${vehicle.current_location}</div>` +
             (vehicle.load
                 ? `<div class="vehicle-card-load">&#128230; ${escapeLoadText(activeLoadSummary(vehicle.load))}</div>`
+                : "") +
+            (vehicle.trailer
+                ? `<div class="vehicle-card-trailer">${TRAILER_GLYPH} ${escapeLoadText(vehicle.trailer.name)}</div>`
                 : "") +
             `</div>` +
             `<span class="status-badge status-${displayStatus}">${displayStatus}</span>` +
@@ -1908,9 +1973,23 @@ async function divertToNearestGasStation(vehicleId) {
 //
 function tripGallonsUsed(trip, vehicle) {
 
-    const mpg = vehicle && vehicle.vehicle_model ? vehicle.vehicle_model.mpg : null;
+    const mpg = trip.mpg || vehicleMpg(vehicle);
 
     return mpg ? trip.distance_miles / mpg : null;
+}
+
+
+//
+// The mpg a vehicle gets as it stands - its model's, less what the trailer
+// it's pulling costs (towing_effect() in app.py).
+//
+function vehicleMpg(vehicle) {
+
+    if (!vehicle) {
+        return null;
+    }
+
+    return vehicle.mpg || (vehicle.vehicle_model ? vehicle.vehicle_model.mpg : null);
 }
 
 
@@ -2248,10 +2327,17 @@ function vehicleDetailHtml(vehicle, trip) {
         `<div class="vehicle-card-detail">` +
         dashboard +
         (vehicleModel
-            ? `Capacity: ${vehicleModel.person_capacity} people, ${vehicleModel.cargo_capacity_cuft} cu ft cargo<br>` +
-              `Cost: $${Math.round(vehicleModel.cost).toLocaleString()} &middot; ${vehicleModel.mpg} mpg<br>` +
+            ? `Capacity: ${vehicleModel.person_capacity} people, ` +
+              `${(vehicle.capacity ? vehicle.capacity.freight : vehicleModel.cargo_capacity_cuft).toLocaleString()} cu ft cargo<br>` +
+              `Cost: $${Math.round(vehicleModel.cost).toLocaleString()} &middot; ` +
+              `${formatMpg(trip.mpg || vehicleMpg(vehicle))} mpg<br>` +
               (engineSummary(vehicleModel) ? `Engine: ${engineSummary(vehicleModel)}<br>` : "") +
-              (vehicleModel.tire_count ? `Tires: ${vehicleModel.tire_count}<br>` : "")
+              (vehicleModel.tire_count ? `Tires: ${vehicleModel.tire_count}<br>` : "") +
+              (towingSummary(vehicleModel) ? `Hitch: ${towingSummary(vehicleModel)}<br>` : "")
+            : "") +
+        (vehicle.trailer
+            ? `Towing: ${escapeLoadText(vehicle.trailer.name)}` +
+              (trip.speed_cap_mph ? ` &middot; ${Math.round(trip.speed_cap_mph)} mph max` : "") + `<br>`
             : "") +
         (vehicle.load
             ? `Load: ${escapeLoadText(activeLoadSummary(vehicle.load))} &middot; pays ${formatDoubloons(vehicle.load.pay)}<br>`

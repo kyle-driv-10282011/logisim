@@ -63,6 +63,8 @@ body {
 .config-hint,
 .list-item-details,
 .vehicle-card-location,
+.trailer-card-specs,
+.trailer-card-note,
 .fuel-gauge-label,
 #gasprice-legend,
 #refresh-interval-ticks,
@@ -746,6 +748,8 @@ body {
 .market-location,
 .market-until,
 .market-new,
+.market-towing,
+.model-card-towing,
 .models-empty,
 .model-editor-fields label,
 .model-editor-note,
@@ -884,6 +888,32 @@ body {
 
 .vehicle-card-load {
     color: var(--neon-cyan);
+}
+
+.vehicle-card-trailer,
+.market-pullers {
+    color: var(--neon-green);
+}
+
+.market-pullers-none {
+    color: var(--neon-pink);
+}
+
+.trailer-list-heading {
+    font-family: var(--pixel-font);
+    font-size: 9px;
+    font-weight: normal;
+    color: var(--neon-yellow);
+}
+
+.trailer-card-glyph,
+.market-trailer-glyph {
+    color: var(--neon-cyan);
+    background: var(--neon-panel-2);
+}
+
+.trailer-models {
+    border-top-color: var(--neon-line);
 }
 
 .load-status {

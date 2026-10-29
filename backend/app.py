@@ -246,7 +246,10 @@ STARTER_VEHICLE_MODEL = {
     "engine_turbo": False,
     "fuel_type": "gasoline",
     "transmission": "automatic",
-    "tire_count": 4
+    "tire_count": 4,
+    # A bumper hitch good for a small trailer - room to grow.
+    "hitch_type": "class2",
+    "towing_capacity_lbs": 3500
 }
 
 #
@@ -306,15 +309,17 @@ def ensure_starter_vehicle_model(cur):
         """
         INSERT INTO vehicle_models
         (year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, fuel_tank_gallons, image,
-         engine_liters, engine_cylinders, engine_turbo, fuel_type, transmission, tire_count)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+         engine_liters, engine_cylinders, engine_turbo, fuel_type, transmission, tire_count,
+         hitch_type, towing_capacity_lbs)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
         (
             starter["year"], starter["brand"], starter["model"], starter["person_capacity"],
             starter["cargo_capacity_cuft"], starter["cost"], starter["mpg"], starter["fuel_tank_gallons"],
             starter["image"], starter["engine_liters"], starter["engine_cylinders"], starter["engine_turbo"],
-            starter["fuel_type"], starter["transmission"], starter["tire_count"]
+            starter["fuel_type"], starter["transmission"], starter["tire_count"],
+            starter["hitch_type"], starter["towing_capacity_lbs"]
         )
     )
 
@@ -367,8 +372,13 @@ def ensure_starter_place(cur):
 # already there - so an admin's edits and deletions stick across restarts;
 # bump VEHICLE_CATALOG_VERSION after adding rows to the file.
 #
+# Version 2 added hitches and towing capacities. Models seeded before it
+# get theirs filled in (only while they have none - nobody could have set
+# one yet), and the semis lose the 3,800 cu ft they used to carry as if a
+# trailer came with them - now it's bought separately (TRAILER_CATALOG_PATH).
+#
 VEHICLE_CATALOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "vehicle_catalog.csv")
-VEHICLE_CATALOG_VERSION = 1
+VEHICLE_CATALOG_VERSION = 2
 
 
 def seed_vehicle_catalog(cur):
@@ -385,6 +395,23 @@ def seed_vehicle_catalog(cur):
 
     for entry in catalog:
 
+        hitch_type = entry["hitch_type"] or None
+        towing_capacity_lbs = int(entry["towing_capacity_lbs"]) if entry["towing_capacity_lbs"] else None
+
+        cur.execute(
+            """
+            UPDATE vehicle_models
+            SET hitch_type = %s, towing_capacity_lbs = %s,
+                cargo_capacity_cuft = CASE WHEN %s = 'fifth_wheel' THEN %s ELSE cargo_capacity_cuft END
+            WHERE year = %s AND LOWER(brand) = LOWER(%s) AND LOWER(model) = LOWER(%s)
+            AND hitch_type IS NULL AND towing_capacity_lbs IS NULL
+            """,
+            (
+                hitch_type, towing_capacity_lbs, hitch_type, float(entry["cargo_capacity_cuft"]),
+                int(entry["year"]), entry["brand"], entry["model"]
+            )
+        )
+
         cur.execute(
             "SELECT 1 FROM vehicle_models WHERE year = %s AND LOWER(brand) = LOWER(%s) AND LOWER(model) = LOWER(%s)",
             (int(entry["year"]), entry["brand"], entry["model"])
@@ -397,8 +424,9 @@ def seed_vehicle_catalog(cur):
             """
             INSERT INTO vehicle_models
             (year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, fuel_tank_gallons,
-             engine_liters, engine_cylinders, engine_turbo, fuel_type, transmission, tire_count)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             engine_liters, engine_cylinders, engine_turbo, fuel_type, transmission, tire_count,
+             hitch_type, towing_capacity_lbs)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 int(entry["year"]), entry["brand"], entry["model"], int(entry["person_capacity"]),
@@ -407,6 +435,21 @@ def seed_vehicle_catalog(cur):
                 *(parse_engine_csv_value(column, entry[column]) for column in SPEC_COLUMNS)
             )
         )
+
+    #
+    # Grandpa's van gets its hitch the same way.
+    #
+    cur.execute(
+        """
+        UPDATE vehicle_models SET hitch_type = %s, towing_capacity_lbs = %s
+        WHERE year = %s AND LOWER(brand) = LOWER(%s) AND LOWER(model) = LOWER(%s)
+        AND hitch_type IS NULL AND towing_capacity_lbs IS NULL
+        """,
+        (
+            STARTER_VEHICLE_MODEL["hitch_type"], STARTER_VEHICLE_MODEL["towing_capacity_lbs"],
+            STARTER_VEHICLE_MODEL["year"], STARTER_VEHICLE_MODEL["brand"], STARTER_VEHICLE_MODEL["model"]
+        )
+    )
 
     cur.execute(
         """
@@ -615,6 +658,9 @@ GLOBAL_SETTING_DEFAULTS = {
     "market_listing_count": 24.0,
     "market_listing_days": 7.0,
     "market_price_spread_percent": 15.0,
+    "market_trailer_listing_count": 8.0,
+    "towing_mpg_penalty_percent": 30.0,
+    "towing_speed_limit_mph": 65.0,
 }
 
 #
@@ -625,6 +671,9 @@ GLOBAL_SETTING_RANGES = {
     "market_listing_count": (1.0, 100.0, "Marketplace listings", ""),
     "market_listing_days": (0.5, 60.0, "A listing's time up", " game days"),
     "market_price_spread_percent": (0.0, 50.0, "The price spread", "%"),
+    "market_trailer_listing_count": (0.0, 50.0, "Trailer listings", ""),
+    "towing_mpg_penalty_percent": (0.0, 80.0, "The towing mpg penalty", "%"),
+    "towing_speed_limit_mph": (35.0, 85.0, "The towing speed limit", " mph"),
 }
 
 
@@ -914,7 +963,7 @@ def settle_arrived_vehicles(conn, cur):
             v.id, t.id, p.destination_place_id, t.resume_destination_place_id, t.auto_refuel,
             p.distances_miles, t.realized_seconds, t.realized_duration_seconds,
             t.starting_fuel_gallons, t.roadside_refuel_count, t.paused_seconds,
-            vm.mpg, vm.fuel_tank_gallons, EXTRACT(EPOCH FROM (NOW() - t.started_at)),
+            vm.mpg * t.towing_mpg_factor, vm.fuel_tank_gallons, EXTRACT(EPOCH FROM (NOW() - t.started_at)),
             t.auto_divert_claimed_at, t.trip_meter_offset_miles, t.path_id,
             s.time_multiplier, s.auto_refuel_level, v.slot_id,
             t.fuel_value_dollars, t.carried_fuel_cost, v.name, t.journey_origin, COALESCE(t.journey_id, t.id)
@@ -1328,7 +1377,8 @@ def maybe_auto_divert_to_gas_station(conn, cur, vehicle_id, trip_id, progress):
 
     cur.execute(
         """
-        SELECT p.route, p.distances_miles, p.destination_place_id, t.resume_destination_place_id, vm.mpg
+        SELECT p.route, p.distances_miles, p.destination_place_id, t.resume_destination_place_id,
+            vm.mpg * t.towing_mpg_factor
         FROM trips t
         JOIN paths p ON p.id = t.path_id
         JOIN vehicles v ON v.id = t.vehicle_id
@@ -1451,7 +1501,9 @@ def congestion_factor(trip_id, segment_index, free_flow_mph, effective_dt, traff
     return max(0.15, min(1.05, baseline * incident + jitter)) * traffic_bias
 
 
-def segment_speed_mph(zones, max_speeds_mph, segment_index, position_miles, effective_dt, traffic_bias, trip_id):
+def segment_speed_mph(
+    zones, max_speeds_mph, segment_index, position_miles, effective_dt, traffic_bias, trip_id, speed_cap_mph=None
+):
 
     #
     # A user-defined zone covering this segment overrides the road entirely
@@ -1486,10 +1538,17 @@ def segment_speed_mph(zones, max_speeds_mph, segment_index, position_miles, effe
 
         factor = congestion_factor(trip_id, segment_index, free_flow_mph, effective_dt, traffic_bias)
 
-    return max(MIN_REALISTIC_SPEED_MPH, min(MAX_REALISTIC_SPEED_MPH, free_flow_mph * factor))
+    speed_mph = max(MIN_REALISTIC_SPEED_MPH, min(MAX_REALISTIC_SPEED_MPH, free_flow_mph * factor))
+
+    #
+    # Pulling a trailer, it keeps to the towing speed limit (trips.speed_cap_mph).
+    #
+    return min(speed_mph, speed_cap_mph) if speed_cap_mph else speed_mph
 
 
-def build_trip_schedule(distances_miles, max_speeds_mph, zones, traffic_base_datetime, traffic_bias, trip_id):
+def build_trip_schedule(
+    distances_miles, max_speeds_mph, zones, traffic_base_datetime, traffic_bias, trip_id, speed_cap_mph=None
+):
 
     #
     # A trip's actual drive time is derived from distance / effective speed
@@ -1517,7 +1576,8 @@ def build_trip_schedule(distances_miles, max_speeds_mph, zones, traffic_base_dat
             distances_miles[segment_index],
             effective_dt,
             traffic_bias,
-            trip_id
+            trip_id,
+            speed_cap_mph
         )
 
         cumulative_seconds.append(cumulative_seconds[-1] + (segment_miles / speed_mph) * 3600)
@@ -2585,7 +2645,8 @@ def derive_position(
     roadside_refuel_count,
     paused_seconds,
     elapsed_real_seconds,
-    time_multiplier
+    time_multiplier,
+    speed_cap_mph=None
 ):
 
     progress = resolve_trip_progress(
@@ -2665,7 +2726,7 @@ def derive_position(
         speed_mph = round(
             segment_speed_mph(
                 zones, max_speeds_mph, segment_index, distances_miles[segment_index],
-                effective_dt, traffic_bias, trip_id
+                effective_dt, traffic_bias, trip_id, speed_cap_mph
             ),
             1
         )
@@ -3209,6 +3270,56 @@ def run_migrations():
     )
 
     #
+    # Trailers (see the "Trailers" section): hitches on vehicle models, the
+    # trailer models and each file's own trailers, towing stamped on each
+    # trip leg, and the loads only a trailer can carry.
+    #
+    cur.execute("ALTER TABLE vehicle_models ADD COLUMN IF NOT EXISTS hitch_type TEXT")
+    cur.execute("ALTER TABLE vehicle_models ADD COLUMN IF NOT EXISTS towing_capacity_lbs INTEGER")
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trailer_models (
+            id SERIAL PRIMARY KEY,
+            year INTEGER NOT NULL,
+            brand TEXT NOT NULL,
+            model TEXT NOT NULL,
+            body TEXT NOT NULL,
+            hitch_type TEXT NOT NULL,
+            cargo_capacity_cuft DOUBLE PRECISION NOT NULL DEFAULT 0,
+            empty_weight_lbs INTEGER NOT NULL,
+            gross_weight_lbs INTEGER NOT NULL,
+            cost DOUBLE PRECISION NOT NULL,
+            created TIMESTAMP DEFAULT NOW()
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trailers (
+            id SERIAL PRIMARY KEY,
+            slot_id INTEGER NOT NULL REFERENCES save_slots(id) ON DELETE CASCADE,
+            trailer_model_id INTEGER NOT NULL REFERENCES trailer_models(id),
+            name TEXT NOT NULL,
+            place_id INTEGER NOT NULL REFERENCES places(id),
+            vehicle_id INTEGER REFERENCES vehicles(id) ON DELETE SET NULL,
+            sold BOOLEAN NOT NULL DEFAULT FALSE,
+            sold_at TIMESTAMP,
+            purchase_price NUMERIC(14,2) NOT NULL DEFAULT 0,
+            list_price NUMERIC(14,2),
+            created TIMESTAMP DEFAULT NOW()
+        )
+        """
+    )
+    cur.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS trailers_one_per_vehicle ON trailers (vehicle_id) WHERE vehicle_id IS NOT NULL"
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS trailers_slot ON trailers (slot_id)")
+    cur.execute("ALTER TABLE trips ADD COLUMN IF NOT EXISTS towing_mpg_factor DOUBLE PRECISION NOT NULL DEFAULT 1")
+    cur.execute("ALTER TABLE trips ADD COLUMN IF NOT EXISTS speed_cap_mph DOUBLE PRECISION")
+    cur.execute("ALTER TABLE loads ADD COLUMN IF NOT EXISTS trailer_bodies TEXT[]")
+    cur.execute("ALTER TABLE loads ADD COLUMN IF NOT EXISTS min_trailer_lbs INTEGER")
+
+    #
     # Startup is the one moment nothing can be mid-way through creating a
     # path for a trip (job_executor is brand new), so it's safe to sweep
     # every path here - including all the saved ones from before paths
@@ -3255,11 +3366,27 @@ def run_migrations():
     cur.execute("CREATE INDEX IF NOT EXISTS market_listings_slot_status ON market_listings (slot_id, status)")
 
     #
+    # Trailers are sold there too: a listing is a vehicle model or a
+    # trailer model, and a trailer has no odometer.
+    #
+    cur.execute("ALTER TABLE market_listings ALTER COLUMN vehicle_model_id DROP NOT NULL")
+    cur.execute("ALTER TABLE market_listings ALTER COLUMN mileage DROP NOT NULL")
+    cur.execute(
+        "ALTER TABLE market_listings ADD COLUMN IF NOT EXISTS trailer_model_id INTEGER "
+        "REFERENCES trailer_models(id) ON DELETE CASCADE"
+    )
+    cur.execute(
+        "ALTER TABLE market_listings ADD COLUMN IF NOT EXISTS trailer_id INTEGER "
+        "REFERENCES trailers(id) ON DELETE SET NULL"
+    )
+
+    #
     # The real-world vehicles the marketplace sells (VEHICLE_CATALOG_PATH),
     # and the starter van's vehicle model, which is always in the database
     # (see STARTER_VEHICLE_MODEL).
     #
     seed_vehicle_catalog(cur)
+    seed_trailer_catalog(cur)
     ensure_starter_vehicle_model(cur)
 
     conn.commit()
@@ -3589,7 +3716,15 @@ def vehicle_model_dict(row):
         # "right") - so the map can face it the way it's driving (flipped
         # for the other way, tilted for north/south).
         #
-        "icon_front": row[18]
+        "icon_front": row[18],
+
+        #
+        # What it can pull (HITCH_TYPES) - None for no hitch - and how
+        # heavy a trailer, loaded.
+        #
+        "hitch_type": row[19],
+
+        "towing_capacity_lbs": row[20]
     }
 
 
@@ -3598,7 +3733,7 @@ VEHICLE_MODEL_COLUMNS = """
     (SELECT i.sha256 FROM vehicle_model_images i WHERE i.vehicle_model_id = vehicle_models.id),
     engine_liters, engine_cylinders, engine_turbo, fuel_type, transmission,
     (SELECT c.sha256 FROM vehicle_model_icons c WHERE c.vehicle_model_id = vehicle_models.id),
-    tire_count, icon_front
+    tire_count, icon_front, hitch_type, towing_capacity_lbs
 """
 
 
@@ -3851,7 +3986,17 @@ TIRE_COUNTS = (4, 6, 8, 10, 18)
 
 ICON_FRONTS = ("left", "right")
 
-SPEC_COLUMNS = (*ENGINE_COLUMNS, "tire_count")
+#
+# What a vehicle can pull: a receiver hitch by class (heavier classes take
+# every lighter class's trailers), a gooseneck ball in a pickup's bed, or a
+# semi's fifth wheel. See hitch_fits().
+#
+RECEIVER_HITCHES = ("class1", "class2", "class3", "class4", "class5")
+HITCH_TYPES = (*RECEIVER_HITCHES, "gooseneck", "fifth_wheel")
+
+TOWING_CAPACITY_RANGE = (0, 200000)
+
+SPEC_COLUMNS = (*ENGINE_COLUMNS, "tire_count", "hitch_type", "towing_capacity_lbs")
 
 
 def validate_engine(req):
@@ -3878,6 +4023,20 @@ def validate_engine(req):
     if req.tire_count is not None and req.tire_count not in TIRE_COUNTS:
         raise HTTPException(status_code=400, detail=f"Tires must be one of {', '.join(map(str, TIRE_COUNTS))}")
 
+    if req.hitch_type is not None and req.hitch_type not in HITCH_TYPES:
+        raise HTTPException(status_code=400, detail=f"Hitch must be one of {', '.join(HITCH_TYPES)}, or none")
+
+    if req.towing_capacity_lbs is not None and not (
+        TOWING_CAPACITY_RANGE[0] <= req.towing_capacity_lbs <= TOWING_CAPACITY_RANGE[1]
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Towing capacity must be {TOWING_CAPACITY_RANGE[0]:,}-{TOWING_CAPACITY_RANGE[1]:,} lbs"
+        )
+
+    if req.hitch_type is not None and not req.towing_capacity_lbs:
+        raise HTTPException(status_code=400, detail="A vehicle with a hitch needs a towing capacity")
+
 
 #
 # A CSV cell for one of SPEC_COLUMNS -> its value (blank -> None).
@@ -3892,8 +4051,11 @@ def parse_engine_csv_value(column, text):
     if column == "engine_liters":
         return float(text)
 
-    if column in ("engine_cylinders", "tire_count"):
+    if column in ("engine_cylinders", "tire_count", "towing_capacity_lbs"):
         return int(float(text))
+
+    if column == "hitch_type" and text == "none":
+        return None
 
     if column == "engine_turbo":
         if text in ("yes", "y", "true", "1"):
@@ -3937,6 +4099,8 @@ class CreateVehicleModelRequest(BaseModel):
     transmission: Optional[str] = None
     tire_count: Optional[int] = None
     icon_front: Optional[str] = None
+    hitch_type: Optional[str] = None
+    towing_capacity_lbs: Optional[int] = None
 
 
 
@@ -4101,6 +4265,9 @@ class GlobalSettingsRequest(BaseModel):
     market_listing_count: Optional[float] = None
     market_listing_days: Optional[float] = None
     market_price_spread_percent: Optional[float] = None
+    market_trailer_listing_count: Optional[float] = None
+    towing_mpg_penalty_percent: Optional[float] = None
+    towing_speed_limit_mph: Optional[float] = None
 
 
 #
@@ -4133,8 +4300,9 @@ def update_global_settings(req: GlobalSettingsRequest, _admin: None = Depends(re
         if not low <= value <= high:
             raise HTTPException(status_code=400, detail=f"{label} must be {low:g}-{high:g}{unit}")
 
-    if "market_listing_count" in changes:
-        changes["market_listing_count"] = float(round(changes["market_listing_count"]))
+    for key in ("market_listing_count", "market_trailer_listing_count"):
+        if key in changes:
+            changes[key] = float(round(changes[key]))
 
     conn = db()
     cur = conn.cursor()
@@ -4302,7 +4470,10 @@ def erase_save_slot(slot_id: int, _admin: None = Depends(require_admin)):
     )
     path_ids = [row[0] for row in cur.fetchall()]
 
-    cur.execute("SELECT DISTINCT place_id FROM vehicles WHERE slot_id = %s", (slot_id,))
+    cur.execute(
+        "SELECT place_id FROM vehicles WHERE slot_id = %s UNION SELECT place_id FROM trailers WHERE slot_id = %s",
+        (slot_id, slot_id)
+    )
     place_ids = [row[0] for row in cur.fetchall()]
 
     cur.execute("DELETE FROM save_slots WHERE id = %s RETURNING id", (slot_id,))
@@ -4614,8 +4785,9 @@ def create_vehicle_model(req: CreateVehicleModelRequest, _admin: None = Depends(
         """
         INSERT INTO vehicle_models
         (year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, image, fuel_tank_gallons,
-         engine_liters, engine_cylinders, engine_turbo, fuel_type, transmission, tire_count, icon_front)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+         engine_liters, engine_cylinders, engine_turbo, fuel_type, transmission, tire_count, icon_front,
+         hitch_type, towing_capacity_lbs)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
         (
@@ -4634,7 +4806,9 @@ def create_vehicle_model(req: CreateVehicleModelRequest, _admin: None = Depends(
             req.fuel_type,
             req.transmission,
             req.tire_count,
-            req.icon_front or "left"
+            req.icon_front or "left",
+            req.hitch_type,
+            req.towing_capacity_lbs
         )
     )
 
@@ -4685,14 +4859,15 @@ def update_vehicle_model(id: int, req: CreateVehicleModelRequest, _admin: None =
             SET year = %s, brand = %s, model = %s, person_capacity = %s, cargo_capacity_cuft = %s,
                 cost = %s, mpg = %s, image = %s, fuel_tank_gallons = %s,
                 engine_liters = %s, engine_cylinders = %s, engine_turbo = %s, fuel_type = %s, transmission = %s,
-                tire_count = %s, icon_front = COALESCE(%s, icon_front)
+                tire_count = %s, icon_front = COALESCE(%s, icon_front),
+                hitch_type = %s, towing_capacity_lbs = %s
             WHERE id = %s
             """,
             (
                 req.year, req.brand.strip(), req.model.strip(), req.person_capacity, req.cargo_capacity_cuft,
                 req.cost, req.mpg, req.image or None, req.fuel_tank_gallons,
                 req.engine_liters, req.engine_cylinders, req.engine_turbo, req.fuel_type, req.transmission,
-                req.tire_count, req.icon_front, id
+                req.tire_count, req.icon_front, req.hitch_type, req.towing_capacity_lbs, id
             )
         )
 
@@ -5463,8 +5638,9 @@ async def upload_vehicle_models(file: UploadFile = File(...), _admin: None = Dep
                     """
                     INSERT INTO vehicle_models
                     (year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, fuel_tank_gallons, image,
-                     engine_liters, engine_cylinders, engine_turbo, fuel_type, transmission, tire_count, icon_front)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     engine_liters, engine_cylinders, engine_turbo, fuel_type, transmission, tire_count,
+                     hitch_type, towing_capacity_lbs, icon_front)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                     """,
                     (
@@ -5632,7 +5808,7 @@ def fetch_live_trip_progress(cur, vehicle_ids, time_multiplier):
         SELECT DISTINCT ON (t.vehicle_id)
             t.vehicle_id, p.distances_miles, t.realized_seconds, t.realized_duration_seconds,
             t.starting_fuel_gallons, t.roadside_refuel_count, t.paused_seconds,
-            EXTRACT(EPOCH FROM (NOW() - t.started_at)), vs.mpg, vs.fuel_tank_gallons
+            EXTRACT(EPOCH FROM (NOW() - t.started_at)), vs.mpg * t.towing_mpg_factor, vs.fuel_tank_gallons
         FROM trips t
         JOIN paths p ON p.id = t.path_id
         JOIN vehicles v ON v.id = t.vehicle_id
@@ -5772,6 +5948,16 @@ def list_vehicles(include_sold: bool = False, slot: int = Depends(current_slot))
     )
 
     loads_by_vehicle = fetch_active_loads(cur, [row[0] for row in rows])
+    trailers_by_vehicle = fetch_hitched_trailers(cur, [row[0] for row in rows])
+
+    towing_by_vehicle = {}
+
+    for row in rows:
+
+        trailer = trailers_by_vehicle.get(row[0])
+
+        if trailer and row[2] in vehicle_models_by_id:
+            towing_by_vehicle[row[0]] = towing_effect(cur, vehicle_models_by_id[row[2]], trailer["trailer_model"])
 
     cur.close()
     conn.close()
@@ -5781,6 +5967,9 @@ def list_vehicles(include_sold: bool = False, slot: int = Depends(current_slot))
     for row in rows:
 
         progress = progress_by_vehicle.get(row[0])
+        vehicle_model = vehicle_models_by_id.get(row[2])
+        trailer = trailers_by_vehicle.get(row[0])
+        mpg_factor, speed_cap_mph = towing_by_vehicle.get(row[0], (1.0, None))
 
         result.append({
 
@@ -5836,7 +6025,22 @@ def list_vehicles(include_sold: bool = False, slot: int = Depends(current_slot))
             #
             # The load it's carrying or on its way to pick up, if any.
             #
-            "load": loads_by_vehicle.get(row[0])
+            "load": loads_by_vehicle.get(row[0]),
+
+            #
+            # The trailer it's pulling ({id, name, trailer_model}), if any,
+            # what it can take with it (load_capacity()), and what towing
+            # does to it as it stands - the mpg it'd set out on a leg with,
+            # and the speed it can't go over (None untowed).
+            #
+            "trailer": trailer,
+
+            "capacity": load_capacity(vehicle_model, trailer["trailer_model"] if trailer else None)
+                if vehicle_model else None,
+
+            "mpg": vehicle_model["mpg"] * mpg_factor if vehicle_model else None,
+
+            "speed_cap_mph": speed_cap_mph
         })
 
     return result
@@ -5923,6 +6127,8 @@ def sell_vehicle(id: int, slot: int = Depends(current_slot)):
         cur.close()
         conn.close()
         raise HTTPException(status_code=409, detail="Vehicle is on a trip - it can be sold once it's parked")
+
+    drop_hitched_trailer(cur, id)
 
     cur.execute(
         "UPDATE vehicles SET sold = TRUE, sold_at = NOW() WHERE id=%s RETURNING name, purchase_price, place_id",
@@ -6090,7 +6296,7 @@ def roadside_refuel_vehicle(id: int, slot: int = Depends(current_slot)):
         SELECT
             t.id, t.paused_seconds, t.roadside_refuel_count, t.starting_fuel_gallons,
             t.realized_seconds, t.realized_duration_seconds, p.distances_miles,
-            vs.mpg, vs.fuel_tank_gallons, EXTRACT(EPOCH FROM (NOW() - t.started_at)), p.route,
+            vs.mpg * t.towing_mpg_factor, vs.fuel_tank_gallons, EXTRACT(EPOCH FROM (NOW() - t.started_at)), p.route,
             t.journey_origin, COALESCE(t.resume_destination_place_id, p.destination_place_id),
             COALESCE(t.journey_id, t.id)
         FROM trips t
@@ -6221,7 +6427,7 @@ def fetch_active_trip_for_diversion(cur, vehicle_id, time_multiplier):
             t.id, p.route, p.distances_miles, p.max_speeds_mph,
             t.realized_seconds, t.realized_duration_seconds, t.starting_fuel_gallons,
             t.roadside_refuel_count, t.paused_seconds, t.resume_destination_place_id,
-            p.destination_place_id, vm.mpg, vm.fuel_tank_gallons,
+            p.destination_place_id, vm.mpg * t.towing_mpg_factor, vm.fuel_tank_gallons,
             EXTRACT(EPOCH FROM (NOW() - t.started_at))
         FROM trips t
         JOIN paths p ON p.id = t.path_id
@@ -6428,6 +6634,8 @@ def delete_vehicle(id: int, slot: int = Depends(current_slot)):
     cur.execute("SELECT DISTINCT path_id FROM trips WHERE vehicle_id = %s", (id,))
     trip_path_ids = [row[0] for row in cur.fetchall()]
 
+    drop_hitched_trailer(cur, id)
+
     cur.execute(
         "DELETE FROM vehicles WHERE id=%s RETURNING id, place_id",
         (id,)
@@ -6484,7 +6692,7 @@ def vehicle_city(id: int, slot: int = Depends(current_slot)):
             t.realized_duration_seconds,
             t.traffic_base_datetime,
             t.traffic_bias,
-            vs.mpg,
+            vs.mpg * t.towing_mpg_factor,
             vs.fuel_tank_gallons,
             t.starting_fuel_gallons,
             t.roadside_refuel_count,
@@ -7452,6 +7660,7 @@ def forget_unused_places(cur, place_ids=None):
         DELETE FROM places p
         WHERE (%s::int[] IS NULL OR p.id = ANY(%s::int[]))
         AND NOT EXISTS (SELECT 1 FROM vehicles v WHERE v.place_id = p.id)
+        AND NOT EXISTS (SELECT 1 FROM trailers r WHERE r.place_id = p.id)
         AND NOT EXISTS (SELECT 1 FROM paths x WHERE x.origin_place_id = p.id OR x.destination_place_id = p.id)
         AND NOT EXISTS (SELECT 1 FROM gas_prices g WHERE g.place_id = p.id)
         AND NOT EXISTS (
@@ -7519,14 +7728,16 @@ def start_diversion_trip(
     if journey_origin is None:
         journey_origin = fetch_places_by_id(cur, [origin_place_id])[origin_place_id]["description"]
 
+    towing_mpg_factor, speed_cap_mph = vehicle_towing(cur, vehicle_id)
+
     cur.execute(
         """
         INSERT INTO trips
-        (vehicle_id, path_id, distance_miles, traffic_base_datetime, traffic_bias, zones_snapshot, starting_fuel_gallons, resume_destination_place_id, auto_refuel, trip_meter_offset_miles, fuel_value_dollars, carried_fuel_cost, journey_origin, journey_id, journey_route_before)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        (vehicle_id, path_id, distance_miles, traffic_base_datetime, traffic_bias, zones_snapshot, starting_fuel_gallons, resume_destination_place_id, auto_refuel, trip_meter_offset_miles, fuel_value_dollars, carried_fuel_cost, journey_origin, journey_id, journey_route_before, towing_mpg_factor, speed_cap_mph)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
-        (vehicle_id, path_id, distances_miles[-1], game_time, 1.0, json.dumps(zones), starting_fuel_gallons, resume_destination_place_id, auto_refuel, trip_meter_offset_miles, fuel_value_dollars, carried_fuel_cost, journey_origin, journey_id, json.dumps(journey_route_before or []))
+        (vehicle_id, path_id, distances_miles[-1], game_time, 1.0, json.dumps(zones), starting_fuel_gallons, resume_destination_place_id, auto_refuel, trip_meter_offset_miles, fuel_value_dollars, carried_fuel_cost, journey_origin, journey_id, json.dumps(journey_route_before or []), towing_mpg_factor, speed_cap_mph)
     )
 
     trip_id = cur.fetchone()[0]
@@ -7537,7 +7748,9 @@ def start_diversion_trip(
     if journey_id is None:
         cur.execute("UPDATE trips SET journey_id = id WHERE id = %s", (trip_id,))
 
-    realized_seconds = build_trip_schedule(distances_miles, max_speeds_mph, zones, game_time, 1.0, trip_id)
+    realized_seconds = build_trip_schedule(
+        distances_miles, max_speeds_mph, zones, game_time, 1.0, trip_id, speed_cap_mph
+    )
     realized_duration_seconds = realized_seconds[-1]
 
     cur.execute(
@@ -7938,6 +8151,11 @@ LOAD_CARGO = [
     ("Hardware store restock", "freight", 60, 280),
     ("Library books", "freight", 30, 140),
     ("Bicycles", "freight", 40, 200),
+    ("Pallets of bottled water", "freight", 300, 900),
+    ("Furniture store delivery", "freight", 400, 1200),
+    ("Retail restock", "freight", 600, 2000),
+    ("Paper goods", "freight", 1200, 3500),
+    ("Full truckload", "freight", 2000, 3800),
     ("Wedding party", "passengers", 3, 12),
     ("Sports team", "passengers", 6, 15),
     ("Airport shuttle group", "passengers", 1, 8),
@@ -7946,13 +8164,41 @@ LOAD_CARGO = [
 ]
 
 #
+# What only a trailer can carry: (cargo, the trailer bodies that can take
+# it, the smallest trailer by gross_weight_lbs that can take its weight,
+# pay per estimated loaded mile, flat fee). One at a time - kind 'towed',
+# quantity 1.
+#
+LOAD_TOWED_CARGO = [
+    ("Project car", ("car_hauler",), 5000, 1.90, 75),
+    ("Dealer trade-in", ("car_hauler",), 6000, 2.10, 90),
+    ("Classic car to auction", ("car_hauler",), 7000, 2.60, 150),
+    ("Fishing boat", ("boat",), 3000, 1.80, 60),
+    ("Pontoon boat", ("boat",), 5000, 2.20, 90),
+    ("Skid steer", ("equipment", "flatbed"), 9000, 2.40, 100),
+    ("Mini excavator", ("equipment", "flatbed"), 12000, 2.80, 120),
+    ("Farm tractor", ("equipment", "flatbed"), 14000, 3.00, 150),
+    ("Lumber", ("flatbed",), 20000, 3.00, 120),
+    ("Steel beams", ("flatbed",), 20000, 3.20, 150),
+    ("Excavator", ("equipment",), 40000, 5.00, 300),
+]
+
+#
+# How often a vehicle pulling a trailer that can take towed loads gets one
+# instead of freight or passengers.
+#
+LOAD_TOWED_SHARE = 0.5
+
+#
 # Pay: per estimated loaded mile, a base plus more for a bigger load, plus a
 # flat handling fee. Freight pays $1.10 + $0.0045 per cu ft per mile, so a
 # full 300 cu ft van earns about $2.45 a mile against roughly $0.50 of gas -
-# but the trip to the pickup is unpaid.
+# but the trip to the pickup is unpaid. Past bulk_from cu ft (a big trailer
+# or truck's worth) each further cu ft earns bulk_unit_mile instead, so a
+# full 53 ft van pays about $6.70 a mile rather than $18.
 #
 LOAD_PAY = {
-    "freight": {"per_mile": 1.10, "per_unit_mile": 0.0045, "fee": 40},
+    "freight": {"per_mile": 1.10, "per_unit_mile": 0.0045, "fee": 40, "bulk_from": 320, "bulk_unit_mile": 0.0012},
     "passengers": {"per_mile": 0.85, "per_unit_mile": 0.15, "fee": 30},
 }
 
@@ -7960,16 +8206,59 @@ LOAD_PAY = {
 def load_pay(kind, quantity, miles):
 
     rate = LOAD_PAY[kind]
+    bulk_from = rate.get("bulk_from", quantity)
 
-    return round(miles * (rate["per_mile"] + rate["per_unit_mile"] * quantity) + rate["fee"])
+    per_mile = (
+        rate["per_mile"]
+        + rate["per_unit_mile"] * min(quantity, bulk_from)
+        + rate.get("bulk_unit_mile", 0) * max(0, quantity - bulk_from)
+    )
+
+    return round(miles * per_mile + rate["fee"])
 
 
-def load_capacity(vehicle_model):
+#
+# What a vehicle can take, with the trailer it's pulling (None for none):
+# freight up to its cargo space plus the trailer's, passengers up to its
+# seats less the driver's, and one towed load if the trailer's body and
+# size suit it (load_fits()).
+#
+def load_capacity(vehicle_model, trailer_model=None):
 
     return {
-        "freight": vehicle_model["cargo_capacity_cuft"] or 0,
+        "freight": (vehicle_model["cargo_capacity_cuft"] or 0)
+            + ((trailer_model["cargo_capacity_cuft"] or 0) if trailer_model else 0),
         "passengers": max(0, (vehicle_model["person_capacity"] or 0) - 1),
+        "towed": 1 if trailer_model else 0,
+        "trailer_body": trailer_model["body"] if trailer_model else None,
+        "trailer_lbs": trailer_model["gross_weight_lbs"] if trailer_model else 0,
     }
+
+
+def load_fits(load, capacity):
+
+    if load["trailer_bodies"]:
+
+        if capacity["trailer_body"] not in load["trailer_bodies"]:
+            return False
+
+        if capacity["trailer_lbs"] < (load["min_trailer_lbs"] or 0):
+            return False
+
+    return load["quantity"] <= capacity[load["kind"]]
+
+
+#
+# load_capacity() for a vehicle as it stands, with whatever it's pulling.
+#
+def vehicle_load_capacity(cur, vehicle_id, vehicle_model_id):
+
+    trailer = fetch_hitched_trailers(cur, [vehicle_id]).get(vehicle_id)
+
+    return load_capacity(
+        fetch_vehicle_models_by_id(cur, [vehicle_model_id])[vehicle_model_id],
+        trailer["trailer_model"] if trailer else None
+    )
 
 
 def city_label(name, state):
@@ -8014,7 +8303,12 @@ def generate_loads(cur, slot_id, lat, lng, game_now, capacity, count, radius_mil
         if capacity[cargo[1]] >= cargo[2]
     ]
 
-    if not cargo_choices:
+    towed_choices = [
+        cargo for cargo in LOAD_TOWED_CARGO
+        if capacity["trailer_body"] in cargo[1] and capacity["trailer_lbs"] >= cargo[2]
+    ]
+
+    if not cargo_choices and not towed_choices:
         return 0
 
     created = 0
@@ -8038,18 +8332,30 @@ def generate_loads(cur, slot_id, lat, lng, game_now, capacity, count, radius_mil
         )
         destination = int(random.choices(destination_candidates, weights=weights)[0])
 
-        #
-        # Passengers only now and then, and only for a vehicle with seats
-        # to spare.
-        #
-        freight = [cargo for cargo in cargo_choices if cargo[1] == "freight"]
-        passengers = [cargo for cargo in cargo_choices if cargo[1] == "passengers"]
-        pool = passengers if passengers and (not freight or random.random() < 0.25) else freight
-
-        cargo, kind, smallest, largest = random.choice(pool)
-        quantity = random.randint(smallest, int(min(largest, capacity[kind])))
-
         miles = float(onward[destination]) * LOAD_ROAD_FACTOR
+
+        #
+        # A trailer built for it brings towed work (LOAD_TOWED_SHARE of the
+        # time, or always if nothing else fits). Otherwise passengers only
+        # now and then, and only for a vehicle with seats to spare.
+        #
+        if towed_choices and (not cargo_choices or random.random() < LOAD_TOWED_SHARE):
+
+            cargo, trailer_bodies, min_trailer_lbs, per_mile, fee = random.choice(towed_choices)
+            kind, quantity = "towed", 1
+            pay = round(miles * per_mile + fee)
+
+        else:
+
+            freight = [cargo for cargo in cargo_choices if cargo[1] == "freight"]
+            passengers = [cargo for cargo in cargo_choices if cargo[1] == "passengers"]
+            pool = passengers if passengers and (not freight or random.random() < 0.25) else freight
+
+            cargo, kind, smallest, largest = random.choice(pool)
+            quantity = random.randint(smallest, int(min(largest, capacity[kind])))
+            trailer_bodies, min_trailer_lbs = None, None
+            pay = load_pay(kind, quantity, miles)
+
         origin_city = US_CITIES[pickup]
         destination_city = US_CITIES[destination]
 
@@ -8059,16 +8365,17 @@ def generate_loads(cur, slot_id, lat, lng, game_now, capacity, count, radius_mil
                 slot_id, cargo, kind, quantity,
                 origin_name, origin_state, origin_lat, origin_lng,
                 destination_name, destination_state, destination_lat, destination_lng,
-                estimated_miles, pay, posted_game_time, expires_game_time
+                estimated_miles, pay, posted_game_time, expires_game_time, trailer_bodies, min_trailer_lbs
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 slot_id, cargo, kind, quantity,
                 origin_city["name"], origin_city["state"], origin_city["lat"], origin_city["lng"],
                 destination_city["name"], destination_city["state"], destination_city["lat"], destination_city["lng"],
-                round(miles, 1), load_pay(kind, quantity, miles), game_now,
-                game_now + timedelta(hours=random.uniform(*LOAD_EXPIRY_GAME_HOURS))
+                round(miles, 1), pay, game_now,
+                game_now + timedelta(hours=random.uniform(*LOAD_EXPIRY_GAME_HOURS)),
+                list(trailer_bodies) if trailer_bodies else None, min_trailer_lbs
             )
         )
 
@@ -8081,7 +8388,7 @@ LOAD_COLUMNS = """
     id, cargo, kind, quantity, origin_name, origin_state, origin_lat, origin_lng,
     destination_name, destination_state, destination_lat, destination_lng,
     estimated_miles, pay, expires_game_time, status, vehicle_id, deliver_by_game_time,
-    accepted_game_time, pickup_place_id, dropoff_place_id
+    accepted_game_time, pickup_place_id, dropoff_place_id, trailer_bodies, min_trailer_lbs
 """
 
 
@@ -8105,6 +8412,14 @@ def load_dict(row):
         "vehicle_id": row[16],
         "deliver_by_game_time": row[17].isoformat() if row[17] else None,
         "accepted_game_time": row[18].isoformat() if row[18] else None,
+
+        #
+        # A towed load's trailer needs (see LOAD_TOWED_CARGO) - None for
+        # any other load.
+        #
+        "trailer_bodies": row[21],
+        "trailer_body_labels": [TRAILER_BODIES.get(body, body) for body in row[21]] if row[21] else None,
+        "min_trailer_lbs": row[22],
     }
 
 
@@ -8153,7 +8468,7 @@ def vehicle_load_board(id: int, slot: int = Depends(current_slot)):
             raise HTTPException(status_code=404, detail="Vehicle not found")
 
         _, _, _, lat, lng, location, vehicle_model_id = position
-        capacity = load_capacity(fetch_vehicle_models_by_id(cur, [vehicle_model_id])[vehicle_model_id])
+        capacity = vehicle_load_capacity(cur, id, vehicle_model_id)
 
         cur.execute(
             "UPDATE loads SET status = 'expired' WHERE slot_id = %s AND status = 'available' AND expires_game_time < %s",
@@ -8173,7 +8488,7 @@ def vehicle_load_board(id: int, slot: int = Depends(current_slot)):
 
                 load = load_dict(row)
 
-                if load["quantity"] > capacity[load["kind"]]:
+                if not load_fits(load, capacity):
                     continue
 
                 pickup_miles = haversine_miles(lat, lng, load["origin_lat"], load["origin_lng"])
@@ -8321,17 +8636,17 @@ def list_loads(
     for row in rows[:limit]:
         loads.append({
             **load_dict(row),
-            "picked_up_game_time": row[21].isoformat() if row[21] else None,
-            "delivered_game_time": row[22].isoformat() if row[22] else None,
-            "paid": float(row[23]) if row[23] is not None else None,
-            "vehicle_name": row[24],
+            "picked_up_game_time": row[23].isoformat() if row[23] else None,
+            "delivered_game_time": row[24].isoformat() if row[24] else None,
+            "paid": float(row[25]) if row[25] is not None else None,
+            "vehicle_name": row[26],
 
             #
             # Fuel and roadside fees run up on it so far, and what it's
             # netted (its pay less those) - see LOAD_COST_KINDS.
             #
-            "costs": float(row[25]),
-            "net": float(row[26]),
+            "costs": float(row[27]),
+            "net": float(row[28]),
         })
 
     return {
@@ -8477,10 +8792,15 @@ def accept_load(load_id: int, req: AcceptLoadRequest, slot: int = Depends(curren
         if load["status"] != "available" or row[14] < game_now:
             raise HTTPException(status_code=409, detail="That load has been taken or has expired")
 
-        capacity = load_capacity(fetch_vehicle_models_by_id(cur, [vehicle_model_id])[vehicle_model_id])
+        capacity = vehicle_load_capacity(cur, req.vehicle_id, vehicle_model_id)
 
-        if load["quantity"] > capacity[load["kind"]]:
-            raise HTTPException(status_code=409, detail="That load doesn't fit this vehicle")
+        if not load_fits(load, capacity):
+            raise HTTPException(
+                status_code=409,
+                detail="That load needs a " + " or ".join(load["trailer_body_labels"]).lower() + " trailer"
+                    + (f" rated {load['min_trailer_lbs']:,} lbs or more" if load["min_trailer_lbs"] else "")
+                if load["trailer_bodies"] else "That load doesn't fit this vehicle"
+            )
 
         pickup_place_id = ensure_city_place(cur, row[4], row[5], row[6], row[7])
         dropoff_place_id = ensure_city_place(cur, row[8], row[9], row[10], row[11])
@@ -8611,6 +8931,735 @@ def fetch_active_loads(cur, vehicle_ids):
     return {row[16]: load_dict(row) for row in cur.fetchall()}
 
 
+# ---------- Trailers ----------
+#
+# A vehicle with a hitch (vehicle_models.hitch_type) can pull one trailer
+# of a kind it fits (hitch_fits()) and is rated for (towing_capacity_lbs
+# against the trailer's gross_weight_lbs). Trailers are bought from the
+# marketplace like vehicles - each save file owns its own (trailers), built
+# on the shared trailer_models an admin edits on the Vehicle Models page.
+#
+# Hitched, a trailer:
+#   - adds its cargo space to the vehicle's (load_capacity()),
+#   - lets the vehicle take loads only a trailer can carry - cars, boats,
+#     machines (LOAD_TOWED_CARGO) - if it's the right body and big enough,
+#   - costs fuel economy, more the heavier it is against what the vehicle
+#     can tow (towing_mpg_penalty_percent), and
+#   - holds the vehicle to the towing speed limit (towing_speed_limit_mph).
+# Both of those last two are fixed when a leg sets out (towing_effect(),
+# trips.towing_mpg_factor / speed_cap_mph), so hitching and unhitching only
+# happen while the vehicle's parked and not on a load.
+#
+
+#
+# What a trailer is built to carry, and what to call it.
+#
+TRAILER_BODIES = {
+    "utility": "Utility",
+    "enclosed": "Enclosed cargo",
+    "car_hauler": "Car hauler",
+    "boat": "Boat",
+    "equipment": "Equipment",
+    "flatbed": "Flatbed",
+    "dry_van": "Dry van",
+}
+
+HITCH_LABELS = {
+    "class1": "Class I receiver",
+    "class2": "Class II receiver",
+    "class3": "Class III receiver",
+    "class4": "Class IV receiver",
+    "class5": "Class V receiver",
+    "gooseneck": "Gooseneck",
+    "fifth_wheel": "Fifth wheel",
+}
+
+#
+# How close a parked vehicle has to be to a parked trailer to hitch it -
+# the same city, give or take where in town each one is.
+#
+TRAILER_HITCH_RADIUS_MILES = 15
+
+#
+# A trailer's age wears its price like a vehicle's (market_listing_terms()),
+# but slower - there's no engine to wear out.
+#
+TRAILER_FIRST_YEAR_VALUE = 0.88
+TRAILER_YEARLY_VALUE = 0.95
+TRAILER_VALUE_FLOOR = 0.3
+
+
+#
+# Whether a vehicle's hitch takes a trailer's: a receiver takes its own
+# class and every lighter one, and a gooseneck truck has a receiver too
+# (class V); gooseneck and fifth-wheel trailers need exactly that.
+#
+def hitch_fits(vehicle_hitch, trailer_hitch):
+
+    if vehicle_hitch is None:
+        return False
+
+    if trailer_hitch in RECEIVER_HITCHES:
+
+        if vehicle_hitch == "gooseneck":
+            return True
+
+        return (
+            vehicle_hitch in RECEIVER_HITCHES
+            and RECEIVER_HITCHES.index(vehicle_hitch) >= RECEIVER_HITCHES.index(trailer_hitch)
+        )
+
+    return vehicle_hitch == trailer_hitch
+
+
+#
+# "a Class III receiver", "a gooseneck", "a fifth wheel".
+#
+def hitch_phrase(hitch_type):
+
+    label = HITCH_LABELS[hitch_type]
+
+    return "a " + (label if hitch_type in RECEIVER_HITCHES else label.lower())
+
+
+#
+# Why a vehicle model can't pull a trailer model, or None if it can.
+#
+def towing_refusal(vehicle_model, trailer_model):
+
+    vehicle_hitch = vehicle_model["hitch_type"]
+    trailer_hitch = trailer_model["hitch_type"]
+
+    if vehicle_hitch is None:
+        return "It has no hitch"
+
+    if not hitch_fits(vehicle_hitch, trailer_hitch):
+        return f"It needs {hitch_phrase(trailer_hitch)} - this has {hitch_phrase(vehicle_hitch)}"
+
+    capacity = vehicle_model["towing_capacity_lbs"] or 0
+
+    if trailer_model["gross_weight_lbs"] > capacity:
+        return f"It's {trailer_model['gross_weight_lbs']:,} lbs loaded - this tows {capacity:,} lbs at most"
+
+    return None
+
+
+TRAILER_MODEL_COLUMNS = """
+    id, year, brand, model, body, hitch_type, cargo_capacity_cuft, empty_weight_lbs, gross_weight_lbs, cost
+"""
+
+
+def trailer_model_dict(row):
+
+    return {
+        "id": row[0],
+        "year": row[1],
+        "brand": row[2],
+        "model": row[3],
+        "body": row[4],
+        "body_label": TRAILER_BODIES.get(row[4], row[4]),
+        "hitch_type": row[5],
+        "cargo_capacity_cuft": row[6],
+        "empty_weight_lbs": row[7],
+        "gross_weight_lbs": row[8],
+        "cost": row[9],
+    }
+
+
+def fetch_trailer_models_by_id(cur, trailer_model_ids):
+
+    trailer_model_ids = list(set(trailer_model_ids))
+
+    if not trailer_model_ids:
+        return {}
+
+    cur.execute(
+        f"SELECT {TRAILER_MODEL_COLUMNS} FROM trailer_models WHERE id = ANY(%s)",
+        (trailer_model_ids,)
+    )
+
+    return {row[0]: trailer_model_dict(row) for row in cur.fetchall()}
+
+
+#
+# Real-world trailers, seeded like the vehicle catalog (seed_vehicle_catalog()):
+# once per TRAILER_CATALOG_VERSION, adding only ones not already there.
+#
+TRAILER_CATALOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "trailer_catalog.csv")
+TRAILER_CATALOG_VERSION = 1
+
+
+def seed_trailer_catalog(cur):
+
+    cur.execute("SELECT value FROM global_settings WHERE key = 'trailer_catalog_version'")
+
+    row = cur.fetchone()
+
+    if row is not None and float(row[0]) >= TRAILER_CATALOG_VERSION:
+        return
+
+    with open(TRAILER_CATALOG_PATH, encoding="utf-8", newline="") as f:
+        catalog = list(csv.DictReader(f))
+
+    for entry in catalog:
+
+        cur.execute(
+            "SELECT 1 FROM trailer_models WHERE year = %s AND LOWER(brand) = LOWER(%s) AND LOWER(model) = LOWER(%s)",
+            (int(entry["year"]), entry["brand"], entry["model"])
+        )
+
+        if cur.fetchone() is not None:
+            continue
+
+        cur.execute(
+            """
+            INSERT INTO trailer_models
+            (year, brand, model, body, hitch_type, cargo_capacity_cuft, empty_weight_lbs, gross_weight_lbs, cost)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                int(entry["year"]), entry["brand"], entry["model"], entry["body"], entry["hitch_type"],
+                float(entry["cargo_capacity_cuft"]), int(entry["empty_weight_lbs"]),
+                int(entry["gross_weight_lbs"]), float(entry["cost"])
+            )
+        )
+
+    cur.execute(
+        """
+        INSERT INTO global_settings (key, value) VALUES ('trailer_catalog_version', %s)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+        """,
+        (str(TRAILER_CATALOG_VERSION),)
+    )
+
+
+#
+# The trailer each of these vehicles is pulling, if any:
+# vehicle_id -> {"id", "name", "trailer_model"}.
+#
+def fetch_hitched_trailers(cur, vehicle_ids):
+
+    vehicle_ids = list(set(vehicle_ids))
+
+    if not vehicle_ids:
+        return {}
+
+    cur.execute(
+        "SELECT vehicle_id, id, name, trailer_model_id FROM trailers WHERE vehicle_id = ANY(%s) AND NOT sold",
+        (vehicle_ids,)
+    )
+
+    rows = cur.fetchall()
+    trailer_models_by_id = fetch_trailer_models_by_id(cur, [row[3] for row in rows])
+
+    return {
+        row[0]: {"id": row[1], "name": row[2], "trailer_model": trailer_models_by_id.get(row[3])}
+        for row in rows
+    }
+
+
+#
+# What pulling trailer_model does to vehicle_model: (mpg factor, speed cap
+# in mph) - (1.0, None) with no trailer. The mpg cost is
+# towing_mpg_penalty_percent at the vehicle's full towing capacity, less
+# for a lighter trailer; its weight counts half-loaded, between empty and
+# gross, since a leg's load (or lack of one) isn't known ahead.
+#
+def towing_effect(cur, vehicle_model, trailer_model):
+
+    if trailer_model is None:
+        return 1.0, None
+
+    towed_lbs = (trailer_model["empty_weight_lbs"] + trailer_model["gross_weight_lbs"]) / 2
+    capacity = vehicle_model["towing_capacity_lbs"] or 0
+    share = min(1.0, towed_lbs / capacity) if capacity else 1.0
+
+    penalty = get_global_setting(cur, "towing_mpg_penalty_percent") / 100
+
+    return 1.0 - penalty * share, get_global_setting(cur, "towing_speed_limit_mph")
+
+
+#
+# towing_effect() for a vehicle as it stands - what a leg it sets out on
+# now is stamped with (trips.towing_mpg_factor / speed_cap_mph).
+#
+def vehicle_towing(cur, vehicle_id):
+
+    cur.execute("SELECT vehicle_model_id FROM vehicles WHERE id = %s", (vehicle_id,))
+
+    vehicle_model_id = cur.fetchone()[0]
+    vehicle_model = fetch_vehicle_models_by_id(cur, [vehicle_model_id])[vehicle_model_id]
+    trailer = fetch_hitched_trailers(cur, [vehicle_id]).get(vehicle_id)
+
+    return towing_effect(cur, vehicle_model, trailer["trailer_model"] if trailer else None)
+
+
+#
+# Leaves whatever trailer a vehicle's pulling parked where the vehicle is -
+# when the vehicle's sold or deleted. Doesn't commit.
+#
+def drop_hitched_trailer(cur, vehicle_id):
+
+    cur.execute(
+        """
+        UPDATE trailers t SET vehicle_id = NULL, place_id = v.place_id
+        FROM vehicles v
+        WHERE v.id = t.vehicle_id AND t.vehicle_id = %s
+        """,
+        (vehicle_id,)
+    )
+
+
+def next_trailer_name(cur, slot_id, trailer_model):
+
+    cur.execute(
+        "SELECT COUNT(*) FROM trailers WHERE trailer_model_id = %s AND slot_id = %s",
+        (trailer_model["id"], slot_id)
+    )
+
+    number = cur.fetchone()[0] + 1
+
+    return f"{trailer_model['year']} {trailer_model['brand']} {trailer_model['model']} {number}"
+
+
+class TrailerModelRequest(BaseModel):
+
+    year: int
+    brand: str
+    model: str
+    body: str
+    hitch_type: str
+    cargo_capacity_cuft: float = 0
+    empty_weight_lbs: int
+    gross_weight_lbs: int
+    cost: float
+
+
+def validate_trailer_model(req):
+
+    if not req.brand.strip() or not req.model.strip():
+        raise HTTPException(status_code=400, detail="Brand and model can't be empty")
+
+    if req.body not in TRAILER_BODIES:
+        raise HTTPException(status_code=400, detail=f"Body must be one of {', '.join(TRAILER_BODIES)}")
+
+    if req.hitch_type not in HITCH_TYPES:
+        raise HTTPException(status_code=400, detail=f"Hitch must be one of {', '.join(HITCH_TYPES)}")
+
+    if req.cargo_capacity_cuft < 0 or req.cost < 0:
+        raise HTTPException(status_code=400, detail="Cargo space and cost can't be negative")
+
+    if req.empty_weight_lbs <= 0 or req.gross_weight_lbs < req.empty_weight_lbs:
+        raise HTTPException(status_code=400, detail="Weights must be positive, and loaded at least as heavy as empty")
+
+    if req.gross_weight_lbs > TOWING_CAPACITY_RANGE[1]:
+        raise HTTPException(status_code=400, detail=f"Loaded weight can be at most {TOWING_CAPACITY_RANGE[1]:,} lbs")
+
+
+TRAILER_MODEL_FIELDS = (
+    "year", "brand", "model", "body", "hitch_type", "cargo_capacity_cuft", "empty_weight_lbs", "gross_weight_lbs",
+    "cost"
+)
+
+
+def trailer_model_values(req):
+
+    return tuple(
+        getattr(req, field).strip() if field in ("brand", "model") else getattr(req, field)
+        for field in TRAILER_MODEL_FIELDS
+    )
+
+
+@app.get("/api/trailer-models")
+def list_trailer_models():
+
+    conn = db()
+    cur = conn.cursor()
+
+    try:
+        cur.execute(f"SELECT {TRAILER_MODEL_COLUMNS} FROM trailer_models ORDER BY gross_weight_lbs, id")
+        return [trailer_model_dict(row) for row in cur.fetchall()]
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.post("/api/trailer-models")
+def create_trailer_model(req: TrailerModelRequest, _admin: None = Depends(require_admin)):
+
+    validate_trailer_model(req)
+
+    conn = db()
+    cur = conn.cursor()
+
+    try:
+
+        cur.execute(
+            f"""
+            INSERT INTO trailer_models ({', '.join(TRAILER_MODEL_FIELDS)})
+            VALUES ({', '.join(['%s'] * len(TRAILER_MODEL_FIELDS))})
+            RETURNING id
+            """,
+            trailer_model_values(req)
+        )
+
+        trailer_model_id = cur.fetchone()[0]
+
+        conn.commit()
+
+        return fetch_trailer_models_by_id(cur, [trailer_model_id])[trailer_model_id]
+
+    finally:
+        cur.close()
+        conn.close()
+
+
+#
+# Trailers already built on it pick the change up straight away, like
+# vehicles do their model's - one that no longer fits what's pulling it
+# stays hitched until it's unhitched.
+#
+@app.put("/api/trailer-models/{id}")
+def update_trailer_model(id: int, req: TrailerModelRequest, _admin: None = Depends(require_admin)):
+
+    validate_trailer_model(req)
+
+    conn = db()
+    cur = conn.cursor()
+
+    try:
+
+        cur.execute(
+            f"""
+            UPDATE trailer_models SET {', '.join(f'{field} = %s' for field in TRAILER_MODEL_FIELDS)}
+            WHERE id = %s
+            RETURNING id
+            """,
+            (*trailer_model_values(req), id)
+        )
+
+        if cur.fetchone() is None:
+            raise HTTPException(status_code=404, detail="Trailer model not found")
+
+        conn.commit()
+
+        return fetch_trailer_models_by_id(cur, [id])[id]
+
+    finally:
+        cur.close()
+        conn.close()
+
+
+#
+# Only trailers still owned hold a model back, named by save file like a
+# vehicle model's (delete_vehicle_model()); sold ones go with it.
+#
+@app.delete("/api/trailer-models/{id}")
+def delete_trailer_model(id: int, _admin: None = Depends(require_admin)):
+
+    conn = db()
+    cur = conn.cursor()
+
+    try:
+
+        cur.execute(
+            """
+            SELECT s.id, s.name, COUNT(*)
+            FROM trailers t
+            JOIN save_slots s ON s.id = t.slot_id
+            WHERE t.trailer_model_id = %s AND NOT t.sold
+            GROUP BY s.id, s.name
+            ORDER BY s.id
+            """,
+            (id,)
+        )
+
+        in_use = cur.fetchall()
+
+        if in_use:
+            raise HTTPException(
+                status_code=409,
+                detail="Still in use by " + ", ".join(
+                    f"{count} trailer{'' if count == 1 else 's'} in File {slot_id} ({name})"
+                    for slot_id, name, count in in_use
+                ) + " - sell them first"
+            )
+
+        cur.execute("DELETE FROM trailers WHERE trailer_model_id = %s AND sold RETURNING place_id", (id,))
+        sold_place_ids = [row[0] for row in cur.fetchall()]
+
+        cur.execute("DELETE FROM trailer_models WHERE id = %s RETURNING id", (id,))
+
+        if cur.fetchone() is None:
+            raise HTTPException(status_code=404, detail="Trailer model not found")
+
+        forget_unused_places(cur, sold_place_ids)
+
+        conn.commit()
+
+        return {"deleted": id}
+
+    finally:
+        cur.close()
+        conn.close()
+
+
+#
+# The file's trailers: where each one is (with the vehicle it's hitched to,
+# if any - then it's wherever that vehicle is, last settled), and which of
+# the fleet's parked vehicles could hitch it right now and which can't, and
+# why - so the page can offer just the ones that work.
+#
+@app.get("/api/trailers")
+def list_trailers(slot: int = Depends(current_slot)):
+
+    conn = db()
+    cur = conn.cursor()
+
+    try:
+
+        settle_arrived_vehicles(conn, cur)
+
+        cur.execute(
+            """
+            SELECT t.id, t.name, t.trailer_model_id, t.vehicle_id, v.name,
+                COALESCE(v.place_id, t.place_id), t.purchase_price
+            FROM trailers t
+            LEFT JOIN vehicles v ON v.id = t.vehicle_id
+            WHERE t.slot_id = %s AND NOT t.sold
+            ORDER BY t.id
+            """,
+            (slot,)
+        )
+
+        rows = cur.fetchall()
+
+        trailer_models_by_id = fetch_trailer_models_by_id(cur, [row[2] for row in rows])
+        places_by_id = fetch_places_by_id(cur, [row[5] for row in rows])
+
+        cur.execute(
+            """
+            SELECT v.id, v.name, v.vehicle_model_id, p.lat, p.lng
+            FROM vehicles v JOIN places p ON p.id = v.place_id
+            WHERE v.slot_id = %s AND NOT v.sold
+            ORDER BY v.id
+            """,
+            (slot,)
+        )
+
+        fleet = cur.fetchall()
+
+        vehicle_models_by_id = fetch_vehicle_models_by_id(cur, [row[2] for row in fleet])
+        hitched = fetch_hitched_trailers(cur, [row[0] for row in fleet])
+        busy = {row[0] for row in fleet if vehicle_is_busy(cur, row[0])}
+
+    finally:
+        cur.close()
+        conn.close()
+
+    trailers = []
+
+    for trailer_id, name, trailer_model_id, vehicle_id, vehicle_name, place_id, purchase_price in rows:
+
+        trailer_model = trailer_models_by_id.get(trailer_model_id)
+        place = places_by_id[place_id]
+
+        candidates = []
+
+        if vehicle_id is None:
+
+            for other_id, other_name, vehicle_model_id, lat, lng in fleet:
+
+                miles = haversine_miles(place["lat"], place["lng"], lat, lng)
+                reason = towing_refusal(vehicle_models_by_id[vehicle_model_id], trailer_model)
+
+                if reason is None and other_id in hitched:
+                    reason = f"It's already pulling {hitched[other_id]['name']}"
+
+                if reason is None and other_id in busy:
+                    reason = "It's out on a trip or a load"
+
+                if reason is None and miles > TRAILER_HITCH_RADIUS_MILES:
+                    reason = f"It's {round(miles):,} mi away"
+
+                candidates.append({"vehicle_id": other_id, "name": other_name, "reason": reason})
+
+        trailers.append({
+            "id": trailer_id,
+            "name": name,
+            "trailer_model": trailer_model,
+            "vehicle_id": vehicle_id,
+            "vehicle_name": vehicle_name,
+            "vehicle_busy": vehicle_id in busy,
+            "location": place["description"],
+            "lat": place["lat"],
+            "lng": place["lng"],
+            "purchase_price": float(purchase_price),
+            "candidates": candidates,
+        })
+
+    return trailers
+
+
+class HitchTrailerRequest(BaseModel):
+    vehicle_id: int
+
+
+#
+# The trailer, locked, if it's this file's and not sold.
+#
+def fetch_own_trailer(cur, trailer_id, slot_id):
+
+    cur.execute(
+        """
+        SELECT id, name, trailer_model_id, vehicle_id, place_id, purchase_price
+        FROM trailers WHERE id = %s AND slot_id = %s AND NOT sold
+        FOR UPDATE
+        """,
+        (trailer_id, slot_id)
+    )
+
+    row = cur.fetchone()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Trailer not found")
+
+    return row
+
+
+@app.post("/api/trailers/{id}/hitch")
+def hitch_trailer(id: int, req: HitchTrailerRequest, slot: int = Depends(current_slot)):
+
+    assert_vehicle_in_slot(req.vehicle_id, slot)
+
+    conn = db()
+    cur = conn.cursor()
+
+    try:
+
+        settle_arrived_vehicles(conn, cur)
+
+        _, name, trailer_model_id, hitched_to, trailer_place_id, _ = fetch_own_trailer(cur, id, slot)
+
+        if hitched_to is not None:
+            raise HTTPException(status_code=409, detail=f"{name} is already hitched - unhitch it first")
+
+        position = vehicle_position(cur, req.vehicle_id)
+
+        if position is None or position[1]:
+            raise HTTPException(status_code=404, detail="Vehicle not found")
+
+        _, _, vehicle_place_id, lat, lng, location, vehicle_model_id = position
+
+        if vehicle_is_busy(cur, req.vehicle_id):
+            raise HTTPException(status_code=409, detail="That vehicle is out on a trip or a load - hitch up once it's parked")
+
+        if fetch_hitched_trailers(cur, [req.vehicle_id]):
+            raise HTTPException(status_code=409, detail="That vehicle is already pulling a trailer")
+
+        vehicle_model = fetch_vehicle_models_by_id(cur, [vehicle_model_id])[vehicle_model_id]
+        trailer_model = fetch_trailer_models_by_id(cur, [trailer_model_id])[trailer_model_id]
+
+        reason = towing_refusal(vehicle_model, trailer_model)
+
+        if reason is not None:
+            raise HTTPException(status_code=409, detail=f"Can't hitch {name}: {reason[0].lower()}{reason[1:]}")
+
+        trailer_place = fetch_places_by_id(cur, [trailer_place_id])[trailer_place_id]
+
+        if haversine_miles(lat, lng, trailer_place["lat"], trailer_place["lng"]) > TRAILER_HITCH_RADIUS_MILES:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{name} is in {trailer_place['description']} and the vehicle's in {location} - drive it there first"
+            )
+
+        cur.execute("UPDATE trailers SET vehicle_id = %s WHERE id = %s", (req.vehicle_id, id))
+
+        conn.commit()
+
+        return {"id": id, "vehicle_id": req.vehicle_id}
+
+    finally:
+        cur.close()
+        conn.close()
+
+
+#
+# Leaves the trailer where its vehicle is parked.
+#
+@app.post("/api/trailers/{id}/unhitch")
+def unhitch_trailer(id: int, slot: int = Depends(current_slot)):
+
+    conn = db()
+    cur = conn.cursor()
+
+    try:
+
+        settle_arrived_vehicles(conn, cur)
+
+        _, name, _, vehicle_id, _, _ = fetch_own_trailer(cur, id, slot)
+
+        if vehicle_id is None:
+            raise HTTPException(status_code=409, detail=f"{name} isn't hitched to anything")
+
+        if vehicle_is_busy(cur, vehicle_id):
+            raise HTTPException(status_code=409, detail="Its vehicle is out on a trip or a load - unhitch once it's parked")
+
+        drop_hitched_trailer(cur, vehicle_id)
+
+        conn.commit()
+
+        return {"id": id, "vehicle_id": None}
+
+    finally:
+        cur.close()
+        conn.close()
+
+
+#
+# Refunds what was paid for it, like selling a vehicle. A hitched one can
+# go too, as long as what's pulling it is parked.
+#
+@app.post("/api/trailers/{id}/sell")
+def sell_trailer(id: int, slot: int = Depends(current_slot)):
+
+    conn = db()
+    cur = conn.cursor()
+
+    try:
+
+        settle_arrived_vehicles(conn, cur)
+
+        _, name, _, vehicle_id, place_id, purchase_price = fetch_own_trailer(cur, id, slot)
+
+        if vehicle_id is not None:
+
+            if vehicle_is_busy(cur, vehicle_id):
+                raise HTTPException(status_code=409, detail="Its vehicle is out on a trip or a load - sell it once it's parked")
+
+            drop_hitched_trailer(cur, vehicle_id)
+
+            cur.execute("SELECT place_id FROM trailers WHERE id = %s", (id,))
+            place_id = cur.fetchone()[0]
+
+        cur.execute("UPDATE trailers SET sold = TRUE, sold_at = NOW() WHERE id = %s", (id,))
+
+        refund = float(purchase_price)
+
+        record_money(
+            cur, slot, refund, "trailer_sale", f"Sold {name}",
+            None, name, fetch_places_by_id(cur, [place_id])[place_id]["description"]
+        )
+
+        conn.commit()
+
+        return {"id": id, "sold": True, "refund": refund}
+
+    finally:
+        cur.close()
+        conn.close()
+
+
 # ---------- The vehicle marketplace ----------
 #
 # Where vehicles come from: each save file has its own used-vehicle
@@ -8620,7 +9669,9 @@ def fetch_active_loads(cur, vehicle_ids):
 # market_listing_count global setting, and a listing nobody buys comes down
 # within market_listing_days of game time. Buying one (POST
 # /api/market/{id}/buy) adds the vehicle to the fleet where it sits, in the
-# seller's city.
+# seller's city. Trailers are listed the same way, alongside -
+# market_trailer_listing_count of them, from the trailer models - and a
+# bought one waits in the seller's city for a vehicle to come hitch it.
 #
 # What can show up is the admin's catalog (Vehicle Models) - the bundled
 # real-world vehicles (VEHICLE_CATALOG_PATH) plus any added since - except
@@ -8741,12 +9792,7 @@ def market_anchors(cur, slot_id):
 # that close. Expiries are staggered so the market turns over a little at a
 # time.
 #
-def generate_market_listings(cur, slot_id, game_now, count, anchors):
-
-    models = market_eligible_models(cur, game_now.year)
-
-    if not models or count <= 0:
-        return 0
+def market_cities(anchors):
 
     distances = np.min([miles_to_us_cities(lat, lng) for _, _, lat, lng in anchors], axis=0)
     candidates = np.flatnonzero(distances <= MARKET_RADIUS_MILES)
@@ -8754,29 +9800,104 @@ def generate_market_listings(cur, slot_id, game_now, count, anchors):
     if not len(candidates):
         candidates = np.argsort(distances)[:LOAD_NEAREST_CITIES]
 
-    weights = US_CITY_POPULATIONS[candidates] ** 0.6
+    return candidates, US_CITY_POPULATIONS[candidates] ** 0.6
+
+
+def insert_market_listing(cur, slot_id, game_now, days, cities, vehicle_model_id, trailer_model_id, terms):
+
+    candidates, weights = cities
+    city = US_CITIES[int(random.choices(candidates, weights=weights)[0])]
+    mileage, condition, price = terms
+
+    cur.execute(
+        """
+        INSERT INTO market_listings (
+            slot_id, vehicle_model_id, trailer_model_id, mileage, condition, price,
+            city_name, city_state, lat, lng, posted_game_time, expires_game_time
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            slot_id, vehicle_model_id, trailer_model_id, mileage, condition, price,
+            city["name"], city["state"], city["lat"], city["lng"], game_now,
+            game_now + timedelta(days=days * random.uniform(0.3, 1.0))
+        )
+    )
+
+
+def generate_market_listings(cur, slot_id, game_now, count, anchors):
+
+    models = market_eligible_models(cur, game_now.year)
+
+    if not models or count <= 0:
+        return 0
+
+    cities = market_cities(anchors)
     spread = get_global_setting(cur, "market_price_spread_percent") / 100
     days = get_global_setting(cur, "market_listing_days")
 
     for _ in range(count):
 
-        city = US_CITIES[int(random.choices(candidates, weights=weights)[0])]
         vehicle_model = random.choice(models)
-        mileage, condition, price = market_listing_terms(vehicle_model, game_now, spread)
 
-        cur.execute(
-            """
-            INSERT INTO market_listings (
-                slot_id, vehicle_model_id, mileage, condition, price,
-                city_name, city_state, lat, lng, posted_game_time, expires_game_time
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
-            (
-                slot_id, vehicle_model["id"], mileage, condition, price,
-                city["name"], city["state"], city["lat"], city["lng"], game_now,
-                game_now + timedelta(days=days * random.uniform(0.3, 1.0))
-            )
+        insert_market_listing(
+            cur, slot_id, game_now, days, cities, vehicle_model["id"], None,
+            market_listing_terms(vehicle_model, game_now, spread)
+        )
+
+    return count
+
+
+#
+# A trailer listing's condition and asking price - by age alone, no
+# odometer - from its model's price new.
+#
+def trailer_listing_terms(trailer_model, game_now, spread):
+
+    age = max(0.1, game_now.year + (game_now.timetuple().tm_yday - 1) / 365.25 - trailer_model["year"])
+
+    score = random.gauss(0, 1) - age * 0.04
+
+    condition, condition_factor = next(
+        (label, factor) for label, lowest, factor in MARKET_CONDITIONS if lowest is None or score >= lowest
+    )
+
+    if age < 1:
+        value = 1 - (1 - TRAILER_FIRST_YEAR_VALUE) * age
+    else:
+        value = TRAILER_FIRST_YEAR_VALUE * TRAILER_YEARLY_VALUE ** (age - 1)
+
+    price = (
+        float(trailer_model["cost"]) * max(TRAILER_VALUE_FLOOR, value) * condition_factor
+        * (1 + random.uniform(-spread, spread))
+    )
+
+    return None, condition, max(MARKET_MIN_PRICE / 2, round(price / 25) * 25)
+
+
+def generate_trailer_listings(cur, slot_id, game_now, count, anchors):
+
+    cur.execute(
+        f"SELECT {TRAILER_MODEL_COLUMNS} FROM trailer_models WHERE year <= %s AND cost > 0 ORDER BY id",
+        (game_now.year,)
+    )
+
+    models = [trailer_model_dict(row) for row in cur.fetchall()]
+
+    if not models or count <= 0:
+        return 0
+
+    cities = market_cities(anchors)
+    spread = get_global_setting(cur, "market_price_spread_percent") / 100
+    days = get_global_setting(cur, "market_listing_days")
+
+    for _ in range(count):
+
+        trailer_model = random.choice(models)
+
+        insert_market_listing(
+            cur, slot_id, game_now, days, cities, None, trailer_model["id"],
+            trailer_listing_terms(trailer_model, game_now, spread)
         )
 
     return count
@@ -8784,7 +9905,7 @@ def generate_market_listings(cur, slot_id, game_now, count, anchors):
 
 MARKET_LISTING_COLUMNS = """
     id, vehicle_model_id, mileage, condition, price, city_name, city_state, lat, lng,
-    posted_game_time, expires_game_time
+    posted_game_time, expires_game_time, trailer_model_id
 """
 
 
@@ -8811,14 +9932,24 @@ def market(slot: int = Depends(current_slot)):
             (slot, game_now)
         )
 
-        cur.execute("SELECT COUNT(*) FROM market_listings WHERE slot_id = %s AND status = 'available'", (slot,))
+        cur.execute(
+            """
+            SELECT COUNT(vehicle_model_id), COUNT(trailer_model_id)
+            FROM market_listings WHERE slot_id = %s AND status = 'available'
+            """,
+            (slot,)
+        )
 
-        listed = cur.fetchone()[0]
+        listed, trailers_listed = cur.fetchone()
         target = int(get_global_setting(cur, "market_listing_count"))
+        trailer_target = int(get_global_setting(cur, "market_trailer_listing_count"))
         anchors = market_anchors(cur, slot)
 
         if listed < target:
             generate_market_listings(cur, slot, game_now, target - listed, anchors)
+
+        if trailers_listed < trailer_target:
+            generate_trailer_listings(cur, slot, game_now, trailer_target - trailers_listed, anchors)
 
         conn.commit()
 
@@ -8833,7 +9964,8 @@ def market(slot: int = Depends(current_slot)):
 
         rows = cur.fetchall()
 
-        vehicle_models_by_id = fetch_vehicle_models_by_id(cur, [row[1] for row in rows])
+        vehicle_models_by_id = fetch_vehicle_models_by_id(cur, [row[1] for row in rows if row[1] is not None])
+        trailer_models_by_id = fetch_trailer_models_by_id(cur, [row[11] for row in rows if row[11] is not None])
         balance = get_balance(cur, slot)
 
     finally:
@@ -8851,7 +9983,14 @@ def market(slot: int = Depends(current_slot)):
 
         listings.append({
             "id": row[0],
+
+            #
+            # "vehicle" (vehicle_model, and mileage) or "trailer"
+            # (trailer_model, no mileage).
+            #
+            "kind": "trailer" if row[11] is not None else "vehicle",
             "vehicle_model": vehicle_models_by_id.get(row[1]),
+            "trailer_model": trailer_models_by_id.get(row[11]),
             "mileage": row[2],
             "condition": row[3],
             "price": float(row[4]),
@@ -8899,10 +10038,9 @@ def buy_market_listing(listing_id: int, slot: int = Depends(current_slot)):
         if row is None:
             raise HTTPException(status_code=404, detail="Listing not found")
 
-        if row[11] != "available" or row[10] < game_now:
+        if row[12] != "available" or row[10] < game_now:
             raise HTTPException(status_code=409, detail="Too late - that one's gone")
 
-        vehicle_model = fetch_vehicle_models_by_id(cur, [row[1]]).get(row[1])
         price = float(row[4])
         balance = get_balance(cur, slot)
 
@@ -8914,6 +10052,40 @@ def buy_market_listing(listing_id: int, slot: int = Depends(current_slot)):
 
         location = city_label(row[5], row[6])
         place_id = ensure_city_place(cur, row[5], row[6], row[7], row[8])
+
+        #
+        # A trailer waits where it's bought for a vehicle to come hitch it.
+        #
+        if row[11] is not None:
+
+            trailer_model = fetch_trailer_models_by_id(cur, [row[11]])[row[11]]
+            name = next_trailer_name(cur, slot, trailer_model)
+
+            cur.execute(
+                """
+                INSERT INTO trailers (slot_id, trailer_model_id, name, place_id, purchase_price, list_price)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (slot, trailer_model["id"], name, place_id, price, trailer_model["cost"])
+            )
+
+            trailer_id = cur.fetchone()[0]
+
+            record_money(
+                cur, slot, -price, "trailer_purchase", f"Bought {name} ({row[3].lower()})", None, name, location
+            )
+
+            cur.execute(
+                "UPDATE market_listings SET status = 'sold', trailer_id = %s, sold_game_time = %s WHERE id = %s",
+                (trailer_id, game_now, listing_id)
+            )
+
+            conn.commit()
+
+            return {"trailer_id": trailer_id, "name": name, "location": location, "price": price}
+
+        vehicle_model = fetch_vehicle_models_by_id(cur, [row[1]]).get(row[1])
         name = next_vehicle_name(cur, slot, vehicle_model)
 
         cur.execute(
@@ -9326,16 +10498,19 @@ def start_trip_on_path(vehicle_id, path_id, traffic_bias=1.0, simulated_datetime
     # and simply runs dry (STRANDED) partway down the route instead of
     # being blocked from leaving at all.
     #
+    towing_mpg_factor, speed_cap_mph = vehicle_towing(cur, vehicle_id)
+
     cur.execute(
         """
-        INSERT INTO trips (vehicle_id, path_id, distance_miles, traffic_base_datetime, traffic_bias, zones_snapshot, starting_fuel_gallons, fuel_value_dollars, journey_origin)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO trips (vehicle_id, path_id, distance_miles, traffic_base_datetime, traffic_bias, zones_snapshot, starting_fuel_gallons, fuel_value_dollars, journey_origin, towing_mpg_factor, speed_cap_mph)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
         (
             vehicle_id, path_id, distances_miles[-1], traffic_base_datetime, traffic_bias, json.dumps(zones),
             vehicle_fuel_gallons, vehicle_fuel_gallons * vehicle_fuel_cost_per_gallon,
-            fetch_places_by_id(cur, [vehicle_place_id])[vehicle_place_id]["description"]
+            fetch_places_by_id(cur, [vehicle_place_id])[vehicle_place_id]["description"],
+            towing_mpg_factor, speed_cap_mph
         )
     )
 
@@ -9348,7 +10523,7 @@ def start_trip_on_path(vehicle_id, path_id, traffic_bias=1.0, simulated_datetime
     # only run after the row above exists.
     #
     realized_seconds = build_trip_schedule(
-        distances_miles, max_speeds_mph, zones, traffic_base_datetime, traffic_bias, trip_id
+        distances_miles, max_speeds_mph, zones, traffic_base_datetime, traffic_bias, trip_id, speed_cap_mph
     )
 
     realized_duration_seconds = realized_seconds[-1]
@@ -9555,11 +10730,12 @@ def active_trips(refresh_on: str = "never", every_miles: Optional[float] = None,
             t.realized_duration_seconds,
             t.traffic_base_datetime,
             t.traffic_bias,
-            vs.mpg,
+            vs.mpg * t.towing_mpg_factor,
             vs.fuel_tank_gallons,
             t.starting_fuel_gallons,
             t.roadside_refuel_count,
             t.paused_seconds,
+            t.speed_cap_mph,
             t.journey_route_before,
             t.auto_refuel,
             t.resume_destination_place_id,
@@ -9629,6 +10805,7 @@ def active_trips(refresh_on: str = "never", every_miles: Optional[float] = None,
         starting_fuel_gallons,
         roadside_refuel_count,
         paused_seconds,
+        speed_cap_mph,
         journey_route_before,
         auto_refuel,
         resume_destination_place_id,
@@ -9663,7 +10840,8 @@ def active_trips(refresh_on: str = "never", every_miles: Optional[float] = None,
             roadside_refuel_count,
             paused_seconds,
             float(elapsed_real_seconds),
-            time_multiplier
+            time_multiplier,
+            speed_cap_mph
         )
 
         #
@@ -9709,6 +10887,14 @@ def active_trips(refresh_on: str = "never", every_miles: Optional[float] = None,
             # odometer depend on that.
             #
             "trip_meter_miles": trip_meter_offset_miles + derived["distance_miles"],
+
+            #
+            # What it's getting this leg - its model's mpg, less whatever
+            # towing costs (trips.towing_mpg_factor).
+            #
+            "mpg": mpg,
+
+            "speed_cap_mph": speed_cap_mph,
 
             #
             # What this journey already drove on earlier legs (before a

@@ -103,6 +103,14 @@ CREATE TABLE vehicle_models (
     -- 'right', so the map can face it the way it's driving.
     icon_front TEXT NOT NULL DEFAULT 'left',
 
+    -- What it can pull (HITCH_TYPES in app.py): 'class1'-'class5' for a
+    -- receiver, 'gooseneck' or 'fifth_wheel'. NULL for no hitch at all.
+    hitch_type TEXT,
+
+    -- The heaviest trailer it can pull, loaded (a trailer's
+    -- gross_weight_lbs). NULL or 0 with no hitch.
+    towing_capacity_lbs INTEGER,
+
     created TIMESTAMP DEFAULT NOW()
 );
 
@@ -494,7 +502,14 @@ CREATE TABLE trips (
     -- detour), carried forward leg to leg - those legs' paths are forgotten
     -- once driven, so this is what lets the map draw the whole trip
     -- (driven_route_prefix() in app.py).
-    journey_route_before JSONB NOT NULL DEFAULT '[]'
+    journey_route_before JSONB NOT NULL DEFAULT '[]',
+
+    -- Towing, as it was when the leg set out (towing_effect() in app.py):
+    -- what a hitched trailer does to the vehicle's mpg (1 for none), and
+    -- the speed it can't go over (NULL for none). A trailer can only be
+    -- hitched or unhitched while parked, so these hold for the whole leg.
+    towing_mpg_factor DOUBLE PRECISION NOT NULL DEFAULT 1,
+    speed_cap_mph DOUBLE PRECISION
 );
 
 
@@ -592,6 +607,13 @@ CREATE TABLE loads (
     -- What delivering it actually paid (less if late).
     paid NUMERIC(14,2),
 
+    -- A load that rides on a trailer (kind 'towed' - a car, a boat, a
+    -- machine): the trailer bodies that can carry it, and the smallest
+    -- trailer (gross_weight_lbs) that can take its weight. NULL for any
+    -- other load.
+    trailer_bodies TEXT[],
+    min_trailer_lbs INTEGER,
+
     created TIMESTAMP DEFAULT NOW()
 );
 
@@ -600,20 +622,93 @@ CREATE INDEX loads_vehicle ON loads (vehicle_id);
 CREATE INDEX ledger_load ON ledger (load_id);
 
 
--- The vehicle marketplace (GET /api/market in app.py): each save file's
--- used-vehicle listings, in real US cities near its fleet. Topped up on
--- demand; one comes down (expired) at expires_game_time if nobody buys it,
--- or is marked sold with the vehicle it became.
+-- Trailers (app.py's "Trailers" section): the kinds there are, shared by
+-- every save file like vehicle_models and edited by admins on the Vehicle
+-- Models page, seeded from backend/data/trailer_catalog.csv.
+CREATE TABLE trailer_models (
+
+    id SERIAL PRIMARY KEY,
+
+    year INTEGER NOT NULL,
+
+    brand TEXT NOT NULL,
+
+    model TEXT NOT NULL,
+
+    -- What it's built to carry (TRAILER_BODIES in app.py): 'utility',
+    -- 'enclosed', 'car_hauler', 'boat', 'equipment', 'flatbed' or 'dry_van'.
+    body TEXT NOT NULL,
+
+    -- The hitch it needs (HITCH_TYPES in app.py), like a vehicle model's.
+    hitch_type TEXT NOT NULL,
+
+    -- Freight space it adds to whatever pulls it (0 for an open car,
+    -- boat or equipment trailer).
+    cargo_capacity_cuft DOUBLE PRECISION NOT NULL DEFAULT 0,
+
+    empty_weight_lbs INTEGER NOT NULL,
+
+    -- Its weight loaded to the limit (GVWR) - what a vehicle's
+    -- towing_capacity_lbs has to cover.
+    gross_weight_lbs INTEGER NOT NULL,
+
+    cost DOUBLE PRECISION NOT NULL,
+
+    created TIMESTAMP DEFAULT NOW()
+);
+
+
+-- Each save file's own trailers, bought from the marketplace. One parked
+-- on its own sits at place_id; one hitched to a vehicle (vehicle_id) goes
+-- wherever the vehicle does, and is left where the vehicle is when it's
+-- unhitched.
+CREATE TABLE trailers (
+
+    id SERIAL PRIMARY KEY,
+
+    slot_id INTEGER NOT NULL REFERENCES save_slots(id) ON DELETE CASCADE,
+
+    trailer_model_id INTEGER NOT NULL REFERENCES trailer_models(id),
+
+    name TEXT NOT NULL,
+
+    place_id INTEGER NOT NULL REFERENCES places(id),
+
+    vehicle_id INTEGER REFERENCES vehicles(id) ON DELETE SET NULL,
+
+    sold BOOLEAN NOT NULL DEFAULT FALSE,
+    sold_at TIMESTAMP,
+
+    -- What it was bought for - what selling it refunds - and its model's
+    -- price new, like a vehicle's.
+    purchase_price NUMERIC(14,2) NOT NULL DEFAULT 0,
+    list_price NUMERIC(14,2),
+
+    created TIMESTAMP DEFAULT NOW()
+);
+
+-- A vehicle pulls one trailer at most.
+CREATE UNIQUE INDEX trailers_one_per_vehicle ON trailers (vehicle_id) WHERE vehicle_id IS NOT NULL;
+CREATE INDEX trailers_slot ON trailers (slot_id);
+
+
+-- The marketplace (GET /api/market in app.py): each save file's used
+-- vehicle and trailer listings, in real US cities near its fleet. Topped up
+-- on demand; one comes down (expired) at expires_game_time if nobody buys
+-- it, or is marked sold with the vehicle or trailer it became.
 CREATE TABLE market_listings (
 
     id SERIAL PRIMARY KEY,
 
     slot_id INTEGER NOT NULL REFERENCES save_slots(id) ON DELETE CASCADE,
 
-    vehicle_model_id INTEGER NOT NULL REFERENCES vehicle_models(id) ON DELETE CASCADE,
+    -- What's for sale: a vehicle model or a trailer model, one or the other.
+    vehicle_model_id INTEGER REFERENCES vehicle_models(id) ON DELETE CASCADE,
+    trailer_model_id INTEGER REFERENCES trailer_models(id) ON DELETE CASCADE,
 
     -- The odometer it's selling with - the bought vehicle's starting_mileage.
-    mileage INTEGER NOT NULL,
+    -- NULL for a trailer.
+    mileage INTEGER,
 
     -- 'Excellent', 'Good', 'Fair' or 'Rough' - priced in, recorded only.
     condition TEXT NOT NULL,
@@ -633,6 +728,7 @@ CREATE TABLE market_listings (
     status TEXT NOT NULL DEFAULT 'available',
 
     vehicle_id INTEGER REFERENCES vehicles(id) ON DELETE SET NULL,
+    trailer_id INTEGER REFERENCES trailers(id) ON DELETE SET NULL,
 
     sold_game_time TIMESTAMP,
 
