@@ -57,7 +57,6 @@ body {
 #gasprice-legend,
 #refresh-interval-ticks,
 #time-multiplier-control,
-#auto-refuel-control,
 #vehicle-panel [style*="color:#555"] {
     color: #222 !important;
 }
@@ -93,10 +92,6 @@ body {
     padding: 3px;
     background: var(--w95-face);
     box-shadow: none;
-}
-
-#auto-refuel-control input {
-    accent-color: var(--w95-navy);
 }
 
 /* Raised buttons that press in. */

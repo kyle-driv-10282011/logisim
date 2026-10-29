@@ -254,7 +254,7 @@ Replaces the old hardcoded `TIME_COMPRESSION` constant — see
 | `time_multiplier`  | double precision | how fast game time runs relative to real time |
 | `anchor_real_utc`  | timestamp | a real UTC moment                |
 | `anchor_game_time` | timestamp | the game time at that moment; re-anchored on every multiplier change |
-| `auto_refuel_level` | integer, default `0` | opt-in auto-refuel perk; `0` = off, `1` = on — see [Auto-refuel](#auto-refuel) |
+| `auto_refuel_level` | integer, default `1` | auto-refuel; `0` = off, `1` = on (the default for a new file) — see [Auto-refuel](#auto-refuel) |
 
 Seeded lazily by the backend on first use (`get_settings()` in
 `app.py`), not by `init.sql` — the anchor has to be comparable to
@@ -833,8 +833,8 @@ having to re-plan it.
 
 ### Auto-refuel
 
-An opt-in perk, off by default — toggled by the "Auto-refuel" checkbox
-under the game clock, stored as `settings.auto_refuel_level`. It's an
+A per-file setting, on for a new file — toggled by the "Auto-refuel"
+checkbox in the Config tab, stored as `settings.auto_refuel_level`. It's an
 integer level rather than a boolean so it can become an upgradeable level
 later without a schema change; today `0` is off and `1`
 (`AUTO_REFUEL_LEVEL_BASIC`) is the only "on" level. Unlike the time

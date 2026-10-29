@@ -255,10 +255,8 @@
         #auto-refuel-control {
             display: flex;
             align-items: center;
-            gap: 4px;
-            margin-top: 4px;
-            font-size: 11px;
-            color: #555;
+            gap: 6px;
+            font-size: 13px;
             cursor: pointer;
         }
 
@@ -1248,10 +1246,6 @@
             <input autocomplete="off" id="time-multiplier-input" type="number" min="0.1" step="1">
             <button id="time-multiplier-set-button" onclick="withSpinner(this, setTimeMultiplier)">Set</button>
         </div>
-        <label id="auto-refuel-control" title="When a driving vehicle is low on fuel and can't finish its trip, divert it to the nearest reachable gas station automatically">
-            <input id="auto-refuel-toggle" type="checkbox" onchange="setAutoRefuel(this)">
-            Auto-refuel
-        </label>
     </div>
     <!--
         Live updates (left - green while on, at the Config tab's refresh
@@ -1367,6 +1361,18 @@
     </div>
 
     <div class="tab-content" id="tab-config">
+
+        <div class="panel-form">
+            <label id="auto-refuel-control">
+                <input id="auto-refuel-toggle" type="checkbox" onchange="setAutoRefuel(this)">
+                <b>Auto-refuel</b>
+            </label>
+            <div class="config-hint">
+                When a driving vehicle is low on fuel and can't finish its trip, it heads to the
+                nearest reachable gas station on its own, fills up, and carries on. Just for this
+                save file.
+            </div>
+        </div>
 
         <div class="panel-form">
             <span class="config-label"><b>View</b></span>

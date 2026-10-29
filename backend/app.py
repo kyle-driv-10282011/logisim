@@ -106,7 +106,8 @@ INCIDENT_FACTOR = 0.4
 JITTER_RANGE = 0.08
 
 #
-# Auto-refuel is an opt-in perk, not default behavior - settings.auto_refuel_level
+# Auto-refuel is a per-file setting (the Config tab), on for a new file
+# (AUTO_REFUEL_DEFAULT_LEVEL) and switchable any time - settings.auto_refuel_level
 # is an integer (not a boolean) so it can grow into an upgradeable level later
 # without another schema change. Today only two levels exist:
 #
@@ -123,6 +124,7 @@ JITTER_RANGE = 0.08
 AUTO_REFUEL_LEVEL_OFF = 0
 AUTO_REFUEL_LEVEL_BASIC = 1
 AUTO_REFUEL_MAX_LEVEL = AUTO_REFUEL_LEVEL_BASIC
+AUTO_REFUEL_DEFAULT_LEVEL = AUTO_REFUEL_LEVEL_BASIC
 
 AUTO_REFUEL_FUEL_FRACTION = 0.25
 
@@ -634,11 +636,11 @@ def ensure_settings_row(conn, cur, slot_id):
     #
     cur.execute(
         """
-        INSERT INTO settings (id, time_multiplier, anchor_real_utc, anchor_game_time)
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO settings (id, time_multiplier, anchor_real_utc, anchor_game_time, auto_refuel_level)
+        VALUES (%s, %s, %s, %s, %s)
         ON CONFLICT (id) DO NOTHING
         """,
-        (slot_id, DEFAULT_TIME_MULTIPLIER, datetime.utcnow(), local_now_naive())
+        (slot_id, DEFAULT_TIME_MULTIPLIER, datetime.utcnow(), local_now_naive(), AUTO_REFUEL_DEFAULT_LEVEL)
     )
 
     conn.commit()
@@ -2830,6 +2832,12 @@ def run_migrations():
     # maybe_auto_divert_to_gas_station().
     #
     cur.execute("ALTER TABLE settings ADD COLUMN IF NOT EXISTS auto_refuel_level INTEGER NOT NULL DEFAULT 0")
+
+    #
+    # On for new files now (AUTO_REFUEL_DEFAULT_LEVEL); files that already
+    # exist keep whatever they were set to.
+    #
+    cur.execute(f"ALTER TABLE settings ALTER COLUMN auto_refuel_level SET DEFAULT {AUTO_REFUEL_DEFAULT_LEVEL}")
     cur.execute("ALTER TABLE trips ADD COLUMN IF NOT EXISTS auto_divert_claimed_at TIMESTAMP")
 
     #

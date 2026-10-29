@@ -67,7 +67,6 @@ body {
 #gasprice-legend,
 #refresh-interval-ticks,
 #time-multiplier-control,
-#auto-refuel-control,
 #vehicle-panel [style*="color:#555"] {
     color: var(--neon-muted) !important;
 }
@@ -116,11 +115,12 @@ body {
     accent-color: var(--neon-pink);
 }
 
-#auto-refuel-control input,
+#vehicle-panel input[type="checkbox"],
 #vehicle-panel input[type="radio"] {
     accent-color: var(--neon-pink);
 }
 
+#vehicle-panel input[type="checkbox"],
 #vehicle-panel input[type="radio"] {
     padding: 0;
     border: none;
