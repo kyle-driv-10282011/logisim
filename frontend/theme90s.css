@@ -639,6 +639,9 @@ body {
 
 .model-card-stats,
 .models-footnote,
+.market-location,
+.market-until,
+.market-new,
 .model-editor-fields label,
 .model-editor-note,
 .model-image-caption,
@@ -819,4 +822,9 @@ body {
     color: #000;
     background: var(--w95-face);
     font-weight: bold;
+}
+
+/* Marketplace condition badges, square like everything else here. */
+.market-condition {
+    border-radius: 0;
 }

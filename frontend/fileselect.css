@@ -377,3 +377,13 @@
 .balance-display.negative {
     color: #c92a2a;
 }
+
+/* The release version, on the About screen only. */
+.intro-version {
+    position: relative;
+    font-size: 12px;
+    letter-spacing: 3px;
+    color: #9fe8ff;
+    text-shadow: 0 0 8px rgba(90, 220, 255, 0.8);
+    animation: intro-fade-in 1.5s ease 1.2s both;
+}

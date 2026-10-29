@@ -727,3 +727,26 @@
         overflow: visible;
     }
 }
+
+/* The Marketplace's settings, under the toolbar. */
+.models-market-settings {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 14px;
+    margin-bottom: 12px;
+    padding: 8px 10px;
+    font-size: 13px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+}
+
+.models-market-settings label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.models-market-settings input {
+    width: 60px;
+}

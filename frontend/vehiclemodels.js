@@ -66,6 +66,84 @@ function showVehicleModelsPage() {
 
     renderVehicleModelsPage();
     loadVehicleModels();
+    loadMarketSettings();
+}
+
+
+//
+// The Marketplace's settings (global_settings in app.py, market_*): how
+// many listings each save file sees, how long one stays up at most, and
+// how far an asking price strays from what the vehicle's worth. A change
+// shows up as listings come and go - existing ones keep their terms.
+//
+const MARKET_SETTING_INPUTS = {
+    market_listing_count: "market-setting-count",
+    market_listing_days: "market-setting-days",
+    market_price_spread_percent: "market-setting-spread",
+};
+
+
+async function loadMarketSettings() {
+
+    try {
+
+        const response = await apiFetch(API + "/api/global-settings");
+
+        if (response.ok) {
+
+            const settings = await response.json();
+
+            for (const [key, id] of Object.entries(MARKET_SETTING_INPUTS)) {
+                document.getElementById(id).value = settings[key];
+            }
+        }
+
+    } catch (e) {
+        // keeps whatever it showed
+    }
+}
+
+
+async function saveMarketSettings() {
+
+    const body = {};
+
+    for (const [key, id] of Object.entries(MARKET_SETTING_INPUTS)) {
+        body[key] = Number(document.getElementById(id).value);
+    }
+
+    let response;
+    let data;
+
+    try {
+
+        response = await apiFetch(API + "/api/global-settings", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body)
+        });
+
+        data = await response.json();
+
+    } catch (e) {
+        setModelsResult("error", "Marketplace not saved - couldn't reach the server.");
+        return;
+    }
+
+    if (!response.ok) {
+        setModelsResult("error", "Marketplace not saved - " + (typeof data.detail === "string" ? data.detail : "enter numbers."));
+        return;
+    }
+
+    for (const [key, id] of Object.entries(MARKET_SETTING_INPUTS)) {
+        document.getElementById(id).value = data[key];
+    }
+
+    setModelsResult(
+        "success",
+        `Marketplace saved - ${data.market_listing_count} listings per file, up to ${data.market_listing_days} game days, ` +
+        `prices ±${data.market_price_spread_percent}%. Listings already up keep their terms.`
+    );
 }
 
 

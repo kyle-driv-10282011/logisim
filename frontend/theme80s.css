@@ -743,6 +743,9 @@ body {
 
 .model-card-stats,
 .models-footnote,
+.market-location,
+.market-until,
+.market-new,
 .models-empty,
 .model-editor-fields label,
 .model-editor-note,
@@ -957,4 +960,19 @@ body {
     color: white;
     background: linear-gradient(180deg, #ff4d6d 0%, #a51d4a 100%);
     border-color: var(--neon-cream);
+}
+
+/* Marketplace: the odometer reads in cream, condition badges go square. */
+.market-mileage {
+    color: var(--neon-cream);
+}
+
+.market-condition {
+    border-radius: 0;
+    box-shadow: 0 0 6px rgba(0, 0, 0, 0.6);
+}
+
+.models-market-settings {
+    color: var(--neon-muted);
+    border-color: var(--neon-line);
 }

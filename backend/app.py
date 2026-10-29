@@ -359,6 +359,65 @@ def ensure_starter_place(cur):
 
 
 #
+# Real-world vehicles - year, make, model, specs and price new - bundled so
+# the marketplace (GET /api/market) has something to sell from the start.
+# They go into vehicle_models like any other model, so admins can change or
+# delete them on the Vehicle Models page. Each version of the list is seeded
+# once (global_settings' vehicle_catalog_version), adding only models not
+# already there - so an admin's edits and deletions stick across restarts;
+# bump VEHICLE_CATALOG_VERSION after adding rows to the file.
+#
+VEHICLE_CATALOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "vehicle_catalog.csv")
+VEHICLE_CATALOG_VERSION = 1
+
+
+def seed_vehicle_catalog(cur):
+
+    cur.execute("SELECT value FROM global_settings WHERE key = 'vehicle_catalog_version'")
+
+    row = cur.fetchone()
+
+    if row is not None and float(row[0]) >= VEHICLE_CATALOG_VERSION:
+        return
+
+    with open(VEHICLE_CATALOG_PATH, encoding="utf-8", newline="") as f:
+        catalog = list(csv.DictReader(f))
+
+    for entry in catalog:
+
+        cur.execute(
+            "SELECT 1 FROM vehicle_models WHERE year = %s AND LOWER(brand) = LOWER(%s) AND LOWER(model) = LOWER(%s)",
+            (int(entry["year"]), entry["brand"], entry["model"])
+        )
+
+        if cur.fetchone() is not None:
+            continue
+
+        cur.execute(
+            """
+            INSERT INTO vehicle_models
+            (year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, fuel_tank_gallons,
+             engine_liters, engine_cylinders, engine_turbo, fuel_type, transmission, tire_count)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                int(entry["year"]), entry["brand"], entry["model"], int(entry["person_capacity"]),
+                float(entry["cargo_capacity_cuft"]), float(entry["cost"]), float(entry["mpg"]),
+                float(entry["fuel_tank_gallons"]),
+                *(parse_engine_csv_value(column, entry[column]) for column in SPEC_COLUMNS)
+            )
+        )
+
+    cur.execute(
+        """
+        INSERT INTO global_settings (key, value) VALUES ('vehicle_catalog_version', %s)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+        """,
+        (str(VEHICLE_CATALOG_VERSION),)
+    )
+
+
+#
 # A new file's first vehicle: the starter van, free (it was inherited -
 # purchase_price 0, so selling it refunds nothing), parked at STARTER_PLACE
 # with a full tank. Doesn't commit.
@@ -546,11 +605,27 @@ def trip_fuel_pool(starting_fuel_gallons, roadside_refuel_count, fuel_tank_gallo
 # price - stations only have the one price, so a diesel vehicle (its model's
 # fuel_type) pays that plus this at every fill-up, roadside refuel included.
 #
+# market_*: the vehicle marketplace (see GET /api/market) - how many
+# listings each save file sees, how many game days one stays up at most, and
+# how far (+/- percent) an asking price strays from what the vehicle's
+# worth.
+#
 GLOBAL_SETTING_DEFAULTS = {
     "diesel_markup_percent": 18.0,
+    "market_listing_count": 24.0,
+    "market_listing_days": 7.0,
+    "market_price_spread_percent": 15.0,
 }
 
-DIESEL_MARKUP_RANGE = (0.0, 200.0)
+#
+# Each setting's allowed range, and what to call it in an error.
+#
+GLOBAL_SETTING_RANGES = {
+    "diesel_markup_percent": (0.0, 200.0, "The diesel markup", "%"),
+    "market_listing_count": (1.0, 100.0, "Marketplace listings", ""),
+    "market_listing_days": (0.5, 60.0, "A listing's time up", " game days"),
+    "market_price_spread_percent": (0.0, 50.0, "The price spread", "%"),
+}
 
 
 def get_global_setting(cur, key):
@@ -3155,10 +3230,36 @@ def run_migrations():
 
     forget_unused_places(cur)
 
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_listings (
+            id SERIAL PRIMARY KEY,
+            slot_id INTEGER NOT NULL REFERENCES save_slots(id) ON DELETE CASCADE,
+            vehicle_model_id INTEGER NOT NULL REFERENCES vehicle_models(id) ON DELETE CASCADE,
+            mileage INTEGER NOT NULL,
+            condition TEXT NOT NULL,
+            price NUMERIC(14,2) NOT NULL,
+            city_name TEXT NOT NULL,
+            city_state TEXT NOT NULL,
+            lat DOUBLE PRECISION NOT NULL,
+            lng DOUBLE PRECISION NOT NULL,
+            posted_game_time TIMESTAMP NOT NULL,
+            expires_game_time TIMESTAMP NOT NULL,
+            status TEXT NOT NULL DEFAULT 'available',
+            vehicle_id INTEGER REFERENCES vehicles(id) ON DELETE SET NULL,
+            sold_game_time TIMESTAMP,
+            created TIMESTAMP DEFAULT NOW()
+        )
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS market_listings_slot_status ON market_listings (slot_id, status)")
+
     #
-    # The starter van's vehicle model is always in the database (see
-    # STARTER_VEHICLE_MODEL).
+    # The real-world vehicles the marketplace sells (VEHICLE_CATALOG_PATH),
+    # and the starter van's vehicle model, which is always in the database
+    # (see STARTER_VEHICLE_MODEL).
     #
+    seed_vehicle_catalog(cur)
     ensure_starter_vehicle_model(cur)
 
     conn.commit()
@@ -3714,34 +3815,6 @@ def fetch_places_by_id(cur, place_ids):
 
 
 
-class CreateVehicleRequest(BaseModel):
-
-    #
-    # No user-supplied name - create_vehicle() derives "<year> <brand>
-    # <model> <n>" from the vehicle model plus how many vehicles already exist on
-    # it, so fleet vehicles are named consistently instead of whatever a
-    # user happens to type (e.g. "1978 Ford Econoline 1").
-    #
-    vehicle_model_id: int
-
-    #
-    # Free-text address or place description, resolved to a place row on
-    # the way in (see find_or_create_place() in app.py) - the vehicle
-    # stores that place's id, not its own copy of the coordinates.
-    # Matching against a path's origin (to decide which paths this vehicle
-    # can start a trip on) is done by comparing place ids, not this text.
-    #
-    current_location: str
-
-    #
-    # Odometer reading at the moment this vehicle joins the fleet (e.g. a
-    # used vehicle bought with miles already on it) - added to every mile
-    # it drives afterward to get its displayed total (see list_vehicles()).
-    #
-    starting_mileage: float = 0
-
-
-
 class UpdateSettingsRequest(BaseModel):
 
     #
@@ -4020,13 +4093,20 @@ def admin_status(x_admin_token: Optional[str] = Header(None)):
     return {"configured": bool(ADMIN_PASSWORD), "admin": is_valid_admin_token(x_admin_token)}
 
 
+#
+# Any of GLOBAL_SETTING_DEFAULTS - only the ones sent change.
+#
 class GlobalSettingsRequest(BaseModel):
-    diesel_markup_percent: float
+    diesel_markup_percent: Optional[float] = None
+    market_listing_count: Optional[float] = None
+    market_listing_days: Optional[float] = None
+    market_price_spread_percent: Optional[float] = None
 
 
 #
-# Readable by everyone (it's part of what a fill-up costs); only admins
-# change it - from the Gas Prices tab.
+# Readable by everyone (they're part of what a fill-up costs and what the
+# marketplace shows); only admins change them - the diesel markup from the
+# Gas Prices tab, the marketplace's from the Vehicle Models page.
 #
 @app.get("/api/global-settings")
 def read_global_settings():
@@ -4044,23 +4124,31 @@ def read_global_settings():
 @app.put("/api/global-settings")
 def update_global_settings(req: GlobalSettingsRequest, _admin: None = Depends(require_admin)):
 
-    low, high = DIESEL_MARKUP_RANGE
+    changes = {key: value for key, value in req.dict().items() if value is not None}
 
-    if not low <= req.diesel_markup_percent <= high:
-        raise HTTPException(status_code=400, detail=f"The diesel markup must be {low:g}-{high:g}%")
+    for key, value in changes.items():
+
+        low, high, label, unit = GLOBAL_SETTING_RANGES[key]
+
+        if not low <= value <= high:
+            raise HTTPException(status_code=400, detail=f"{label} must be {low:g}-{high:g}{unit}")
+
+    if "market_listing_count" in changes:
+        changes["market_listing_count"] = float(round(changes["market_listing_count"]))
 
     conn = db()
     cur = conn.cursor()
 
     try:
 
-        cur.execute(
-            """
-            INSERT INTO global_settings (key, value) VALUES ('diesel_markup_percent', %s)
-            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
-            """,
-            (str(req.diesel_markup_percent),)
-        )
+        for key, value in changes.items():
+            cur.execute(
+                """
+                INSERT INTO global_settings (key, value) VALUES (%s, %s)
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+                """,
+                (key, str(value))
+            )
 
         conn.commit()
 
@@ -4242,10 +4330,8 @@ def erase_save_slot(slot_id: int, _admin: None = Depends(require_admin)):
 #
 #
 # The Budget page's dropdown choices: every vehicle with ledger entries,
-# and every trip - one journey (ledger.journey_id), or for entries from
-# before journeys had an id, one trip label - with the vehicle it belongs
-# to, so the page can narrow the trip list to the chosen vehicle. Newest
-# trip first.
+# and every load with money against it, with the vehicle that hauled it so
+# the page can narrow the load list to the chosen vehicle.
 #
 @app.get("/api/ledger/filters")
 def list_ledger_filters(slot: int = Depends(current_slot)):
@@ -4263,27 +4349,6 @@ def list_ledger_filters(slot: int = Depends(current_slot)):
     )
 
     vehicles = [row[0] for row in cur.fetchall()]
-
-    cur.execute(
-        """
-        SELECT vehicle_name, journey_id, trip, MIN(created) AS first_at
-        FROM ledger
-        WHERE slot_id = %s AND trip IS NOT NULL
-        GROUP BY vehicle_name, journey_id, trip
-        ORDER BY first_at DESC
-        """,
-        (slot,)
-    )
-
-    trips = [
-        {
-            "key": f"j{row[1]}" if row[1] is not None else f"t{row[2]}",
-            "vehicle": row[0],
-            "trip": row[2],
-            "started": row[3].replace(tzinfo=ZoneInfo("UTC")),
-        }
-        for row in cur.fetchall()
-    ]
 
     #
     # Every load with money against it, newest first.
@@ -4312,7 +4377,7 @@ def list_ledger_filters(slot: int = Depends(current_slot)):
     cur.close()
     conn.close()
 
-    return {"vehicles": vehicles, "trips": trips, "loads": loads}
+    return {"vehicles": vehicles, "loads": loads}
 
 
 def ledger_load_label(load_id, cargo, origin_name, origin_state, destination_name, destination_state):
@@ -4320,30 +4385,12 @@ def ledger_load_label(load_id, cargo, origin_name, origin_state, destination_nam
     return f"#{load_id} {cargo}: {origin_name}, {origin_state} → {destination_name}, {destination_state}"
 
 
-#
-# trip is a key from /api/ledger/filters: "j<journey id>", or "t<label>"
-# for entries from before journeys had an id.
-#
-def ledger_trip_filter(trip):
-
-    if not trip:
-        return None, None
-
-    if trip.startswith("j"):
-        try:
-            return int(trip[1:]), None
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Unknown trip")
-
-    return None, trip[1:]
-
-
 LEDGER_DIRECTIONS = ("both", "in", "out")
 
 
 @app.get("/api/ledger")
 def list_ledger(
-    limit: int = 50, before_id: Optional[int] = None, vehicle: Optional[str] = None, trip: Optional[str] = None,
+    limit: int = 50, before_id: Optional[int] = None, vehicle: Optional[str] = None,
     direction: str = "both", load_id: Optional[int] = None, slot: int = Depends(current_slot)
 ):
 
@@ -4356,8 +4403,6 @@ def list_ledger(
     if direction not in LEDGER_DIRECTIONS:
         raise HTTPException(status_code=400, detail=f"direction must be one of {', '.join(LEDGER_DIRECTIONS)}")
 
-    journey_id, trip_label = ledger_trip_filter(trip)
-
     conn = db()
     cur = conn.cursor()
 
@@ -4368,22 +4413,21 @@ def list_ledger(
     #
     cur.execute(
         """
-        SELECT e.id, e.amount, e.kind, e.description, e.created, e.vehicle_name, e.location, e.trip,
-            e.balance_after, e.load_id, l.cargo
+        SELECT e.id, e.amount, e.kind, e.description, e.created, e.vehicle_name, e.location,
+            e.balance_after, e.load_id, l.cargo, l.origin_name, l.origin_state, l.destination_name,
+            l.destination_state
         FROM ledger e
         LEFT JOIN loads l ON l.id = e.load_id
         WHERE e.slot_id = %s
         AND (%s::int IS NULL OR e.id < %s::int)
         AND (%s::text IS NULL OR e.vehicle_name = %s::text)
-        AND (%s::int IS NULL OR e.journey_id = %s::int)
-        AND (%s::text IS NULL OR (e.journey_id IS NULL AND e.trip = %s::text))
         AND (%s = 'both' OR (%s = 'in' AND e.amount > 0) OR (%s = 'out' AND e.amount < 0))
         AND (%s::int IS NULL OR e.load_id = %s::int)
         ORDER BY e.id DESC
         LIMIT %s
         """,
         (
-            slot, before_id, before_id, vehicle, vehicle, journey_id, journey_id, trip_label, trip_label,
+            slot, before_id, before_id, vehicle, vehicle,
             direction, direction, direction, load_id, load_id, limit + 1
         )
     )
@@ -4407,14 +4451,9 @@ def list_ledger(
                 "created": row[4].replace(tzinfo=ZoneInfo("UTC")),
                 "vehicle": row[5],
                 "location": row[6],
-                "trip": row[7],
-                "balance_after": float(row[8]) if row[8] is not None else None,
-                "load_id": row[9],
-                #
-                # Just the load's number and cargo - its route is already
-                # the row's trip.
-                #
-                "load": f"#{row[9]} {row[10]}" if row[9] is not None else None,
+                "balance_after": float(row[7]) if row[7] is not None else None,
+                "load_id": row[8],
+                "load": ledger_load_label(*row[8:14]) if row[8] is not None else None,
             }
             for row in rows[:limit]
         ]
@@ -4525,117 +4564,24 @@ def update_settings(req: UpdateSettingsRequest, slot: int = Depends(current_slot
 
 
 
-@app.post("/api/vehicles")
-def create_vehicle(req: CreateVehicleRequest, slot: int = Depends(current_slot)):
-
-    conn = db()
-    cur = conn.cursor()
-
-    vehicle_models_by_id = fetch_vehicle_models_by_id(cur, [req.vehicle_model_id])
-    vehicle_model = vehicle_models_by_id.get(req.vehicle_model_id)
-
-    if vehicle_model is None:
-        cur.close()
-        conn.close()
-        raise HTTPException(status_code=404, detail="Vehicle model not found")
-
-    #
-    # Grandpa's van is one of a kind: each file inherits it
-    # (give_starter_vehicle()), and nobody can buy another.
-    #
-    if is_starter_vehicle_model(vehicle_model["year"], vehicle_model["brand"], vehicle_model["model"]):
-        cur.close()
-        conn.close()
-        raise HTTPException(status_code=409, detail="There was only ever one of grandpa's van - it can't be bought")
-
-    #
-    # Geocoded/resolved up front (same as _drive_vehicle_to()'s
-    # destination) so a bad location name fails fast, before the vehicle
-    # row is inserted.
-    #
-    place_id, current_lat, current_lng = find_or_create_place(cur, req.current_location)
-
-    #
-    # "<year> <brand> <model> <n>" instead of a user-typed name, e.g.
-    # "1978 Ford Econoline 1" then "... 2" for the next one on that same
-    # vehicle model. Counts every vehicle ever created on this vehicle model (sold ones
-    # included) so numbers stay unique across "My Vehicles" and "All
-    # Vehicles" rather than getting reused after a sale - within this save
-    # file, so each file's fleet numbers from 1 on its own.
-    #
-    cur.execute(
-        "SELECT COUNT(*) FROM vehicles WHERE vehicle_model_id=%s AND slot_id=%s",
-        (req.vehicle_model_id, slot)
-    )
-
-    vehicle_number = cur.fetchone()[0] + 1
-
-    name = f"{vehicle_model['year']} {vehicle_model['brand']} {vehicle_model['model']} {vehicle_number}"
-
-    #
-    # A brand-new vehicle always starts with a full tank of its vehicle model's
-    # capacity - there's no "starting fuel level" input the way
-    # starting_mileage has one, since a fresh vehicle joining the fleet is
-    # assumed fueled up and ready to go.
-    #
-    fuel_gallons = vehicle_model["fuel_tank_gallons"]
-
-    #
-    # Bought at the model's price, charged now and recorded on the vehicle
-    # (purchase_price) - that's what selling it refunds. list_price is the
-    # model's price at the time, kept for depreciation later.
-    #
-    price = float(vehicle_model["cost"])
+#
+# "<year> <brand> <model> <n>" instead of a user-typed name, e.g.
+# "1978 Ford Econoline 1" then "... 2" for the next one on that same vehicle
+# model. Counts every vehicle ever created on this vehicle model (sold ones
+# included) so numbers stay unique across "My Vehicles" and "All Vehicles"
+# rather than getting reused after a sale - within this save file, so each
+# file's fleet numbers from 1 on its own.
+#
+def next_vehicle_name(cur, slot_id, vehicle_model):
 
     cur.execute(
-        """
-        INSERT INTO vehicles (
-            slot_id, name, vehicle_model_id, place_id, starting_mileage, fuel_gallons, purchase_price, list_price
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        RETURNING id
-        """,
-        (slot, name, req.vehicle_model_id, place_id, req.starting_mileage, fuel_gallons, price, price)
+        "SELECT COUNT(*) FROM vehicles WHERE vehicle_model_id = %s AND slot_id = %s",
+        (vehicle_model["id"], slot_id)
     )
 
-    vehicle_id = cur.fetchone()[0]
+    number = cur.fetchone()[0] + 1
 
-    record_money(
-        cur, slot, -price, "vehicle_purchase", f"Bought {name}",
-        vehicle_id, name, fetch_places_by_id(cur, [place_id])[place_id]["description"]
-    )
-
-    conn.commit()
-
-    cur.close()
-    conn.close()
-
-    return {
-
-        "id": vehicle_id,
-
-        "name": name,
-
-        "vehicle_model": vehicle_model,
-
-        "current_location": req.current_location,
-
-        "current_lat": current_lat,
-
-        "current_lng": current_lng,
-
-        "starting_mileage": req.starting_mileage,
-
-        "fuel_gallons": fuel_gallons,
-
-        #
-        # A brand-new vehicle has no trips yet, so its total is just what
-        # it started with.
-        #
-        "total_miles_traveled": req.starting_mileage,
-
-        "status": "READY"
-    }
+    return f"{vehicle_model['year']} {vehicle_model['brand']} {vehicle_model['model']} {number}"
 
 
 
@@ -8663,6 +8609,346 @@ def fetch_active_loads(cur, vehicle_ids):
     )
 
     return {row[16]: load_dict(row) for row in cur.fetchall()}
+
+
+# ---------- The vehicle marketplace ----------
+#
+# Where vehicles come from: each save file has its own used-vehicle
+# listings in real US cities (US_CITIES) near its fleet, each one of the
+# shared vehicle models with its own mileage, condition and asking price.
+# Like the load board it's topped up on demand (GET /api/market) to the
+# market_listing_count global setting, and a listing nobody buys comes down
+# within market_listing_days of game time. Buying one (POST
+# /api/market/{id}/buy) adds the vehicle to the fleet where it sits, in the
+# seller's city.
+#
+# What can show up is the admin's catalog (Vehicle Models) - the bundled
+# real-world vehicles (VEHICLE_CATALOG_PATH) plus any added since - except
+# grandpa's van, anything free, and anything newer than the game's year. A
+# model's cost is its price new; a listing's price works down from that.
+#
+MARKET_RADIUS_MILES = 300
+
+#
+# A normal year's driving by size (tire_count), so mileage fits a vehicle's
+# age - a semi covers far more ground than a sedan. No tire count reads as
+# a car.
+#
+MARKET_ANNUAL_MILES = {4: 12000, 6: 20000, 8: 30000, 10: 35000, 18: 100000}
+
+#
+# What a vehicle's worth against its price new: down to
+# MARKET_FIRST_YEAR_VALUE over its first year, then MARKET_YEARLY_VALUE a
+# year after that, but never under MARKET_VALUE_FLOOR - an old runner is
+# still worth something.
+#
+MARKET_FIRST_YEAR_VALUE = 0.85
+MARKET_YEARLY_VALUE = 0.93
+MARKET_VALUE_FLOOR = 0.2
+
+#
+# Vehicles drive less as they get older: normal mileage is a year's
+# driving times age ** MARKET_MILEAGE_AGE_POWER, not times age.
+#
+MARKET_MILEAGE_AGE_POWER = 0.85
+
+#
+# Condition comes from a random score, pulled down by high mileage for the
+# age and by age itself: (label, lowest score, what it does to the price).
+#
+MARKET_CONDITIONS = [
+    ("Excellent", 0.7, 1.12),
+    ("Good", -0.5, 1.0),
+    ("Fair", -1.5, 0.85),
+    ("Rough", None, 0.68),
+]
+
+MARKET_MIN_PRICE = 500
+
+
+def market_eligible_models(cur, game_year):
+
+    cur.execute(
+        f"SELECT {VEHICLE_MODEL_COLUMNS} FROM vehicle_models WHERE year <= %s AND cost > 0 ORDER BY id",
+        (game_year,)
+    )
+
+    return [
+        vehicle_model
+        for vehicle_model in (vehicle_model_dict(row) for row in cur.fetchall())
+        if not is_starter_vehicle_model(vehicle_model["year"], vehicle_model["brand"], vehicle_model["model"])
+    ]
+
+
+#
+# One listing's mileage, condition and asking price for a vehicle model.
+# Age counts from the start of its model year.
+#
+def market_listing_terms(vehicle_model, game_now, spread):
+
+    age = max(0.1, game_now.year + (game_now.timetuple().tm_yday - 1) / 365.25 - vehicle_model["year"])
+
+    annual = MARKET_ANNUAL_MILES.get(vehicle_model["tire_count"], MARKET_ANNUAL_MILES[4])
+    expected = annual * age ** MARKET_MILEAGE_AGE_POWER
+    mileage = max(5, round(expected * random.lognormvariate(0, 0.35)))
+    ratio = mileage / expected
+
+    score = random.gauss(0, 1) - (ratio - 1) * 1.2 - age * 0.03
+
+    condition, condition_factor = next(
+        (label, factor) for label, lowest, factor in MARKET_CONDITIONS if lowest is None or score >= lowest
+    )
+
+    if age < 1:
+        value = 1 - (1 - MARKET_FIRST_YEAR_VALUE) * age
+    else:
+        value = MARKET_FIRST_YEAR_VALUE * MARKET_YEARLY_VALUE ** (age - 1)
+
+    value = max(MARKET_VALUE_FLOOR, value)
+    mileage_factor = min(1.25, max(0.6, 1 - 0.18 * (ratio - 1)))
+
+    price = (
+        float(vehicle_model["cost"]) * value * mileage_factor * condition_factor
+        * (1 + random.uniform(-spread, spread))
+    )
+
+    return mileage, condition, max(MARKET_MIN_PRICE, round(price / 50) * 50)
+
+
+#
+# Where the file's vehicles are parked (or last settled), which the
+# listings gather around - grandpa's starting spot if the fleet's empty.
+# (vehicle id, name, lat, lng) each.
+#
+def market_anchors(cur, slot_id):
+
+    cur.execute(
+        """
+        SELECT v.id, v.name, p.lat, p.lng
+        FROM vehicles v JOIN places p ON p.id = v.place_id
+        WHERE v.slot_id = %s AND NOT v.sold
+        ORDER BY v.id
+        """,
+        (slot_id,)
+    )
+
+    return cur.fetchall() or [(None, None, STARTER_PLACE["lat"], STARTER_PLACE["lng"])]
+
+
+#
+# Adds `count` listings in cities within MARKET_RADIUS_MILES of any of the
+# anchors (bigger cities more often), or the nearest few cities if none are
+# that close. Expiries are staggered so the market turns over a little at a
+# time.
+#
+def generate_market_listings(cur, slot_id, game_now, count, anchors):
+
+    models = market_eligible_models(cur, game_now.year)
+
+    if not models or count <= 0:
+        return 0
+
+    distances = np.min([miles_to_us_cities(lat, lng) for _, _, lat, lng in anchors], axis=0)
+    candidates = np.flatnonzero(distances <= MARKET_RADIUS_MILES)
+
+    if not len(candidates):
+        candidates = np.argsort(distances)[:LOAD_NEAREST_CITIES]
+
+    weights = US_CITY_POPULATIONS[candidates] ** 0.6
+    spread = get_global_setting(cur, "market_price_spread_percent") / 100
+    days = get_global_setting(cur, "market_listing_days")
+
+    for _ in range(count):
+
+        city = US_CITIES[int(random.choices(candidates, weights=weights)[0])]
+        vehicle_model = random.choice(models)
+        mileage, condition, price = market_listing_terms(vehicle_model, game_now, spread)
+
+        cur.execute(
+            """
+            INSERT INTO market_listings (
+                slot_id, vehicle_model_id, mileage, condition, price,
+                city_name, city_state, lat, lng, posted_game_time, expires_game_time
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                slot_id, vehicle_model["id"], mileage, condition, price,
+                city["name"], city["state"], city["lat"], city["lng"], game_now,
+                game_now + timedelta(days=days * random.uniform(0.3, 1.0))
+            )
+        )
+
+    return count
+
+
+MARKET_LISTING_COLUMNS = """
+    id, vehicle_model_id, mileage, condition, price, city_name, city_state, lat, lng,
+    posted_game_time, expires_game_time
+"""
+
+
+#
+# The file's marketplace: every listing up now, topped up first, each with
+# its vehicle model and how far it is from the nearest of the file's
+# vehicles - plus the balance, so the page can tell what's affordable.
+#
+@app.get("/api/market")
+def market(slot: int = Depends(current_slot)):
+
+    conn = db()
+    cur = conn.cursor()
+
+    try:
+
+        _, game_now = get_settings(conn, cur, slot)
+
+        cur.execute(
+            """
+            UPDATE market_listings SET status = 'expired'
+            WHERE slot_id = %s AND status = 'available' AND expires_game_time < %s
+            """,
+            (slot, game_now)
+        )
+
+        cur.execute("SELECT COUNT(*) FROM market_listings WHERE slot_id = %s AND status = 'available'", (slot,))
+
+        listed = cur.fetchone()[0]
+        target = int(get_global_setting(cur, "market_listing_count"))
+        anchors = market_anchors(cur, slot)
+
+        if listed < target:
+            generate_market_listings(cur, slot, game_now, target - listed, anchors)
+
+        conn.commit()
+
+        cur.execute(
+            f"""
+            SELECT {MARKET_LISTING_COLUMNS} FROM market_listings
+            WHERE slot_id = %s AND status = 'available'
+            ORDER BY id
+            """,
+            (slot,)
+        )
+
+        rows = cur.fetchall()
+
+        vehicle_models_by_id = fetch_vehicle_models_by_id(cur, [row[1] for row in rows])
+        balance = get_balance(cur, slot)
+
+    finally:
+        cur.close()
+        conn.close()
+
+    listings = []
+
+    for row in rows:
+
+        nearest = min(
+            ((haversine_miles(lat, lng, row[7], row[8]), name) for _, name, lat, lng in anchors),
+            key=lambda pair: pair[0]
+        )
+
+        listings.append({
+            "id": row[0],
+            "vehicle_model": vehicle_models_by_id.get(row[1]),
+            "mileage": row[2],
+            "condition": row[3],
+            "price": float(row[4]),
+            "location": city_label(row[5], row[6]),
+            "lat": row[7],
+            "lng": row[8],
+            "posted_game_time": row[9].isoformat(),
+            "expires_game_time": row[10].isoformat(),
+
+            #
+            # Straight-line, to the nearest of the file's vehicles (None
+            # with no fleet - then it's from grandpa's starting spot).
+            #
+            "distance_miles": round(nearest[0], 1),
+            "nearest_vehicle": nearest[1],
+        })
+
+    return {"game_time": game_now.isoformat(), "balance": balance, "listings": listings}
+
+
+#
+# Buys a listing outright - it has to be up still, and affordable (no
+# buying on credit). The vehicle joins the fleet in the seller's city,
+# odometer at the listing's mileage and a full tank; what was paid is what
+# selling it refunds (purchase_price), and its model's price new is kept
+# for depreciation later (list_price).
+#
+@app.post("/api/market/{listing_id}/buy")
+def buy_market_listing(listing_id: int, slot: int = Depends(current_slot)):
+
+    conn = db()
+    cur = conn.cursor()
+
+    try:
+
+        _, game_now = get_settings(conn, cur, slot)
+
+        cur.execute(
+            f"SELECT {MARKET_LISTING_COLUMNS}, status FROM market_listings WHERE id = %s AND slot_id = %s FOR UPDATE",
+            (listing_id, slot)
+        )
+
+        row = cur.fetchone()
+
+        if row is None:
+            raise HTTPException(status_code=404, detail="Listing not found")
+
+        if row[11] != "available" or row[10] < game_now:
+            raise HTTPException(status_code=409, detail="Too late - that one's gone")
+
+        vehicle_model = fetch_vehicle_models_by_id(cur, [row[1]]).get(row[1])
+        price = float(row[4])
+        balance = get_balance(cur, slot)
+
+        if price > balance:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Not enough Gold Doubloons - it's ${price:,.2f} and you have ${balance:,.2f}"
+            )
+
+        location = city_label(row[5], row[6])
+        place_id = ensure_city_place(cur, row[5], row[6], row[7], row[8])
+        name = next_vehicle_name(cur, slot, vehicle_model)
+
+        cur.execute(
+            """
+            INSERT INTO vehicles (
+                slot_id, name, vehicle_model_id, place_id, starting_mileage, fuel_gallons, purchase_price, list_price
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (
+                slot, name, vehicle_model["id"], place_id, row[2], vehicle_model["fuel_tank_gallons"],
+                price, vehicle_model["cost"]
+            )
+        )
+
+        vehicle_id = cur.fetchone()[0]
+
+        record_money(
+            cur, slot, -price, "vehicle_purchase", f"Bought {name} ({row[3].lower()}, {row[2]:,} mi)",
+            vehicle_id, name, location
+        )
+
+        cur.execute(
+            "UPDATE market_listings SET status = 'sold', vehicle_id = %s, sold_game_time = %s WHERE id = %s",
+            (vehicle_id, game_now, listing_id)
+        )
+
+        conn.commit()
+
+        return {"vehicle_id": vehicle_id, "name": name, "location": location, "price": price}
+
+    finally:
+        cur.close()
+        conn.close()
 
 
 @app.get("/api/paths")

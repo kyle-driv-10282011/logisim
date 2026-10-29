@@ -267,10 +267,25 @@ async function startNewFile() {
 //
 const INTRO_SPLASH_FADE_MS = 1500;
 
-function showIntroSplash() {
+//
+// The About screen (tab menu -> About) is the same card - the mission -
+// with the release version (version.js) under it, closed with CLOSE.
+//
+function showAboutSplash() {
+
+    showIntroSplash({ version: LOGISIM_VERSION, buttonLabel: "CLOSE" });
+}
+
+
+function showIntroSplash({ version = null, buttonLabel = "START" } = {}) {
 
     const splash = document.getElementById("intro-splash");
     const start = document.getElementById("intro-start");
+    const versionLine = document.getElementById("intro-version");
+
+    versionLine.textContent = version ? `Version ${version}` : "";
+    versionLine.style.display = version ? "" : "none";
+    start.textContent = buttonLabel;
 
     splash.style.display = "";
     start.disabled = false;

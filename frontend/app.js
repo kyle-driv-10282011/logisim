@@ -808,44 +808,6 @@ async function loadVehicleModels() {
 
     vehicleModelsById = new Map(vehicleModels.map((vehicleModel) => [vehicleModel.id, vehicleModel]));
 
-    const select = document.getElementById("vehicle-model-select");
-    const previousValue = select.value;
-
-    select.innerHTML = vehicleModels.length
-        ? ""
-        : '<option value="">No vehicle models yet - add one below</option>';
-
-    for (const vehicleModel of vehicleModels) {
-
-        const option = document.createElement("option");
-
-        option.value = vehicleModel.id;
-        option.textContent = `${vehicleModelLabel(vehicleModel)} - ${formatDoubloons(vehicleModel.cost)}`;
-
-        //
-        // Grandpa's van is one of a kind - listed, but not for sale (the
-        // backend refuses too).
-        //
-        if (isStarterVehicleModel(vehicleModel)) {
-            option.disabled = true;
-            option.textContent = `${vehicleModelLabel(vehicleModel)} - grandpa's, not for sale`;
-        }
-
-        select.appendChild(option);
-    }
-
-    //
-    // Never left sitting on the one that can't be bought.
-    //
-    if (select.selectedOptions[0] && select.selectedOptions[0].disabled) {
-        const buyable = [...select.options].find((option) => !option.disabled);
-        select.value = buyable ? buyable.value : "";
-    }
-
-    if (vehicleModels.some((vehicleModel) => String(vehicleModel.id) === previousValue)) {
-        select.value = previousValue;
-    }
-
     renderVehicleList();
     renderVehicleModelsPage();
     restyleMap();
@@ -2397,57 +2359,6 @@ async function roadsideRefuel(vehicleId) {
     // rather than waiting on one that may never come.
     //
     refreshLiveData();
-}
-
-
-async function addVehicle() {
-
-    const vehicleModelId = document.getElementById("vehicle-model-select").value;
-
-    if (!vehicleModelId) {
-        alert("Nothing's for sale yet - an admin can add vehicle models.");
-        return;
-    }
-
-    //
-    // Charged the model's price (create_vehicle() in app.py), refunded in
-    // full if it's sold.
-    //
-    const vehicleModel = vehicleModelsById.get(Number(vehicleModelId));
-
-    if (vehicleModel && !confirm(`Buy a ${vehicleModelLabel(vehicleModel)} for ${formatDoubloons(vehicleModel.cost)}?`)) {
-        return;
-    }
-
-    const response = await apiFetch(API + "/api/vehicles", {
-
-        method: "POST",
-
-        headers: {
-            "Content-Type": "application/json"
-        },
-
-        body: JSON.stringify({
-
-            vehicle_model_id: Number(vehicleModelId),
-
-            current_location: document.getElementById("vehicle-location").value,
-
-            starting_mileage: Number(document.getElementById("vehicle-starting-mileage").value || 0)
-
-        })
-
-    });
-
-    const data = await response.json();
-
-    if (!response.ok) {
-        alert(data.detail || "Could not add vehicle");
-        return;
-    }
-
-    loadVehicles();
-    loadSettings();
 }
 
 

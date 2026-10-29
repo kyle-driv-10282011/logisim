@@ -11,10 +11,10 @@ const BUDGET_PAGE_SIZE = 100;
 let budgetOldestId = null;
 
 //
-// The dropdown choices (GET /api/ledger/filters): vehicle names, and trips
-// as { key, vehicle, trip, started }. Re-fetched each time the page opens.
+// The dropdown choices (GET /api/ledger/filters): vehicle names, and loads
+// as { id, label, vehicle }. Re-fetched each time the page opens.
 //
-let budgetFilterOptions = { vehicles: [], trips: [], loads: [] };
+let budgetFilterOptions = { vehicles: [], loads: [] };
 
 //
 // The Additions / Subtractions / Both toggle: "in" (delivery pay, sales),
@@ -63,7 +63,6 @@ async function openBudgetPage() {
     }
 
     renderBudgetVehicleFilter();
-    renderBudgetTripFilter();
     renderBudgetLoadFilter();
 
     reloadBudgetRows();
@@ -99,41 +98,8 @@ function renderBudgetVehicleFilter() {
 
 
 //
-// Only the chosen vehicle's trips once one is picked; every trip (with its
-// vehicle named) otherwise. The date tells repeat drives of the same route
-// apart. A trip that's no longer in the list (a different vehicle was
-// picked) falls back to "All trips".
-//
-function renderBudgetTripFilter() {
-
-    const vehicle = document.getElementById("budget-vehicle-filter").value;
-    const select = document.getElementById("budget-trip-filter");
-    const previous = select.value;
-
-    const trips = budgetFilterOptions.trips.filter((trip) => !vehicle || trip.vehicle === vehicle);
-
-    select.innerHTML = "";
-
-    addBudgetOption(select, "", vehicle ? `All trips (${trips.length})` : "All trips");
-
-    for (const trip of trips) {
-
-        const started = new Date(trip.started).toLocaleDateString(undefined, { month: "short", day: "numeric" });
-
-        addBudgetOption(
-            select,
-            trip.key,
-            vehicle ? `${trip.trip} · ${started}` : `${trip.trip} · ${trip.vehicle} · ${started}`
-        );
-    }
-
-    select.value = trips.some((trip) => trip.key === previous) ? previous : "";
-}
-
-
-//
 // Loads with money against them - fuel and fees run up hauling them, and
-// their delivery pay - narrowed to the chosen vehicle's, like trips.
+// their delivery pay - only the chosen vehicle's once one is picked.
 //
 function renderBudgetLoadFilter() {
 
@@ -157,7 +123,6 @@ function renderBudgetLoadFilter() {
 
 function onBudgetVehicleFilterChange() {
 
-    renderBudgetTripFilter();
     renderBudgetLoadFilter();
     reloadBudgetRows();
 }
@@ -197,14 +162,9 @@ async function loadBudgetPage() {
     }
 
     const vehicle = document.getElementById("budget-vehicle-filter").value;
-    const trip = document.getElementById("budget-trip-filter").value;
 
     if (vehicle) {
         params.set("vehicle", vehicle);
-    }
-
-    if (trip) {
-        params.set("trip", trip);
     }
 
     const load = document.getElementById("budget-load-filter").value;
@@ -248,7 +208,7 @@ async function loadBudgetPage() {
         budgetOldestId = data.entries[data.entries.length - 1].id;
     }
 
-    const filtered = Boolean(vehicle || trip || load || budgetDirection !== "both");
+    const filtered = Boolean(vehicle || load || budgetDirection !== "both");
 
     status.textContent = rows.children.length
         ? ""
@@ -301,7 +261,6 @@ function budgetRow(entry) {
     row.append(
         budgetCell(entry.vehicle),
         budgetCell(entry.location),
-        budgetCell(entry.trip),
         budgetCell(entry.load),
         cost,
         balance

@@ -598,3 +598,45 @@ CREATE TABLE loads (
 CREATE INDEX loads_slot_status ON loads (slot_id, status);
 CREATE INDEX loads_vehicle ON loads (vehicle_id);
 CREATE INDEX ledger_load ON ledger (load_id);
+
+
+-- The vehicle marketplace (GET /api/market in app.py): each save file's
+-- used-vehicle listings, in real US cities near its fleet. Topped up on
+-- demand; one comes down (expired) at expires_game_time if nobody buys it,
+-- or is marked sold with the vehicle it became.
+CREATE TABLE market_listings (
+
+    id SERIAL PRIMARY KEY,
+
+    slot_id INTEGER NOT NULL REFERENCES save_slots(id) ON DELETE CASCADE,
+
+    vehicle_model_id INTEGER NOT NULL REFERENCES vehicle_models(id) ON DELETE CASCADE,
+
+    -- The odometer it's selling with - the bought vehicle's starting_mileage.
+    mileage INTEGER NOT NULL,
+
+    -- 'Excellent', 'Good', 'Fair' or 'Rough' - priced in, recorded only.
+    condition TEXT NOT NULL,
+
+    price NUMERIC(14,2) NOT NULL,
+
+    -- The seller's city (us_cities.csv); becomes a place once bought.
+    city_name TEXT NOT NULL,
+    city_state TEXT NOT NULL,
+    lat DOUBLE PRECISION NOT NULL,
+    lng DOUBLE PRECISION NOT NULL,
+
+    posted_game_time TIMESTAMP NOT NULL,
+    expires_game_time TIMESTAMP NOT NULL,
+
+    -- available, sold or expired.
+    status TEXT NOT NULL DEFAULT 'available',
+
+    vehicle_id INTEGER REFERENCES vehicles(id) ON DELETE SET NULL,
+
+    sold_game_time TIMESTAMP,
+
+    created TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX market_listings_slot_status ON market_listings (slot_id, status);

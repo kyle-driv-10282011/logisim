@@ -104,6 +104,11 @@ Minneapolis with a full tank (`STARTER_VEHICLE_MODEL` and `STARTER_PLACE` in
 it's missing, and it can't be deleted. A vehicle model CSV upload can still
 change its stats.
 
+Starting a file shows the mission: "You have just inherited Grandpa's 1978
+Ford Econoline Van. You have set out to master the delivery arts." **About**
+in the tab menu shows it again, with the release version. The version lives
+in `frontend/version.js` (`LOGISIM_VERSION`); bump it with each release.
+
 ### Gold Doubloons
 
 Each file has a balance in Gold Doubloons, written like dollars
@@ -114,16 +119,17 @@ the top-up on arriving at one, or a roadside refuel, which costs a full
 tank at the nearest station's price plus a $75 fee) and isn't refunded.
 Each vehicle tracks what the gas in its tank cost per gallon (a new
 vehicle's tank is free). Every charge and payment is on the **Budget**
-page (tab menu → Budget, `GET /api/ledger`): vehicle, location, trip, cost
-and the balance after it. The balance can go negative; nothing is blocked
-yet.
+page (tab menu → Budget, `GET /api/ledger`): vehicle, location, load, cost
+and the balance after it. The balance can go negative, since gas and
+fees are never refused, but the Marketplace won't sell a vehicle on
+credit.
 
-Vehicles cost money too. **Buy Vehicle** charges the model's price, and
-**Sell** refunds what was paid (`vehicles.purchase_price`). The inherited
-starter van was free, so it sells for nothing, and it can't be bought:
-there's only ever one of grandpa's van. The Buy Vehicle list shows it as
-not for sale and the backend refuses it, so selling it is for good. Each vehicle also records
-its model's price when acquired (`list_price`), for depreciation later. A
+Vehicles cost money too. They're bought used from the
+[Marketplace](#marketplace), and **Sell** refunds what was paid
+(`vehicles.purchase_price`). The inherited starter van was free, so it
+sells for nothing, and it's never for sale: there's only ever one of
+grandpa's van, so selling it is for good. Each vehicle also records its
+model's price new (`list_price`), for depreciation later. A
 vehicle can only be sold while it's parked. It can't be sold while it's
 driving, stranded, mid-detour, between a refuel and the next leg, or while
 a drive or refuel run for it is still being set up (`vehicle_is_busy()`).
@@ -134,6 +140,41 @@ roadside refuels included. The markup starts at 18% and is set on the
 admin **Gas Prices** tab. It's one setting for all four files
 (`global_settings`, `GET`/`PUT /api/global-settings`). Models with no fuel
 type set pay the gas price.
+
+### Marketplace
+
+Vehicles come from the **Marketplace** (tab menu → Marketplace, or **Shop
+the Marketplace** in My Vehicles). Each file has its own used-vehicle
+listings in real US cities (the same `us_cities.csv` as loads) within 300
+miles of its fleet, or the nearest few cities if nothing's that close.
+Each listing is one of the shared vehicle models with its own:
+
+- **Mileage:** a normal year's driving for its size times its age (semis
+  cover far more ground than sedans), with random spread.
+- **Condition:** Excellent, Good, Fair or Rough. It's random, pulled down
+  by high mileage and by age, and recorded only for now.
+- **Asking price:** the model's price new, worth 85% after a year and 7%
+  less each year after (never under 20%), adjusted for mileage and
+  condition, plus or minus a random spread.
+
+Buying one needs the money up front (no credit). The vehicle joins the
+fleet in the seller's city, with the listing's miles and a full tank; drive
+it from there. **Show on map** pins a listing before you buy. The list is
+topped up whenever the page opens (`GET /api/market`), and a listing
+nobody buys comes down within its time up (game time). Admins set how many
+listings each file sees, how long they stay up and the price spread on the
+Vehicle Models page (`global_settings`: `market_listing_count`,
+`market_listing_days`, `market_price_spread_percent`).
+
+What can be listed is the Vehicle Models catalog, except grandpa's van,
+anything with no price, and anything newer than the game's year. It ships
+with about 70 real vehicles (`backend/data/vehicle_catalog.csv`): cars,
+pickups, minivans, cargo and passenger vans, box trucks, buses and semis,
+each with its specs and its price new. They're seeded into
+`vehicle_models` once (`VEHICLE_CATALOG_VERSION` in `app.py`; bump it after
+adding rows), so admins can edit or delete them like any model and their
+changes stick. They come without pictures; the Marketplace shows an emoji
+for the kind of vehicle until an admin adds one.
 
 ### Loads
 
@@ -958,7 +999,8 @@ All endpoints are on the `backend` service, reached through nginx at
 |---------------------------------|-------------|
 | `GET /api/settings`             | Current game clock and perks: `{time_multiplier, game_time, auto_refuel_level, auto_refuel_max_level}` |
 | `PUT /api/settings`             | Change `time_multiplier` and/or `auto_refuel_level`. Body: `{time_multiplier?, auto_refuel_level?}` — a multiplier change re-anchors the game clock at its current value so it speeds up/slows down rather than jumping, and is rejected (409) if any vehicle is currently in route; `auto_refuel_level` (0 to `auto_refuel_max_level`) can be changed any time |
-| `POST /api/vehicles`            | Create a vehicle. Body: `{vehicle_model_id, current_location, starting_mileage?}` — `name` is server-generated (`"<year> <brand> <model> <n>"`), not part of the request. Response includes the generated `name`, resolved `vehicle_model`, and resolved `current_lat`/`current_lng`. 400 if `current_location` doesn't resolve |
+| `GET /api/market`               | The file's Marketplace, topped up first: each listing's `vehicle_model`, `mileage`, `condition`, `price`, `location`/`lat`/`lng`, `expires_game_time`, and `distance_miles` to its `nearest_vehicle`; plus `balance` — see [Marketplace](#marketplace) |
+| `POST /api/market/{id}/buy`     | Buy a listing: adds the vehicle in the seller's city (name server-generated, `"<year> <brand> <model> <n>"`) and charges the price. 409 if it's gone or unaffordable |
 | `GET /api/vehicles`             | List vehicles with computed `status` (`READY`/`DRIVING`/`STRANDED`/`SOLD`), each vehicle's `vehicle_model`, `fuel_gallons`, `place_id`, and `current_location`/`current_lat`/`current_lng` derived from its place (settled first — see [Vehicle location](#vehicle-location)). `place_id` lets the frontend create a path straight from a vehicle's own place (`POST /api/paths`'s `origin_place_id`) without re-geocoding it. Defaults to the current fleet (`sold = false`, "My Vehicles"); `?include_sold=true` returns full history. No frontend tab currently surfaces the latter — the frontend only ever calls this without the flag |
 | `POST /api/vehicles/{id}/sell`  | Mark a vehicle sold (soft-delete). 409 if already sold or currently on a trip |
 | `DELETE /api/vehicles/{id}`     | Permanently delete a vehicle (cascades its trips) — distinct from selling; not used by the frontend |

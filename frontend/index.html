@@ -13,6 +13,7 @@
     <link rel="stylesheet" href="budget.css">
     <link rel="stylesheet" href="vehiclemodels.css">
     <link rel="stylesheet" href="loads.css">
+    <link rel="stylesheet" href="market.css">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Share+Tech+Mono&display=swap">
 
     <style>
@@ -927,10 +928,11 @@
     <img class="intro-van" src="images/1978-Ford-Econoline-splash.png" loading="lazy"
          alt="A rust brown 1978 Ford Econoline van">
     <div class="intro-text">
-        You've just inherited your grandfather's rust brown 1978 Ford Econoline
-        Extended Full Size Van. You've decided to use it to start your very own
-        delivery service.
+        You have just inherited Grandpa's 1978 Ford Econoline Van.
+        You have set out to master the delivery arts.
     </div>
+    <!-- Only on the About screen (showAboutSplash() in fileselect.js). -->
+    <div id="intro-version" class="intro-version" style="display:none"></div>
     <button id="intro-start" class="intro-start">START</button>
 </div>
 
@@ -989,6 +991,15 @@
             <button onclick="withSpinner(this, uploadVehicleModels)" title="An export's ZIP, or just a CSV of models">Import</button>
         </div>
         <div id="models-result" class="form-result"></div>
+
+        <!-- The Marketplace's knobs (global_settings), for every save file. -->
+        <div class="models-market-settings">
+            <b>Marketplace</b>
+            <label><input id="market-setting-count" type="number" min="1" max="100" step="1" autocomplete="off"> listings per file</label>
+            <label>up to <input id="market-setting-days" type="number" min="0.5" max="60" step="0.5" autocomplete="off"> game days each</label>
+            <label>prices &plusmn;<input id="market-setting-spread" type="number" min="0" max="50" step="1" autocomplete="off">%</label>
+            <button onclick="withSpinner(this, saveMarketSettings)">Save</button>
+        </div>
 
         <div id="models-grid" class="models-grid"></div>
 
@@ -1136,6 +1147,54 @@
     The Loads page (loads.js): every load in this save file, full screen
     like Budget and themed by the same classes.
 -->
+<!--
+    The Marketplace (market.js): used vehicles for sale near the fleet, as
+    cards like the Vehicle Models page's (and themed the same way).
+-->
+<div id="market-page" class="budget-page models-page market-page" style="display:none">
+    <div class="budget-sheet models-sheet">
+        <div class="budget-header">
+            <div>
+                <div class="budget-title">Marketplace</div>
+                <div class="budget-subtitle" id="market-summary"></div>
+            </div>
+            <button class="budget-close" onclick="closeMarketPage()" title="Close (Esc)">&times;</button>
+        </div>
+        <div class="budget-filters">
+            <label>Type
+                <select id="market-type-filter" onchange="renderMarketPage()">
+                    <option value="">Everything</option>
+                    <option value="car">Cars, SUVs &amp; pickups</option>
+                    <option value="van">Vans</option>
+                    <option value="passenger">Passenger vans &amp; buses</option>
+                    <option value="truck">Box trucks</option>
+                    <option value="semi">Semis</option>
+                </select>
+            </label>
+            <label>Sort
+                <select id="market-sort" onchange="renderMarketPage()">
+                    <option value="distance">Nearest first</option>
+                    <option value="price">Cheapest first</option>
+                    <option value="price-desc">Priciest first</option>
+                    <option value="year">Newest first</option>
+                    <option value="mileage">Lowest miles first</option>
+                </select>
+            </label>
+            <label>
+                <input id="market-affordable" type="checkbox" onchange="renderMarketPage()">
+                Only what I can afford
+            </label>
+            <button class="market-refresh" onclick="withSpinner(this, fetchMarket)" title="Check for new listings">&#8635;</button>
+        </div>
+        <div id="market-result" class="form-result"></div>
+        <div id="market-grid" class="models-grid"></div>
+        <div class="models-footnote">
+            Listings come and go with game time. A vehicle you buy is yours where it's parked -
+            in the seller's city - with a full tank and the miles shown.
+        </div>
+    </div>
+</div>
+
 <div id="loads-page" class="budget-page loads-page" style="display:none">
     <div class="budget-sheet">
         <div class="budget-header">
@@ -1198,9 +1257,6 @@
             <label>Vehicle
                 <select id="budget-vehicle-filter" onchange="onBudgetVehicleFilterChange()"></select>
             </label>
-            <label>Trip
-                <select id="budget-trip-filter" onchange="reloadBudgetRows()"></select>
-            </label>
             <label>Load
                 <select id="budget-load-filter" onchange="reloadBudgetRows()"></select>
             </label>
@@ -1216,7 +1272,6 @@
                     <tr>
                         <th>Vehicle</th>
                         <th>Location</th>
-                        <th>Trip</th>
                         <th>Load</th>
                         <th class="budget-cost">Cost</th>
                         <th class="budget-balance-after">New balance</th>
@@ -1270,6 +1325,8 @@
             <button class="tab-button" id="tab-button-config" onclick="withSpinner(this, () => showTab('config'))">Config</button>
             <button class="tab-button" id="tab-button-budget" onclick="openBudgetPage()">Budget</button>
             <button class="tab-button" id="tab-button-loads" onclick="openLoadsPage()">Loads</button>
+            <button class="tab-button" id="tab-button-market" onclick="openMarketPage()">Marketplace</button>
+            <button class="tab-button" id="tab-button-about" onclick="closeTabMenu(); showAboutSplash()">About</button>
             <!-- Admin-only (admin.js): asks for the password when opened. -->
             <div class="tab-menu-separator" role="separator"></div>
             <button class="tab-button admin-tab" id="tab-button-vehiclemodels" onclick="openVehicleModelsPage()">Vehicle Models <span class="admin-lock" title="Admin only - asks for the password">&#128274;</span></button>
@@ -1281,11 +1338,9 @@
 
     <div class="tab-content active" id="tab-myvehicles">
 
+        <!-- Vehicles are bought used, from the Marketplace (market.js). -->
         <div class="panel-form">
-            <select id="vehicle-model-select"></select>
-            <input autocomplete="off" id="vehicle-location" placeholder="A description (Target near Minneapolis) or an address" value="Minneapolis">
-            <input autocomplete="off" id="vehicle-starting-mileage" type="number" min="0" step="1" placeholder="Starting mileage" value="0">
-            <button onclick="withSpinner(this, addVehicle)">Buy Vehicle</button>
+            <button onclick="openMarketPage()">&#128665; Shop the Marketplace</button>
         </div>
 
         <div id="vehicle-list"><div class="list-loading">Loading vehicles...</div></div>
@@ -1429,9 +1484,11 @@
 />
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="version.js"></script>
 <script src="app.js"></script>
 <script src="budget.js"></script>
 <script src="loads.js"></script>
+<script src="market.js"></script>
 <script src="vehiclemodels.js"></script>
 <script src="fileselect.js"></script>
 <script src="admin.js"></script>
