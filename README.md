@@ -225,6 +225,22 @@ While it's hitched, a trailer:
 - **Slows it down.** The vehicle can't go over `towing_speed_limit_mph`
   (65 by default).
 
+**On the map.** A vehicle with its own map icon is drawn with its trailer
+hitched behind it: the trailer's front against the vehicle's back, wheels
+level, and turning and tilting with the vehicle as it drives. A fifth-wheel
+trailer reaches over the tractor and a gooseneck over the bed, both drawn
+behind the cab. Where each icon's wheels and back end are is measured from
+its transparent pixels, once per picture. A vehicle shown with the view's own
+marker, which has no back to hitch to, gets a small trailer badge instead.
+
+A trailer is drawn from its model's picture, if an admin has added one in
+the trailer editor, and otherwise from a built-in outline of its body type.
+The picture is also used on Marketplace cards. Pick a side view: the editor
+can cut the background out with the same AI cutout the vehicle editor uses,
+and you set which way its front (the tongue) faces so the map can turn it
+around. Pictures are stored like vehicle pictures (`trailer_model_pictures`,
+`PUT`/`DELETE`/`GET /api/trailer-models/{id}/picture`).
+
 Both towing costs are fixed when each leg sets out (`trips.towing_mpg_factor`
 and `speed_cap_mph`). Admins set them in the Towing row on the Vehicle
 Models page, and a change applies from each vehicle's next leg.

@@ -3314,6 +3314,18 @@ def run_migrations():
         "CREATE UNIQUE INDEX IF NOT EXISTS trailers_one_per_vehicle ON trailers (vehicle_id) WHERE vehicle_id IS NOT NULL"
     )
     cur.execute("CREATE INDEX IF NOT EXISTS trailers_slot ON trailers (slot_id)")
+    cur.execute("ALTER TABLE trailer_models ADD COLUMN IF NOT EXISTS picture_front TEXT NOT NULL DEFAULT 'left'")
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trailer_model_pictures (
+            trailer_model_id INTEGER PRIMARY KEY REFERENCES trailer_models(id) ON DELETE CASCADE,
+            content_type TEXT NOT NULL,
+            data BYTEA NOT NULL,
+            sha256 TEXT NOT NULL,
+            updated TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+        """
+    )
     cur.execute("ALTER TABLE trips ADD COLUMN IF NOT EXISTS towing_mpg_factor DOUBLE PRECISION NOT NULL DEFAULT 1")
     cur.execute("ALTER TABLE trips ADD COLUMN IF NOT EXISTS speed_cap_mph DOUBLE PRECISION")
     cur.execute("ALTER TABLE loads ADD COLUMN IF NOT EXISTS trailer_bodies TEXT[]")
@@ -9045,7 +9057,9 @@ def towing_refusal(vehicle_model, trailer_model):
 
 
 TRAILER_MODEL_COLUMNS = """
-    id, year, brand, model, body, hitch_type, cargo_capacity_cuft, empty_weight_lbs, gross_weight_lbs, cost
+    id, year, brand, model, body, hitch_type, cargo_capacity_cuft, empty_weight_lbs, gross_weight_lbs, cost,
+    picture_front,
+    (SELECT p.sha256 FROM trailer_model_pictures p WHERE p.trailer_model_id = trailer_models.id)
 """
 
 
@@ -9063,6 +9077,18 @@ def trailer_model_dict(row):
         "empty_weight_lbs": row[7],
         "gross_weight_lbs": row[8],
         "cost": row[9],
+
+        #
+        # Its picture, if an admin has added one (trailer_model_pictures) -
+        # a side view with the background cut out, shown on Marketplace
+        # cards and hitched behind its vehicle on the map, in place of the
+        # body type's built-in outline. Versioned by its hash like a
+        # vehicle model's image_url. picture_front is which way its front
+        # (the tongue) points in it, so the map can turn it to face the
+        # vehicle pulling it.
+        #
+        "picture_url": f"api/trailer-models/{row[0]}/picture?v={row[11][:12]}" if row[11] else None,
+        "picture_front": row[10],
     }
 
 
@@ -9233,9 +9259,13 @@ class TrailerModelRequest(BaseModel):
     empty_weight_lbs: int
     gross_weight_lbs: int
     cost: float
+    picture_front: str = "left"
 
 
 def validate_trailer_model(req):
+
+    if req.picture_front not in ICON_FRONTS:
+        raise HTTPException(status_code=400, detail="The picture's front must face left or right")
 
     if not req.brand.strip() or not req.model.strip():
         raise HTTPException(status_code=400, detail="Brand and model can't be empty")
@@ -9258,7 +9288,7 @@ def validate_trailer_model(req):
 
 TRAILER_MODEL_FIELDS = (
     "year", "brand", "model", "body", "hitch_type", "cargo_capacity_cuft", "empty_weight_lbs", "gross_weight_lbs",
-    "cost"
+    "cost", "picture_front"
 )
 
 
@@ -9282,6 +9312,93 @@ def list_trailer_models():
     finally:
         cur.close()
         conn.close()
+
+
+#
+# A trailer model's picture: stored and re-encoded like a vehicle model's
+# (normalize_vehicle_image()), one per model. Best as a side view with the
+# background cut out (the editor can run the vehicle cutout on it first),
+# since the map draws it hitched behind the vehicle.
+#
+@app.put("/api/trailer-models/{id}/picture")
+async def upload_trailer_model_picture(id: int, file: UploadFile = File(...), _admin: None = Depends(require_admin)):
+
+    data = normalize_vehicle_image(await file.read(VEHICLE_IMAGE_MAX_BYTES + 1))
+
+    conn = db()
+    cur = conn.cursor()
+
+    try:
+
+        cur.execute("SELECT 1 FROM trailer_models WHERE id = %s", (id,))
+
+        if cur.fetchone() is None:
+            raise HTTPException(status_code=404, detail="Trailer model not found")
+
+        cur.execute(
+            """
+            INSERT INTO trailer_model_pictures (trailer_model_id, content_type, data, sha256)
+            VALUES (%s, 'image/webp', %s, %s)
+            ON CONFLICT (trailer_model_id) DO UPDATE
+            SET content_type = EXCLUDED.content_type, data = EXCLUDED.data, sha256 = EXCLUDED.sha256, updated = NOW()
+            """,
+            (id, psycopg2.Binary(data), hashlib.sha256(data).hexdigest())
+        )
+
+        conn.commit()
+
+        return fetch_trailer_models_by_id(cur, [id])[id]
+
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.delete("/api/trailer-models/{id}/picture")
+def delete_trailer_model_picture(id: int, _admin: None = Depends(require_admin)):
+
+    conn = db()
+    cur = conn.cursor()
+
+    try:
+
+        cur.execute("DELETE FROM trailer_model_pictures WHERE trailer_model_id = %s", (id,))
+
+        conn.commit()
+
+        trailer_model = fetch_trailer_models_by_id(cur, [id]).get(id)
+
+        if trailer_model is None:
+            raise HTTPException(status_code=404, detail="Trailer model not found")
+
+        return trailer_model
+
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.get("/api/trailer-models/{id}/picture")
+def get_trailer_model_picture(id: int):
+
+    conn = db()
+    cur = conn.cursor()
+
+    try:
+        cur.execute("SELECT content_type, data FROM trailer_model_pictures WHERE trailer_model_id = %s", (id,))
+        row = cur.fetchone()
+    finally:
+        cur.close()
+        conn.close()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="No picture for that trailer model")
+
+    return Response(
+        bytes(row[1]),
+        media_type=row[0],
+        headers={"Cache-Control": "public, max-age=31536000, immutable"}
+    )
 
 
 @app.post("/api/trailer-models")

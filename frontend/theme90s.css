@@ -772,8 +772,20 @@ body {
     box-shadow: var(--w95-sunken);
 }
 
-.market-trailer-glyph {
-    color: var(--w95-white);
+.market-trailer-art,
+.trailer-model-art {
+    color: #000080;
+}
+
+.map-trailer {
+    color: #000080;
+}
+
+.map-trailer-badge {
+    border-radius: 0;
+    color: #000;
+    background: var(--w95-face);
+    box-shadow: var(--w95-raised, 0 0 0 1px #000);
 }
 
 .trailer-models {

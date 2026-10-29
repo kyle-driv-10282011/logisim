@@ -370,27 +370,37 @@ function vehicleMapIcon(vehicleId) {
     const embedded = vehicle && vehicle.vehicle_model;
     const vehicleModel = embedded ? vehicleModelsById.get(embedded.id) || embedded : null;
     const url = vehicleModel && vehicleModel.icon_url;
+    const trailerModel = vehicle && vehicle.trailer ? vehicle.trailer.trailer_model : null;
 
+    //
+    // A view's own marker has no back to hitch a trailer to - it gets a
+    // trailer badge instead (trailers.js).
+    //
     if (!url) {
-        return mapStyle().vehicleIcon;
+        return trailerModel ? trailerBadgeIcon(mapStyle().vehicleIcon) : mapStyle().vehicleIcon;
     }
 
     //
-    // A wrapper with the picture inside, not a plain L.icon: Leaflet
-    // positions a marker by setting its element's transform, so the
-    // picture needs an element of its own to flip and tilt (orientVehicleMarker()).
+    // A wrapper (the "rig") with the picture inside, not a plain L.icon:
+    // Leaflet positions a marker by setting its element's transform, so the
+    // picture needs an element of its own to flip and tilt
+    // (orientVehicleMarker()) - and a trailer being pulled goes in it too,
+    // behind the vehicle (trailerRigHtml()), so it turns with it.
     //
-    if (!modelMapIcons.has(url)) {
-        modelMapIcons.set(url, L.divIcon({
-            html: `<img class="model-map-icon-img" src="${url}" alt="">`,
-            iconSize: [48, 48],
-            iconAnchor: [24, 24],
+    const trailer = trailerModel ? trailerRigHtml(url, vehicleModel.icon_front || "left", trailerModel) : "";
+    const key = url + trailer;
+
+    if (!modelMapIcons.has(key)) {
+        modelMapIcons.set(key, L.divIcon({
+            html: `<div class="model-map-rig">${trailer}<img class="model-map-icon-img" src="${url}" alt=""></div>`,
+            iconSize: [MAP_ICON_SIZE, MAP_ICON_SIZE],
+            iconAnchor: [MAP_ICON_SIZE / 2, MAP_ICON_SIZE / 2],
             tooltipAnchor: [0, -14],
             className: "model-map-icon"
         }));
     }
 
-    return modelMapIcons.get(url);
+    return modelMapIcons.get(key);
 }
 
 
@@ -408,7 +418,7 @@ const MAX_ICON_TILT_DEGREES = 30;
 function orientVehicleMarker(layer) {
 
     const element = layer.marker.getElement();
-    const picture = element && element.querySelector(".model-map-icon-img");
+    const picture = element && element.querySelector(".model-map-rig");
     const trip = layer.trip;
 
     if (!picture || !trip || !trip.heading) {

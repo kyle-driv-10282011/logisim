@@ -232,7 +232,7 @@ function trailerMarketCard(listing) {
 
     card.innerHTML =
         `<div class="model-card-image">` +
-        `<span class="market-noimage market-trailer-glyph">${TRAILER_GLYPH}</span>` +
+        `<span class="market-trailer-art">${trailerArtHtml(trailerModel)}</span>` +
         `<span class="market-condition market-condition-${listing.condition.toLowerCase()}">${escapeLoadText(listing.condition)}</span>` +
         `</div>` +
         `<div class="model-card-body">` +

@@ -1066,7 +1066,7 @@
             <label>Brand <input id="trailer-field-brand" autocomplete="off" required></label>
             <label>Model <input id="trailer-field-model" autocomplete="off" required></label>
             <label>Body
-                <select id="trailer-field-body">
+                <select id="trailer-field-body" onchange="renderTrailerEditorPicture()">
                     <option value="utility">Utility</option>
                     <option value="enclosed">Enclosed cargo</option>
                     <option value="car_hauler">Car hauler</option>
@@ -1091,9 +1091,31 @@
             <label>Empty (lbs) <input id="trailer-field-empty" type="number" min="1" step="10" required></label>
             <label>Loaded (lbs) <input id="trailer-field-gross" type="number" min="1" step="10" required></label>
             <label>Cost ($) <input id="trailer-field-cost" type="number" min="0" step="0.01" required></label>
+
+            <div class="trailer-editor-picture">
+                <div id="trailer-picture-preview" class="trailer-picture-preview"></div>
+                <div class="trailer-picture-caption-row">
+                    <span id="trailer-picture-caption" class="model-image-caption"></span>
+                    <button type="button" id="trailer-picture-remove" class="model-image-remove" onclick="removeTrailerEditorPicture()">Remove</button>
+                </div>
+                <input id="trailer-picture-input" type="file" accept="image/*" onchange="chooseTrailerEditorPicture(this)">
+                <label class="trailer-picture-check">
+                    <input id="trailer-picture-cutout" type="checkbox" checked>
+                    Cut out the background (AI) - best for the map
+                </label>
+                <label class="trailer-picture-front">
+                    Its front (the tongue) faces
+                    <select id="trailer-field-front">
+                        <option value="left">Left</option>
+                        <option value="right">Right</option>
+                    </select>
+                </label>
+            </div>
+
             <div class="model-editor-note">
                 Cargo space adds to whatever pulls it. Loaded weight is what a vehicle's towing capacity has to cover,
-                and with empty weight sets how much mpg towing it costs.
+                and with empty weight sets how much mpg towing it costs. A side-view picture shows on the
+                Marketplace and hitched behind its vehicle on the map; without one, its body type's outline does.
             </div>
         </div>
 

@@ -907,9 +907,21 @@ body {
 }
 
 .trailer-card-glyph,
-.market-trailer-glyph {
+.market-trailer-art,
+.trailer-model-art {
     color: var(--neon-cyan);
+}
+
+.trailer-card-glyph {
     background: var(--neon-panel-2);
+}
+
+.map-trailer {
+    color: var(--neon-cyan);
+}
+
+.trailer-editor-picture {
+    border-top-color: var(--neon-line);
 }
 
 .trailer-models {

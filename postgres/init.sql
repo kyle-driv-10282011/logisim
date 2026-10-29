@@ -654,7 +654,29 @@ CREATE TABLE trailer_models (
 
     cost DOUBLE PRECISION NOT NULL,
 
+    -- Which way its front (the tongue) points in its picture, 'left' or
+    -- 'right', so the map can face it the same way as what's pulling it.
+    picture_front TEXT NOT NULL DEFAULT 'left',
+
     created TIMESTAMP DEFAULT NOW()
+);
+
+
+-- A trailer model's picture, re-encoded as WebP like a vehicle model's and
+-- served by GET /api/trailer-models/{id}/picture - on Marketplace cards and
+-- hitched behind its vehicle on the map, in place of its body type's
+-- built-in outline. Optional.
+CREATE TABLE trailer_model_pictures (
+
+    trailer_model_id INTEGER PRIMARY KEY REFERENCES trailer_models(id) ON DELETE CASCADE,
+
+    content_type TEXT NOT NULL,
+
+    data BYTEA NOT NULL,
+
+    sha256 TEXT NOT NULL,
+
+    updated TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
 

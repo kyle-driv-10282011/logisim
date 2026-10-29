@@ -60,14 +60,72 @@
     color: #777;
 }
 
+/*
+ * A trailer's picture or its body's outline (trailerArtHtml()), wherever
+ * it's shown: fitted to its box, outlines in the text color.
+ */
+.trailer-outline,
+.trailer-picture {
+    display: block;
+    max-width: 100%;
+    max-height: 100%;
+}
+
+.trailer-card-glyph .trailer-outline,
+.trailer-card-glyph .trailer-picture {
+    width: 28px;
+    height: 20px;
+    object-fit: contain;
+}
+
+/* Hitched behind a model icon on the map (trailerRigHtml()), under the vehicle. */
+.map-trailer {
+    position: absolute;
+    color: #3b3f45;
+}
+
+.map-trailer > svg,
+.map-trailer > img {
+    display: block;
+    width: 100%;
+    height: 100%;
+}
+
+/* On a view's own marker, which has nothing to hitch to (trailerBadgeIcon()). */
+.map-trailer-badge {
+    position: absolute;
+    top: -6px;
+    right: -16px;
+    padding: 1px 2px;
+    font-size: 9px;
+    line-height: 1;
+    color: #333;
+    background: white;
+    border-radius: 3px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+}
+
+.map-pin-img {
+    display: block;
+    width: 25px;
+    height: 41px;
+}
+
 /* Marketplace */
-.market-trailer-glyph {
+.market-trailer-art {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 70%;
+    height: 70%;
     color: #666;
 }
 
-.market-trailer-glyph .trailer-glyph {
-    width: 1.5em;
-    height: 0.86em;
+.market-trailer-art .trailer-outline,
+.market-trailer-art .trailer-picture {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
 }
 
 .market-towing,
@@ -100,6 +158,74 @@
 
 .trailer-model-name {
     font-weight: bold;
+}
+
+.trailer-model-art {
+    display: inline-block;
+    width: 40px;
+    height: 16px;
+    margin-right: 8px;
+    vertical-align: middle;
+    color: #666;
+}
+
+.trailer-model-art .trailer-outline,
+.trailer-model-art .trailer-picture {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+}
+
+/* The editor's picture: what it'll look like, and how to change it. */
+.trailer-editor-picture {
+    grid-column: span 2;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 6px;
+    padding-top: 8px;
+    border-top: 1px solid #ddd;
+}
+
+.trailer-picture-preview {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 110px;
+    padding: 8px;
+    color: #666;
+    background:
+        repeating-conic-gradient(#e8e8e8 0% 25%, #f8f8f8 0% 50%) 0 0 / 16px 16px;
+    border-radius: 4px;
+}
+
+.trailer-picture-preview img,
+.trailer-picture-preview svg {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+}
+
+.trailer-picture-caption-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.model-editor-fields .trailer-picture-check,
+.model-editor-fields .trailer-picture-front {
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+}
+
+.model-editor-fields .trailer-picture-check input {
+    width: auto;
+}
+
+.model-editor-fields .trailer-picture-front select {
+    width: auto;
 }
 
 .trailer-model-actions {
