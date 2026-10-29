@@ -9596,10 +9596,18 @@ def list_trailers(slot: int = Depends(current_slot)):
                 if reason is None and other_id in busy:
                     reason = "It's out on a trip or a load"
 
-                if reason is None and miles > TRAILER_HITCH_RADIUS_MILES:
+                #
+                # Too far is the one reason it can do something about:
+                # drive over (POST /api/trailers/{id}/drive-to).
+                #
+                can_drive_to = reason is None and miles > TRAILER_HITCH_RADIUS_MILES
+
+                if can_drive_to:
                     reason = f"It's {round(miles):,} mi away"
 
-                candidates.append({"vehicle_id": other_id, "name": other_name, "reason": reason})
+                candidates.append({
+                    "vehicle_id": other_id, "name": other_name, "reason": reason, "can_drive_to": can_drive_to,
+                })
 
         trailers.append({
             "id": trailer_id,
@@ -9699,6 +9707,66 @@ def hitch_trailer(id: int, req: HitchTrailerRequest, slot: int = Depends(current
     finally:
         cur.close()
         conn.close()
+
+
+#
+# Sends a parked vehicle that could pull the trailer to where it's parked,
+# so it can hitch up once it arrives. Same checks as hitching, less the
+# distance. Routing takes a moment, so like a drive to refuel it's a
+# background job: 202 with a job_id to poll (GET /api/jobs/{id}).
+#
+@app.post("/api/trailers/{id}/drive-to", status_code=202)
+def drive_to_trailer(id: int, req: HitchTrailerRequest, slot: int = Depends(current_slot)):
+
+    assert_vehicle_in_slot(req.vehicle_id, slot)
+
+    conn = db()
+    cur = conn.cursor()
+
+    try:
+
+        settle_arrived_vehicles(conn, cur)
+
+        _, name, trailer_model_id, hitched_to, trailer_place_id, _ = fetch_own_trailer(cur, id, slot)
+
+        if hitched_to is not None:
+            raise HTTPException(status_code=409, detail=f"{name} is already hitched - unhitch it first")
+
+        position = vehicle_position(cur, req.vehicle_id)
+
+        if position is None or position[1]:
+            raise HTTPException(status_code=404, detail="Vehicle not found")
+
+        _, _, vehicle_place_id, lat, lng, _, vehicle_model_id = position
+
+        if vehicle_is_busy(cur, req.vehicle_id):
+            raise HTTPException(status_code=409, detail="That vehicle is out on a trip or a load")
+
+        if fetch_hitched_trailers(cur, [req.vehicle_id]):
+            raise HTTPException(status_code=409, detail="That vehicle is already pulling a trailer")
+
+        vehicle_model = fetch_vehicle_models_by_id(cur, [vehicle_model_id])[vehicle_model_id]
+        trailer_model = fetch_trailer_models_by_id(cur, [trailer_model_id])[trailer_model_id]
+
+        reason = towing_refusal(vehicle_model, trailer_model)
+
+        if reason is not None:
+            raise HTTPException(status_code=409, detail=f"Can't pull {name}: {reason[0].lower()}{reason[1:]}")
+
+        trailer_place = fetch_places_by_id(cur, [trailer_place_id])[trailer_place_id]
+
+        if haversine_miles(lat, lng, trailer_place["lat"], trailer_place["lng"]) <= TRAILER_HITCH_RADIUS_MILES:
+            raise HTTPException(status_code=409, detail=f"It's already close enough - hitch {name} up")
+
+    finally:
+        cur.close()
+        conn.close()
+
+    job_id = create_job("drive_to_trailer", slot_id=slot, vehicle_id=req.vehicle_id)
+
+    job_executor.submit(_run_resume_trip_job, job_id, req.vehicle_id, vehicle_place_id, trailer_place_id, False)
+
+    return {"job_id": job_id, "destination": trailer_place["description"]}
 
 
 #
@@ -10714,6 +10782,7 @@ TRIP_STARTING_JOB_TYPES = (
     "resume_trip_after_refuel",
     "auto_divert_to_gas_station",
     "drive_to_refuel",
+    "drive_to_trailer",
     "divert_to_gas_station",
 )
 

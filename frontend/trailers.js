@@ -480,6 +480,7 @@ function trailerCard(trailer) {
                 : `<option disabled>No vehicles</option>`) +
             `</select>` +
             `<button class="refuel-button trailer-hitch-button"${ready.length ? "" : " disabled"}>Hitch</button>` +
+            `<button class="refuel-button trailer-drive-button"></button>` +
             `<button class="refuel-button trailer-map-button">Map</button>` +
             `<button class="sell-button trailer-sell-button">Sell</button>`;
     }
@@ -514,6 +515,43 @@ function trailerCard(trailer) {
 
     if (hitch) {
         hitch.onclick = () => withSpinner(hitch, () => hitchTrailer(trailer, Number(select.value)));
+    }
+
+    const drive = card.querySelector(".trailer-drive-button");
+
+    if (drive) {
+
+        //
+        // Too far off is the one greyed-out reason a click can fix, so
+        // those vehicles stay pickable for this button - Hitch only
+        // takes the ones that are close enough already.
+        //
+        for (const candidate of trailer.candidates) {
+            if (candidate.can_drive_to) {
+                select.querySelector(`option[value="${candidate.vehicle_id}"]`).disabled = false;
+            }
+        }
+
+        if (!trailer.candidates.some((candidate) => !candidate.reason)) {
+            const firstFar = trailer.candidates.find((candidate) => candidate.can_drive_to);
+            if (firstFar) {
+                select.value = String(firstFar.vehicle_id);
+            }
+        }
+
+        const syncButtons = () => {
+
+            const chosen = trailer.candidates.find((candidate) => candidate.vehicle_id === Number(select.value));
+
+            hitch.disabled = !chosen || Boolean(chosen.reason);
+            drive.disabled = !chosen || !chosen.can_drive_to || driveToTrailerInFlight.has(trailer.id);
+            drive.textContent = driveToTrailerInFlight.has(trailer.id) ? "Heading out..." : "Drive here";
+        };
+
+        select.onchange = syncButtons;
+        syncButtons();
+
+        drive.onclick = () => driveToTrailer(trailer, Number(select.value));
     }
 
     const unhitch = card.querySelector(".trailer-unhitch-button");
@@ -578,6 +616,53 @@ async function trailerAction(trailer, action, body, failure) {
 async function hitchTrailer(trailer, vehicleId) {
 
     await trailerAction(trailer, "hitch", { vehicle_id: vehicleId }, "Couldn't hitch it");
+}
+
+
+//
+// Trailers a vehicle is being sent to (the job routing it hasn't started
+// its trip yet), so their Drive here button stays off meanwhile.
+//
+const driveToTrailerInFlight = new Set();
+
+//
+// Starts the vehicle off toward the trailer as a background job, the way
+// refuelVehicle() (app.js) drives to a station. Once it's parked there,
+// Hitch picks it up.
+//
+async function driveToTrailer(trailer, vehicleId) {
+
+    driveToTrailerInFlight.add(trailer.id);
+    driveInFlightVehicleId = vehicleId;
+    renderTrailerList();
+    renderVehicleList();
+
+    try {
+
+        const response = await apiFetch(API + `/api/trailers/${trailer.id}/drive-to`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ vehicle_id: vehicleId })
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            alert(typeof data.detail === "string" ? data.detail : "Couldn't send it there");
+            return;
+        }
+
+        await pollJob(data.job_id);
+
+    } catch (e) {
+        alert(e.message || "Couldn't reach the server - try again.");
+    } finally {
+        driveToTrailerInFlight.delete(trailer.id);
+        driveInFlightVehicleId = null;
+        loadBoard.vehicleId = null;
+        await loadVehicles();
+        refreshLiveData();
+    }
 }
 
 
