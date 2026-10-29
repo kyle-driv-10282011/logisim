@@ -69,7 +69,7 @@ import, export), **Background Jobs**, and erasing files. It isn't a login.
 The admin entries are listed for everyone with a 🔒. Opening one asks for the
 instance's `ADMIN_PASSWORD` (set in `.env`). Switching to another tab, or
 closing the Vehicle Models page, locks it again. Gas Prices has **Export all
-gas stations (CSV)**, which restores through its **Bulk import**. Leave `ADMIN_PASSWORD` empty to turn admin off.
+gas stations (CSV)**, which restores through its **Bulk import**. With `ADMIN_PASSWORD` left empty, admin is open: submitting a blank password unlocks it.
 
 **ERASE SELECTED FILE** on the file-select screen erases the file under the
 cursor. It asks for the admin password every time, as the confirmation. The

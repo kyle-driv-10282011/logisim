@@ -764,6 +764,9 @@ def current_slot(x_save_slot: Optional[str] = Header(None)):
 # changing the password revokes every token) that the browser sends as
 # X-Admin-Token - or ?admin_token= on a plain download link.
 #
+# With no ADMIN_PASSWORD set, admin is open: a blank (or missing) password
+# elevates, so a fresh instance can be set up before .env is filled in.
+#
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 ADMIN_TOKEN_TTL_SECONDS = 12 * 60 * 60
 
@@ -782,7 +785,7 @@ def admin_token_signature(expires):
 
 def is_valid_admin_token(token):
 
-    if not ADMIN_PASSWORD or not token:
+    if not token:
         return False
 
     expires, _, signature = token.partition(".")
@@ -3987,16 +3990,13 @@ class StartSaveSlotRequest(BaseModel):
 # itself - it's what a slot gets picked from.
 #
 class ElevateAdminRequest(BaseModel):
-    password: str
+    password: Optional[str] = None
 
 
 @app.post("/api/admin/elevate")
 def elevate_admin(req: ElevateAdminRequest):
 
-    if not ADMIN_PASSWORD:
-        raise HTTPException(status_code=503, detail="Admin isn't set up here - set ADMIN_PASSWORD in .env")
-
-    if not hmac.compare_digest(req.password.encode(), ADMIN_PASSWORD.encode()):
+    if not hmac.compare_digest((req.password or "").encode(), ADMIN_PASSWORD.encode()):
         time.sleep(ADMIN_WRONG_PASSWORD_DELAY_SECONDS)
         raise HTTPException(status_code=401, detail="Wrong password")
 
