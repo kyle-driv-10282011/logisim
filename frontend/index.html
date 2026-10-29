@@ -982,11 +982,11 @@
         <div class="models-toolbar">
             <button onclick="openModelEditor()">+ New model</button>
             <span class="models-toolbar-spacer"></span>
-            <a class="config-button" data-admin-href="/api/vehicle-models/export" download>Export CSV</a>
+            <a class="config-button" data-admin-href="/api/vehicle-models/export" download title="A ZIP of every model's details (CSV), pictures and map icons">Export (ZIP)</a>
             <label class="models-import">
-                <input id="vehicle-model-file-input" type="file" accept=".csv,text/csv">
+                <input id="vehicle-model-file-input" type="file" accept=".zip,application/zip,.csv,text/csv">
             </label>
-            <button onclick="withSpinner(this, uploadVehicleModels)">Import CSV</button>
+            <button onclick="withSpinner(this, uploadVehicleModels)" title="An export's ZIP, or just a CSV of models">Import</button>
         </div>
         <div id="models-result" class="form-result"></div>
 

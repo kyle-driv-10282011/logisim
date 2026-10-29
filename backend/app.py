@@ -31,6 +31,7 @@ import socket
 import threading
 import time
 import uuid
+import zipfile
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -5011,6 +5012,26 @@ def preview_vehicle_image_url(req: VehicleImageUrlRequest, _admin: None = Depend
     return Response(normalize_vehicle_image(fetch_vehicle_image_url(req.url)), media_type="image/webp")
 
 
+#
+# Saves an already-normalized picture ("image") or map icon ("icon") for a
+# vehicle model, replacing any it had. Doesn't commit.
+#
+VEHICLE_MODEL_PICTURE_TABLES = {"image": "vehicle_model_images", "icon": "vehicle_model_icons"}
+
+
+def store_vehicle_model_picture(cur, kind, vehicle_model_id, data):
+
+    cur.execute(
+        f"""
+        INSERT INTO {VEHICLE_MODEL_PICTURE_TABLES[kind]} (vehicle_model_id, content_type, data, sha256)
+        VALUES (%s, 'image/webp', %s, %s)
+        ON CONFLICT (vehicle_model_id) DO UPDATE
+        SET content_type = EXCLUDED.content_type, data = EXCLUDED.data, sha256 = EXCLUDED.sha256, updated = NOW()
+        """,
+        (vehicle_model_id, psycopg2.Binary(data), hashlib.sha256(data).hexdigest())
+    )
+
+
 @app.put("/api/vehicle-models/{id}/image")
 async def upload_vehicle_model_image(id: int, file: UploadFile = File(...), _admin: None = Depends(require_admin)):
 
@@ -5026,15 +5047,7 @@ async def upload_vehicle_model_image(id: int, file: UploadFile = File(...), _adm
         if cur.fetchone() is None:
             raise HTTPException(status_code=404, detail="Vehicle model not found")
 
-        cur.execute(
-            """
-            INSERT INTO vehicle_model_images (vehicle_model_id, content_type, data, sha256)
-            VALUES (%s, 'image/webp', %s, %s)
-            ON CONFLICT (vehicle_model_id) DO UPDATE
-            SET content_type = EXCLUDED.content_type, data = EXCLUDED.data, sha256 = EXCLUDED.sha256, updated = NOW()
-            """,
-            (id, psycopg2.Binary(data), hashlib.sha256(data).hexdigest())
-        )
+        store_vehicle_model_picture(cur, "image", id, data)
 
         conn.commit()
 
@@ -5123,15 +5136,7 @@ async def upload_vehicle_model_icon(id: int, file: UploadFile = File(...), _admi
         if cur.fetchone() is None:
             raise HTTPException(status_code=404, detail="Vehicle model not found")
 
-        cur.execute(
-            """
-            INSERT INTO vehicle_model_icons (vehicle_model_id, content_type, data, sha256)
-            VALUES (%s, 'image/webp', %s, %s)
-            ON CONFLICT (vehicle_model_id) DO UPDATE
-            SET content_type = EXCLUDED.content_type, data = EXCLUDED.data, sha256 = EXCLUDED.sha256, updated = NOW()
-            """,
-            (id, psycopg2.Binary(data), hashlib.sha256(data).hexdigest())
-        )
+        store_vehicle_model_picture(cur, "icon", id, data)
 
         conn.commit()
 
@@ -5191,15 +5196,35 @@ def get_vehicle_model_icon(id: int):
 
 
 #
-# Vehicle models as a flat CSV, in the same column order POST
-# /api/vehicle-models/upload reads back - the catalog's backup, shared by
-# every save file. Only the image's filename travels with it: the picture
-# itself lives in frontend/images/.
+# The vehicle model catalog's backup, shared by every save file: a ZIP
+# holding VEHICLE_MODEL_EXPORT_CSV (the same columns POST
+# /api/vehicle-models/upload reads back) and every uploaded picture and map
+# icon, under images/ and icons/. A row's image_file / icon_file names its
+# files in the ZIP. A built-in picture (the image column) is only a filename
+# - the file itself ships with the frontend (frontend/images/).
 #
 VEHICLE_MODEL_EXPORT_COLUMNS = [
     "year", "brand", "model", "person_capacity", "cargo_capacity_cuft",
-    "cost", "mpg", "fuel_tank_gallons", "image", *SPEC_COLUMNS,
+    "cost", "mpg", "fuel_tank_gallons", "image", *SPEC_COLUMNS, "icon_front",
 ]
+
+VEHICLE_MODEL_FILE_COLUMNS = {"image": "image_file", "icon": "icon_file"}
+
+VEHICLE_MODEL_EXPORT_CSV = "vehicle-models.csv"
+
+#
+# Caps for an import: the whole upload, and any one file inside a ZIP once
+# unpacked (a tiny ZIP can claim to unpack to anything).
+#
+VEHICLE_MODEL_IMPORT_MAX_BYTES = 100 * 1024 * 1024
+VEHICLE_MODEL_IMPORT_CSV_MAX_BYTES = 5 * 1024 * 1024
+
+
+def vehicle_model_file_slug(vehicle_model_id, year, brand, model):
+
+    slug = re.sub(r"[^a-z0-9]+", "-", f"{year} {brand} {model}".lower()).strip("-")
+
+    return f"{vehicle_model_id}-{slug}.webp"
 
 
 @app.get("/api/vehicle-models/export")
@@ -5209,7 +5234,13 @@ def export_vehicle_models(_admin: None = Depends(require_admin)):
     cur = conn.cursor()
 
     cur.execute(
-        f"SELECT {', '.join(VEHICLE_MODEL_EXPORT_COLUMNS)} FROM vehicle_models ORDER BY brand, model, year"
+        f"""
+        SELECT id, {', '.join(VEHICLE_MODEL_EXPORT_COLUMNS)},
+            (SELECT data FROM vehicle_model_images i WHERE i.vehicle_model_id = vehicle_models.id),
+            (SELECT data FROM vehicle_model_icons c WHERE c.vehicle_model_id = vehicle_models.id)
+        FROM vehicle_models
+        ORDER BY brand, model, year
+        """
     )
 
     rows = cur.fetchall()
@@ -5220,45 +5251,139 @@ def export_vehicle_models(_admin: None = Depends(require_admin)):
     out = io.StringIO()
     writer = csv.writer(out)
 
-    writer.writerow(VEHICLE_MODEL_EXPORT_COLUMNS)
+    writer.writerow([*VEHICLE_MODEL_EXPORT_COLUMNS, *VEHICLE_MODEL_FILE_COLUMNS.values()])
 
     turbo_index = VEHICLE_MODEL_EXPORT_COLUMNS.index("engine_turbo")
+    year_index = VEHICLE_MODEL_EXPORT_COLUMNS.index("year")
+    brand_index = VEHICLE_MODEL_EXPORT_COLUMNS.index("brand")
+    model_index = VEHICLE_MODEL_EXPORT_COLUMNS.index("model")
 
-    for row in rows:
-        writer.writerow([
-            "" if value is None
-            else ("yes" if value else "no") if index == turbo_index
-            else value
-            for index, value in enumerate(row)
-        ])
+    archive_bytes = io.BytesIO()
 
-    filename = f"logisim-vehicle-models-{local_now_naive():%Y-%m-%d}.csv"
+    #
+    # The pictures are WebP already - storing beats deflating them again.
+    #
+    with zipfile.ZipFile(archive_bytes, "w", zipfile.ZIP_STORED) as archive:
+
+        for row in rows:
+
+            vehicle_model_id = row[0]
+            values = row[1:1 + len(VEHICLE_MODEL_EXPORT_COLUMNS)]
+            pictures = {"image": row[-2], "icon": row[-1]}
+
+            file_cells = []
+
+            for kind, data in pictures.items():
+
+                if data is None:
+                    file_cells.append("")
+                    continue
+
+                name = f"{kind}s/" + vehicle_model_file_slug(
+                    vehicle_model_id, values[year_index], values[brand_index], values[model_index]
+                )
+
+                archive.writestr(name, bytes(data))
+                file_cells.append(name)
+
+            writer.writerow([
+                *(
+                    "" if value is None
+                    else ("yes" if value else "no") if index == turbo_index
+                    else value
+                    for index, value in enumerate(values)
+                ),
+                *file_cells
+            ])
+
+        archive.writestr(
+            zipfile.ZipInfo(VEHICLE_MODEL_EXPORT_CSV, date_time=local_now_naive().timetuple()[:6]),
+            out.getvalue().encode("utf-8"),
+            zipfile.ZIP_DEFLATED
+        )
+
+    filename = f"logisim-vehicle-models-{local_now_naive():%Y-%m-%d}.zip"
 
     return Response(
-        content=out.getvalue().encode("utf-8"),
-        media_type="text/csv; charset=utf-8",
+        content=archive_bytes.getvalue(),
+        media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
 
 
 #
-# Restores a vehicle model export (or any CSV with those columns). A row
-# matching an existing model's year + brand + model (case-insensitively)
-# updates that model in place instead of adding a duplicate, so restoring
-# on top of a catalog that already has some of them is safe - and existing
-# vehicles keep pointing at the same model row. Small enough (no geocoding)
-# to run inline rather than as a background job; each row commits on its
-# own so one bad row doesn't cost the rest.
+# An upload's CSV text and, for a ZIP, a reader for the pictures it
+# names (None for a plain CSV).
+#
+def read_vehicle_model_import(raw):
+
+    if not zipfile.is_zipfile(io.BytesIO(raw)):
+
+        try:
+            return raw.decode("utf-8-sig"), None
+        except UnicodeDecodeError:
+            raise HTTPException(status_code=400, detail="Choose a vehicle model export - a .zip, or a UTF-8 .csv")
+
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(raw))
+        names = archive.namelist()
+    except zipfile.BadZipFile:
+        raise HTTPException(status_code=400, detail="That ZIP file is damaged")
+
+    csv_names = [name for name in names if name.lower().endswith(".csv") and not name.startswith("__MACOSX/")]
+
+    if VEHICLE_MODEL_EXPORT_CSV in csv_names:
+        csv_name = VEHICLE_MODEL_EXPORT_CSV
+    elif len(csv_names) == 1:
+        csv_name = csv_names[0]
+    else:
+        raise HTTPException(status_code=400, detail=f"The ZIP needs one .csv of vehicle models ({VEHICLE_MODEL_EXPORT_CSV})")
+
+    if archive.getinfo(csv_name).file_size > VEHICLE_MODEL_IMPORT_CSV_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="The CSV inside that ZIP is too big")
+
+    try:
+        text = archive.read(csv_name).decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail=f"{csv_name} must be UTF-8 CSV text")
+
+    def read_picture(name):
+
+        try:
+            info = archive.getinfo(name)
+        except KeyError:
+            raise ValueError(f"{name} isn't in the ZIP")
+
+        if info.file_size > VEHICLE_IMAGE_MAX_BYTES:
+            raise ValueError(f"{name} is too big")
+
+        return archive.read(info)
+
+    return text, read_picture
+
+
+#
+# Restores a vehicle model export - the ZIP, or just a CSV with those
+# columns. A row matching an existing model's year + brand + model
+# (case-insensitively) updates that model in place instead of adding a
+# duplicate, so restoring on top of a catalog that already has some of them
+# is safe - and existing vehicles keep pointing at the same model row. A
+# ZIP's pictures and icons replace the model's; a row without one (or a
+# plain CSV) leaves the model's own alone. Small enough (no geocoding) to
+# run inline rather than as a background job; each row commits on its own
+# so one bad row doesn't cost the rest.
 #
 @app.post("/api/vehicle-models/upload")
 async def upload_vehicle_models(file: UploadFile = File(...), _admin: None = Depends(require_admin)):
 
-    raw = await file.read()
+    raw = await file.read(VEHICLE_MODEL_IMPORT_MAX_BYTES + 1)
 
-    try:
-        text = raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        raise HTTPException(status_code=400, detail="File must be UTF-8 CSV text")
+    if len(raw) > VEHICLE_MODEL_IMPORT_MAX_BYTES:
+        raise HTTPException(
+            status_code=413, detail=f"Imports can be at most {VEHICLE_MODEL_IMPORT_MAX_BYTES // (1024 * 1024)} MB"
+        )
+
+    text, read_picture = read_vehicle_model_import(raw)
 
     rows = list(csv.reader(io.StringIO(text)))
 
@@ -5266,14 +5391,17 @@ async def upload_vehicle_models(file: UploadFile = File(...), _admin: None = Dep
         raise HTTPException(status_code=400, detail="File is empty")
 
     header = [normalize_csv_header_cell(cell) for cell in rows[0]]
-    wanted = {normalize_csv_header_cell(column): column for column in VEHICLE_MODEL_EXPORT_COLUMNS}
+    wanted = {
+        normalize_csv_header_cell(column): column
+        for column in (*VEHICLE_MODEL_EXPORT_COLUMNS, *VEHICLE_MODEL_FILE_COLUMNS.values())
+    }
 
     #
-    # image and the spec columns are optional - an older export has no
-    # spec (engine and tire) columns, and restoring it leaves those specs as
-    # they are rather than blanking them.
+    # image, icon_front, the picture files and the spec columns are optional
+    # - an older export has no spec (engine and tire) columns, and restoring
+    # it leaves those specs as they are rather than blanking them.
     #
-    optional_columns = ("image", *SPEC_COLUMNS)
+    optional_columns = ("image", *SPEC_COLUMNS, "icon_front", *VEHICLE_MODEL_FILE_COLUMNS.values())
 
     missing = [column for key, column in wanted.items() if key not in header and column not in optional_columns]
 
@@ -5292,6 +5420,7 @@ async def upload_vehicle_models(file: UploadFile = File(...), _admin: None = Dep
 
     created = 0
     updated = 0
+    pictures_restored = 0
     errors = []
 
     for index, row in enumerate(rows[1:], start=2):
@@ -5313,6 +5442,7 @@ async def upload_vehicle_models(file: UploadFile = File(...), _admin: None = Dep
                 mpg=float(entry["mpg"]),
                 fuel_tank_gallons=float(entry["fuel_tank_gallons"]),
                 image=entry.get("image") or None,
+                icon_front=entry.get("icon_front", "").lower() or None,
                 **{
                     column: parse_engine_csv_value(column, entry.get(column, ""))
                     for column in spec_columns_present
@@ -5330,6 +5460,28 @@ async def upload_vehicle_models(file: UploadFile = File(...), _admin: None = Dep
             except HTTPException as e:
                 raise ValueError(e.detail)
 
+            #
+            # Read (and re-encoded, like any upload) before the row is
+            # saved, so a missing or broken file skips the whole row. A
+            # plain CSV (say, the export's own, edited) has no files to
+            # read, so its rows keep the pictures they have.
+            #
+            pictures = {}
+
+            for kind, column in VEHICLE_MODEL_FILE_COLUMNS.items():
+
+                name = entry.get(column)
+
+                if not name or read_picture is None:
+                    continue
+
+                try:
+                    pictures[kind] = normalize_vehicle_image(
+                        read_picture(name), VEHICLE_ICON_MAX_SIDE if kind == "icon" else None
+                    )
+                except HTTPException as e:
+                    raise ValueError(f"{name}: {e.detail}")
+
             spec_set_sql = "".join(f", {column} = %s" for column in spec_columns_present)
             spec_values = tuple(getattr(model, column) for column in spec_columns_present)
 
@@ -5342,7 +5494,8 @@ async def upload_vehicle_models(file: UploadFile = File(...), _admin: None = Dep
                 """
                 UPDATE vehicle_models
                 SET person_capacity = %s, cargo_capacity_cuft = %s, cost = %s,
-                    mpg = %s, fuel_tank_gallons = %s, image = %s""" + spec_set_sql + """
+                    mpg = %s, fuel_tank_gallons = %s, image = %s,
+                    icon_front = COALESCE(%s, icon_front)""" + spec_set_sql + """
                 WHERE id = (
                     SELECT id FROM vehicle_models
                     WHERE year = %s AND LOWER(brand) = LOWER(%s) AND LOWER(model) = LOWER(%s)
@@ -5351,25 +5504,36 @@ async def upload_vehicle_models(file: UploadFile = File(...), _admin: None = Dep
                 )
                 RETURNING id
                 """,
-                (*values, *spec_values, model.year, model.brand, model.model)
+                (*values, model.icon_front, *spec_values, model.year, model.brand, model.model)
             )
 
-            if cur.fetchone() is not None:
+            existing = cur.fetchone()
+
+            if existing is not None:
+                vehicle_model_id = existing[0]
                 updated += 1
             else:
                 cur.execute(
                     """
                     INSERT INTO vehicle_models
                     (year, brand, model, person_capacity, cargo_capacity_cuft, cost, mpg, fuel_tank_gallons, image,
-                     engine_liters, engine_cylinders, engine_turbo, fuel_type, transmission, tire_count)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     engine_liters, engine_cylinders, engine_turbo, fuel_type, transmission, tire_count, icon_front)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
                     """,
                     (
                         model.year, model.brand, model.model, *values,
-                        *(getattr(model, column) for column in SPEC_COLUMNS)
+                        *(getattr(model, column) for column in SPEC_COLUMNS),
+                        model.icon_front or "left"
                     )
                 )
+                vehicle_model_id = cur.fetchone()[0]
                 created += 1
+
+            for kind, data in pictures.items():
+                store_vehicle_model_picture(cur, kind, vehicle_model_id, data)
+
+            pictures_restored += len(pictures)
 
             conn.commit()
 
@@ -5382,7 +5546,7 @@ async def upload_vehicle_models(file: UploadFile = File(...), _admin: None = Dep
     cur.close()
     conn.close()
 
-    return {"created": created, "updated": updated, "errors": errors}
+    return {"created": created, "updated": updated, "pictures": pictures_restored, "errors": errors}
 
 
 @app.get("/api/vehicle-models")

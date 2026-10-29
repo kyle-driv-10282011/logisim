@@ -1011,8 +1011,13 @@ side panel since they don't all fit as a row:
   pictures are stored in Postgres (`vehicle_model_images`), re-encoded as
   WebP and fit to 800px, so they're in every database backup and go when
   their model does. An uploaded picture wins over a built-in `image`
-  filename. **Export CSV** and **Import CSV** carry the built-in filenames
-  only. The starter van can't be deleted or renamed.
+  filename. **Export (ZIP)** downloads `vehicle-models.csv` plus every
+  uploaded picture (`images/`) and map icon (`icons/`); the CSV's
+  `image_file` and `icon_file` columns name each model's files, and
+  `icon_front` travels too. **Import** takes that ZIP back, pictures
+  and icons included, or just a CSV, which leaves each model's pictures
+  as they are. Built-in pictures travel as their filename only, since
+  the files ship with the frontend. The starter van can't be deleted or renamed.
   The editor's **Engine** section records size (liters or cubic inches:
   typing in either fills the other), cylinders (3, 4, 5, 6, 8, 10 or 12),
   turbo, fuel type (gasoline or diesel) and transmission (manual or

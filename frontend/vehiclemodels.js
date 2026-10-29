@@ -1719,17 +1719,17 @@ document.addEventListener("keyup", (event) => {
 // ---------- Import ----------
 
 //
-// The other half of "Export CSV" (POST /api/vehicle-models/upload). Small
+// The other half of "Export (ZIP)" (POST /api/vehicle-models/upload). Small
 // enough to run inline on the backend, so the result comes straight back,
-// no job to poll. Only built-in image filenames travel in the CSV - an
-// uploaded picture stays with its model in the database.
+// no job to poll. The export's ZIP brings its pictures and map icons back
+// too; a plain CSV leaves each model's pictures as they are.
 //
 async function uploadVehicleModels() {
 
     const fileInput = document.getElementById("vehicle-model-file-input");
 
     if (!fileInput.files.length) {
-        setModelsResult("error", "Not imported - choose a vehicle model CSV first.");
+        setModelsResult("error", "Not imported - choose a vehicle model export (.zip or .csv) first.");
         return;
     }
 
@@ -1753,6 +1753,10 @@ async function uploadVehicleModels() {
     }
 
     const parts = [`${data.created} added`, `${data.updated} updated`];
+
+    if (data.pictures) {
+        parts.push(`${data.pictures} picture${data.pictures === 1 ? "" : "s"} / icon${data.pictures === 1 ? "" : "s"} restored`);
+    }
 
     if (data.errors.length) {
 
