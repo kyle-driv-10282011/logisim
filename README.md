@@ -206,7 +206,9 @@ small utility, enclosed and boat trailers.
 Pick a vehicle and **Hitch**. Every vehicle is in the list; the ones that
 can't hitch right now are greyed out with the reason. The vehicle has to be
 parked within 15 miles of the trailer and not out on a trip or a load, and
-it can pull one trailer at a time. A hitched trailer goes wherever the
+it can pull one trailer at a time. A vehicle that's only too far away can
+still be picked for **Drive here**, which sends it on a trip to the
+trailer's city; Hitch it once it's parked there. A hitched trailer goes wherever the
 vehicle goes. **Unhitch** leaves it where the vehicle is parked. **Sell**
 refunds what was paid.
 
@@ -1094,8 +1096,9 @@ All endpoints are on the `backend` service, reached through nginx at
 | `PUT /api/settings`             | Change `time_multiplier` and/or `auto_refuel_level`. Body: `{time_multiplier?, auto_refuel_level?}` — a multiplier change re-anchors the game clock at its current value so it speeds up/slows down rather than jumping, and is rejected (409) if any vehicle is currently in route; `auto_refuel_level` (0 to `auto_refuel_max_level`) can be changed any time |
 | `GET /api/market`               | The file's Marketplace, topped up first: each listing's `vehicle_model`, `mileage`, `condition`, `price`, `location`/`lat`/`lng`, `expires_game_time`, and `distance_miles` to its `nearest_vehicle`; plus `balance` — see [Marketplace](#marketplace) |
 | `POST /api/market/{id}/buy`     | Buy a listing: adds the vehicle in the seller's city (name server-generated, `"<year> <brand> <model> <n>"`) and charges the price. 409 if it's gone or unaffordable. A trailer listing (`kind: "trailer"`, with `trailer_model` and no `mileage`) adds a trailer there instead and returns `trailer_id` |
-| `GET /api/trailers`              | The file's trailers: `trailer_model`, where each one is, the vehicle pulling it, and `candidates` — every vehicle, with the `reason` it can't hitch it right now (null if it can) |
+| `GET /api/trailers`              | The file's trailers: `trailer_model`, where each one is, the vehicle pulling it, and `candidates` — every vehicle, with the `reason` it can't hitch it right now (null if it can) and `can_drive_to` (true when the only reason is distance) |
 | `POST /api/trailers/{id}/hitch`  | Body: `{vehicle_id}`. Hitch a parked trailer to a parked vehicle within 15 miles whose hitch fits and is rated for it. 409 with the reason otherwise |
+| `POST /api/trailers/{id}/drive-to` | Body: `{vehicle_id}`. Send a parked vehicle that could pull it to where it's parked. Same checks as hitching except distance; 409 if it's already within 15 miles. 202, returns a `job_id` to poll (`GET /api/jobs/{id}`) |
 | `POST /api/trailers/{id}/unhitch`| Leave it where its vehicle is parked. 409 while the vehicle's on a trip or load |
 | `POST /api/trailers/{id}/sell`   | Refund what was paid (`trailer_sale` in the ledger), unhitching it first if its vehicle is parked |
 | `GET /api/trailer-models`        | List the trailer models |
